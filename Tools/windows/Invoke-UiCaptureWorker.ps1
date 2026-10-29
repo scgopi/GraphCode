@@ -40,6 +40,7 @@ $runs = [Collections.Generic.List[object]]::new()
 $seedRuns = [Collections.Generic.List[object]]::new()
 $applicationRuns = [Collections.Generic.List[object]]::new()
 $realRestarts = [Collections.Generic.List[object]]::new()
+$actionSupplementReceipts = [Collections.Generic.List[object]]::new()
 $descendantIdentities = [Collections.Generic.List[object]]::new()
 $journalEntries = [Collections.Generic.List[object]]::new()
 $manifestPath = $null
@@ -1948,8 +1949,8 @@ function Invoke-CapMatchedTabSelection {
     }
 }
 
-function Read-CapMatchedPanes {
-    param($AppRun,[int]$ExpectedCount,[int]$FocusedIndex=-1)
+function Get-CapMatchedPaneElements {
+    param($AppRun,[int]$ExpectedCount)
     $null=Assert-CapRootProcess -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
     $rootElement=[Windows.Automation.AutomationElement]::FromHandle($AppRun.Window)
     $condition=[Windows.Automation.PropertyCondition]::new(
@@ -1964,6 +1965,12 @@ function Read-CapMatchedPanes {
         Assert-CapWorkerDeadline 'matched terminal provider publication';Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
     if ($panes.Count -ne $ExpectedCount) {throw "Matched panes expected $ExpectedCount bounded terminals; found=$($panes.Count)."}
+    return @($panes)
+}
+
+function Read-CapMatchedPanes {
+    param($AppRun,[int]$ExpectedCount,[int]$FocusedIndex=-1)
+    $panes=@(Get-CapMatchedPaneElements -AppRun $AppRun -ExpectedCount $ExpectedCount)
     if ($FocusedIndex -ge 0) {
         if ($FocusedIndex -ge $panes.Count) {throw 'Matched pane focus index is outside the owned topology.'}
         $panes[$FocusedIndex].SetFocus()
@@ -1979,6 +1986,332 @@ function Read-CapMatchedPanes {
             focused=$current.HasKeyboardFocus;bounds=@($current.BoundingRectangle.Left,$current.BoundingRectangle.Top,
                 $current.BoundingRectangle.Right,$current.BoundingRectangle.Bottom)}
     })
+}
+
+function Get-CapMatchedProviderTopology {
+    param($AppRun,$SeedRun)
+    $tree=@(Get-CapTreeForApp -AppRun $AppRun)
+    $zmxPath=ConvertTo-CapWorkerImagePath (Join-Path $root 'runtime\zmx.exe')
+    $providers=@(foreach ($candidate in $tree) {
+        if ($candidate.ExpectedImagePath -ine $zmxPath) {continue}
+        $verified=Assert-CapProcessIdentity -Identity $candidate
+        if ($verified.State -ceq 'Exited') {continue}
+        $arguments=@([CapNative]::CommandArguments($verified.Metadata.CommandLine))
+        [pscustomobject]@{
+            pid=[long]$candidate.Pid
+            creationFileTimeUtc=[long]$candidate.CreationFileTimeUtc
+            role=$candidate.Role
+            command=$(if ($arguments.Count -gt 1) {$arguments[1]} else {$null})
+            session=$(if ($arguments.Count -gt 2) {$arguments[2]} else {$null})
+            held=$true
+        }
+    })
+    return [pscustomobject]@{
+        seedSession=$SeedRun.SessionName
+        seedJobId=$SeedRun.JobId
+        mountedProviders=$providers
+        providerCount=[long]$providers.Count
+    }
+}
+
+function Invoke-CapMatchedTerminalInputChallenge {
+    param($AppRun,[int]$ExpectedPaneCount,[int]$FocusedIndex=0)
+    $panes=@(Get-CapMatchedPaneElements -AppRun $AppRun -ExpectedCount $ExpectedPaneCount)
+    if ($FocusedIndex -lt 0 -or $FocusedIndex -ge $panes.Count) {
+        throw 'Terminal input challenge focus index is outside the owned pane topology.'
+    }
+    $pane=$panes[$FocusedIndex]
+    $pane.SetFocus()
+    Start-Sleep -Milliseconds 100
+    if (-not [GraphCodeUiaGateState]::IsForegroundWindow($AppRun.Window) -or
+        -not $pane.Current.HasKeyboardFocus) {
+        throw 'Terminal input challenge requires the owned shell and pane focus.'
+    }
+    $pattern=[Windows.Automation.TextPattern]$pane.GetCurrentPattern(
+        [Windows.Automation.TextPattern]::Pattern)
+    $before=[string]$pattern.DocumentRange.GetText(-1)
+    $marker='GC_SUPPLEMENT_INPUT_OK'
+    $command="echo $marker"
+    $characters=[GraphCodeUiaGateState]::SendUnicodeText($command)
+    $enter=[GraphCodeUiaGateState]::SendKeyInput(0x0D,1)
+    if ($characters -ne $command.Length -or $enter -ne 1) {
+        throw 'Terminal input challenge native SendInput count differs.'
+    }
+    $after=$null;$occurrences=0
+    $deadline=[DateTime]::UtcNow.AddSeconds(5)
+    if ($deadline -gt $leaseDeadlineUtc.AddSeconds(-90)) {$deadline=$leaseDeadlineUtc.AddSeconds(-90)}
+    do {
+        $after=[string]$pattern.DocumentRange.GetText(-1)
+        $occurrences=[regex]::Matches($after,[regex]::Escape($marker)).Count
+        if ($occurrences -ge 2) {break}
+        Assert-CapWorkerDeadline 'terminal native input output';Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ($occurrences -lt 2) {
+        throw 'Terminal input challenge did not observe both the shell command and shell-produced output.'
+    }
+    return [pscustomobject]@{
+        marker=$marker
+        paneAutomationId=$pane.Current.AutomationId
+        paneNativeWindowHandle=[long]$pane.Current.NativeWindowHandle
+        focused=$true
+        foreground=$true
+        unicodeCharacters=[long]$characters
+        enterEvents=1L
+        markerOccurrences=[long]$occurrences
+        beforeTextLength=[long]$before.Length
+        afterTextLength=[long]$after.Length
+        evidence='NATIVE_SENDINPUT_TO_FOCUSED_LOCAL_CONSOLE_WITH_SHELL_OUTPUT'
+    }
+}
+
+function Invoke-CapMatchedTerminalSceneSupplement {
+    param($AppRun,[string]$Scene,$SeedRun,[int]$TotalTabs,[int]$SelectedTab,[string]$AgentTitle)
+    $receipt=[ordered]@{
+        scene=$Scene
+        imageBindingSha256=$null
+        actions=[Collections.Generic.List[object]]::new()
+        topologyBefore=$null
+        topologyAfter=$null
+        panes=$null
+        provider=$null
+        nativeInput=$null
+        actualFinalTabCloseResult=$null
+    }
+    $observeTabs={
+        param([int]$Total,[int]$Selected)
+        $rows=@(Read-CapMatchedRows -AppRun $AppRun)
+        return Get-CapMatchedTabObservation -Rows $rows -ExpectedProcessId $AppRun.Run.Identity.Pid `
+            -TotalTabs $Total -SelectedTab $Selected -AgentTitle $AgentTitle `
+            -SourceCommit $job.binaries.after.source `
+            -ExpectedDpi ([long]$job.captureContract.expectedWindowDpi) `
+            -DpiBase ([long]$job.captureContract.dpiBase)
+    }
+    $receipt.topologyBefore=& $observeTabs $TotalTabs $SelectedTab
+    switch ($Scene) {
+        's-tabs-backend-idle' {
+            $receipt.nativeInput=Invoke-CapMatchedTerminalInputChallenge -AppRun $AppRun -ExpectedPaneCount 1
+            $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-new-tab'
+            $TotalTabs=2;$SelectedTab=1
+            $receipt.actions.Add([pscustomobject]@{action='New Tab';result='MOUNTED_SELECTED_SHELL'})
+        }
+        's-tabs-goal-needs-you' {
+            $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-split-down'
+            $receipt.panes=@(Read-CapMatchedPanes -AppRun $AppRun -ExpectedCount 2 -FocusedIndex 1)
+            $receipt.actions.Add([pscustomobject]@{action='Split Down';paneCount=2;focusedPane=1})
+        }
+        's-tabs-two-agent-selected' {
+            $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-select-tab' -SubjectId '1' -Name 'Shell'
+            $alternate=& $observeTabs 2 1
+            $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-select-tab' -SubjectId '0' -Name $AgentTitle
+            $restored=& $observeTabs 2 0
+            $receipt.actions.Add([pscustomobject]@{action='Alternate tab selection';alternate=$alternate;restored=$restored})
+        }
+        's-tabs-two-shell-selected' {
+            $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-select-tab' -SubjectId '0' -Name 'Shell'
+            $alternate=& $observeTabs 2 0
+            $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-select-tab' -SubjectId '1' -Name 'Shell'
+            $restored=& $observeTabs 2 1
+            $receipt.actions.Add([pscustomobject]@{action='Alternate tab selection';alternate=$alternate;restored=$restored})
+        }
+        's-tabs-split-right-focused' {
+            $before=@(Read-CapMatchedPanes -AppRun $AppRun -ExpectedCount 2 -FocusedIndex 1)
+            $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-split-down'
+            $after=@(Read-CapMatchedPanes -AppRun $AppRun -ExpectedCount 3 -FocusedIndex 2)
+            $receipt.panes=$after
+            $receipt.actions.Add([pscustomobject]@{action='Split Right then Split Down';before=$before;after=$after})
+        }
+        's-tabs-many-first' {
+            $roundTrip=Invoke-CapMatchedTabSelection -AppRun $AppRun -TotalTabs 12 `
+                -SelectedTab 0 -TargetIndex 11 -AgentTitle $AgentTitle `
+                -SourceCommit $job.binaries.after.source `
+                -ExpectedDpi ([long]$job.captureContract.expectedWindowDpi) `
+                -DpiBase ([long]$job.captureContract.dpiBase)
+            $receipt.actions.Add([pscustomobject]@{action='Many-first overflow selection';receipt=$roundTrip})
+            $SelectedTab=11
+        }
+        's-tabs-overflow-last' {
+            $toFirst=Invoke-CapMatchedTabSelection -AppRun $AppRun -TotalTabs 12 `
+                -SelectedTab 11 -TargetIndex 0 -AgentTitle $AgentTitle `
+                -SourceCommit $job.binaries.after.source `
+                -ExpectedDpi ([long]$job.captureContract.expectedWindowDpi) `
+                -DpiBase ([long]$job.captureContract.dpiBase)
+            $back=Invoke-CapMatchedTabSelection -AppRun $AppRun -TotalTabs 12 `
+                -SelectedTab 0 -TargetIndex 11 -AgentTitle $AgentTitle `
+                -SourceCommit $job.binaries.after.source `
+                -ExpectedDpi ([long]$job.captureContract.expectedWindowDpi) `
+                -DpiBase ([long]$job.captureContract.dpiBase)
+            $receipt.actions.Add([pscustomobject]@{action='Overflow-last round trip';toFirst=$toFirst;back=$back})
+        }
+        's-tabs-hover-close' {
+            $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-close-tab' -SubjectId '1'
+            $TotalTabs=1;$SelectedTab=0
+            $receipt.actions.Add([pscustomobject]@{action='Per-tab hover close';closedIndex=1;remaining=1})
+        }
+        's-tabs-last-guard' {
+            $before=& $observeTabs 1 0
+            $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-close-tab' -SubjectId '0'
+            $after=& $observeTabs 1 0
+            $receipt.actualFinalTabCloseResult=[pscustomobject]@{
+                attempted=$true
+                result='REFUSED_TAB_RETAINED'
+                before=$before
+                after=$after
+            }
+        }
+    }
+    $receipt.topologyAfter=& $observeTabs $TotalTabs $SelectedTab
+    $receipt.provider=Get-CapMatchedProviderTopology -AppRun $AppRun -SeedRun $SeedRun
+    return [pscustomobject]$receipt
+}
+
+function Invoke-CapWireCompletionSupplement {
+    param([Parameter(Mandatory)][string]$StubDaemonPath)
+    $phase='wire-completion'
+    $roots=Initialize-CapPhaseRoot -PhaseRoot (Join-Path $runDirectory $phase)
+    $projectRoot=Join-Path $root 'fixtures\wire-project'
+    $null=New-Item -ItemType Directory -Path $projectRoot -Force
+    $sourceId='60000000-0000-4000-8000-000000000001'
+    $targetId='60000000-0000-4000-8000-000000000002'
+    $pipe="gc-wire-$([guid]::NewGuid().ToString('N'))"
+    $resultPath=Join-Path $roots.Peer 'stub-result.json'
+    $stub=$null;$app=$null;$stubCleanup=$null
+    try {
+        $stub=Start-CapManagedProcess -FilePath (Join-Path $PSHOME 'pwsh.exe') -ArgumentList @(
+            '-NoProfile','-File',$StubDaemonPath,
+            '-PipeName',$pipe,'-ResultPath',$resultPath,
+            '-NodeAId',$sourceId,'-NodeBId',$targetId,
+            '-NodeATitle','Wire source','-NodeBTitle','Wire target',
+            '-ApplyGraphCommands','-StubProjectPath',$projectRoot
+        ) -WorkingDirectory $roots.Peer -Role 'wire-supplement-stub'
+        $runs.Add($stub)
+        $app=Start-CapGraphCodeApp -Roots $roots -Phase $phase -PipeName $pipe -SessionPrefix 'wire-supplement'
+        $app | Add-Member -NotePropertyMembers @{
+            SActions=[Collections.Generic.List[object]]::new()
+            SObservation=$null
+        }
+        $null=Invoke-CapSceneAction -AppRun $app -Action 'open-project' -Name 'Stub project'
+        $null=Invoke-CapSceneAction -AppRun $app -Action 'actual-size'
+        $graph=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity `
+            -ExpectedProcessId $app.Run.Identity.Pid -Name 'Graph' -AutomationId 'graph'
+        $children=@(Get-CapDirectChildren -Parent $graph)
+        $sourceCardId=Get-CapMatchedAutomationId "project-card:$projectRoot`:$sourceId"
+        $targetCardId=Get-CapMatchedAutomationId "project-card:$projectRoot`:$targetId"
+        $sourceCard=@($children | Where-Object {
+            $_.Current.AutomationId -ceq $sourceCardId -and $_.Current.Name -ceq 'Wire source'})
+        $targetCard=@($children | Where-Object {
+            $_.Current.AutomationId -ceq $targetCardId -and $_.Current.Name -ceq 'Wire target'})
+        if ($sourceCard.Count -ne 1 -or $targetCard.Count -ne 1) {
+            throw 'Wire supplement did not expose its exact source and target cards.'
+        }
+        $wireIdentity="wire-node:$projectRoot`:$sourceId"
+        $wireId=Get-CapMatchedAutomationId $wireIdentity
+        $wire=@($children | Where-Object {
+            $_.Current.AutomationId -ceq $wireId -and $_.Current.Name -ceq 'Wire it up'})
+        if ($wire.Count -ne 1) {throw 'Wire supplement source omitted its exact Wire it up control.'}
+        $null=Invoke-CapSceneAction -AppRun $app -Action 'wire-node' -SubjectId $wireIdentity
+        $wireStatus=Wait-CapMatchedWireMode -AppRun $app `
+            -DeadlineUtc (Get-CapActionDeadline -WorkerDeadlineUtc $leaseDeadlineUtc)
+        $targetBounds=$targetCard[0].Current.BoundingRectangle
+        $targetX=[int](($targetBounds.Left+$targetBounds.Right)/2)
+        $targetY=[int](($targetBounds.Top+$targetBounds.Bottom)/2)
+        if (-not [GraphCodeUiaGateState]::PostPointerClickScreen($app.Window,$targetX,$targetY)) {
+            throw 'Wire supplement target click was rejected.'
+        }
+        $form=[IntPtr]::Zero
+        $deadline=[DateTime]::UtcNow.AddSeconds(5)
+        do {
+            $form=[GraphCodeUiaGateState]::FindTopLevel('GraphCodeNativeForm',[uint32]$app.Run.Identity.Pid)
+            if ($form -ne [IntPtr]::Zero) {break}
+            Assert-CapWorkerDeadline 'Wire completion native form';Start-Sleep -Milliseconds 100
+        } while ([DateTime]::UtcNow -lt $deadline)
+        if ($form -eq [IntPtr]::Zero) {throw 'Wire supplement target did not open the native edge form.'}
+        $formElement=[Windows.Automation.AutomationElement]::FromHandle($form)
+        $buttonCondition=[Windows.Automation.AndCondition]::new(
+            [Windows.Automation.PropertyCondition]::new(
+                [Windows.Automation.AutomationElement]::ControlTypeProperty,
+                [Windows.Automation.ControlType]::Button),
+            [Windows.Automation.PropertyCondition]::new(
+                [Windows.Automation.AutomationElement]::NameProperty,'Create'))
+        $create=$formElement.FindFirst([Windows.Automation.TreeScope]::Descendants,$buttonCondition)
+        if ($null -eq $create -or -not $create.Current.IsEnabled) {
+            throw 'Wire supplement native edge form omitted its enabled Create action.'
+        }
+        $create.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $stubResult=$null
+        $deadline=[DateTime]::UtcNow.AddSeconds(5)
+        do {
+            if (Test-Path -LiteralPath $resultPath) {
+                try {$stubResult=Get-Content $resultPath -Raw | ConvertFrom-Json -DateKind String}
+                catch [Management.Automation.RuntimeException] {$stubResult=$null}
+            }
+            if ($stubResult -and $stubResult.appliedEdgeCreates.Count -eq 1 -and
+                $stubResult.edges.Count -eq 1) {break}
+            Assert-CapWorkerDeadline 'Wire completion graph readback';Start-Sleep -Milliseconds 100
+        } while ([DateTime]::UtcNow -lt $deadline)
+        if (-not $stubResult -or $stubResult.appliedEdgeCreates.Count -ne 1 -or
+            $stubResult.edges.Count -ne 1) {
+            throw 'Wire supplement did not receive one applied edge and graph readback.'
+        }
+        $edge=$stubResult.edges[0]
+        if ($edge.from -cne $sourceId -or $edge.to -cne $targetId -or
+            $edge.kind -cne 'handoff' -or $edge.condition -cne 'always') {
+            throw 'Wire supplement created edge/spec differs from the native default form.'
+        }
+        $graph=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity `
+            -ExpectedProcessId $app.Run.Identity.Pid -Name 'Graph' -AutomationId 'graph'
+        $after=@(Get-CapDirectChildren -Parent $graph)
+        $sourceAfter=@($after | Where-Object {$_.Current.AutomationId -ceq $sourceCardId})
+        $targetAfter=@($after | Where-Object {$_.Current.AutomationId -ceq $targetCardId})
+        $wireAfter=@($after | Where-Object {$_.Current.AutomationId -ceq $wireId})
+        if ($sourceAfter.Count -ne 1 -or $targetAfter.Count -ne 1 -or $wireAfter.Count -ne 0) {
+            throw 'Wire supplement graph readback did not preserve cards and remove the source unwired control.'
+        }
+        $rootElement=[Windows.Automation.AutomationElement]::FromHandle($app.Window)
+        $status=$rootElement.FindFirst([Windows.Automation.TreeScope]::Descendants,
+            [Windows.Automation.PropertyCondition]::new(
+                [Windows.Automation.AutomationElement]::AutomationIdProperty,'status'))
+        if ($status -and $status.Current.ProcessId -ne $app.Run.Identity.Pid) {
+            throw 'Wire supplement status belongs to a foreign process.'
+        }
+        $receipt=[pscustomobject]@{
+            group='WireCompletion'
+            projectPath=$projectRoot
+            sourceNodeId=$sourceId
+            targetNodeId=$targetId
+            sourceCardAutomationId=$sourceCardId
+            targetCardAutomationId=$targetCardId
+            wireAutomationId=$wireId
+            armedStatus=$wireStatus.Current.Name
+            targetScreenPoint=@($targetX,$targetY)
+            edgeId=$edge.id
+            edgeSpec=[pscustomobject]@{
+                kind=$edge.kind;condition=$edge.condition
+                payloadTransform=$edge.payloadTransform
+                cycleGuard=$edge.cycleGuard
+                spawnTargetProjectPath=$edge.spawnTargetProjectPath
+            }
+            graphReadback=[pscustomobject]@{
+                edgeCount=[long]$stubResult.edges.Count
+                sourceCardPreserved=$sourceAfter[0].Current.AutomationId
+                targetCardPreserved=$targetAfter[0].Current.AutomationId
+                unwiredControlRemoved=$true
+                status=$(if ($status) {$status.Current.Name} else {$null})
+            }
+            requestIds=@($stubResult.appliedEdgeCreateRequests)
+            correlated=$stubResult.unansweredRequests.Count -eq 0
+        }
+        return $receipt
+    } finally {
+        if ($app) {Close-CapGraphCodeApp -AppRun $app}
+        if ($stub) {
+            $stubCleanup=Stop-CapManagedProcess -Identity $stub.Identity -TimeoutMilliseconds 5000
+            if (-not $stub.StdoutTask.Wait(2000) -or -not $stub.StderrTask.Wait(2000)) {
+                throw 'Wire supplement stub streams did not reach EOF.'
+            }
+            $stub.Identity.Process.Dispose()
+        }
+        if ($stubCleanup) {$cleanupReceipts.Add($stubCleanup)}
+    }
 }
 
 function Get-CapMatchedAttach {
@@ -2191,7 +2524,9 @@ function Invoke-CapMatchedScenes {
     param(
         [Parameter(Mandatory)][string]$Phase,
         [Parameter()][string[]]$SceneNames = @((Get-CapMatchedSceneNames)[0..16]),
-        [switch]$SkipRestart
+        [switch]$SkipRestart,
+        [switch]$ActionSupplement,
+        [hashtable]$ImageBindings = @{}
     )
     $allowed=@((Get-CapMatchedSceneNames)[0..16])
     if ($SceneNames.Count -lt 1 -or @($SceneNames | Sort-Object -Unique).Count -ne $SceneNames.Count -or
@@ -2210,7 +2545,7 @@ function Invoke-CapMatchedScenes {
         $roots=Initialize-CapPhaseRoot -PhaseRoot (Join-Path $runDirectory "phases\$Phase\$scene")
         $pipe="gc-s-$([guid]::NewGuid().ToString('N'))"
         $peer=Start-CapOfflinePeer -Roots $roots -PipeName $pipe -Phase "$Phase-$scene"
-        $app=$null;$seed=$null
+        $app=$null;$seed=$null;$supplementReceipt=$null
         try {
             $state=@($fixture.states | Where-Object scene -CEQ $scene)
             $workspace=$state.Count -eq 0
@@ -2447,16 +2782,41 @@ function Invoke-CapMatchedScenes {
                     chromeControls=$chromeControls
                     tabSelection=$tabSelection
                     hover=if ($scene -ceq 's-tabs-hover-close') {'POSTED_WM_MOUSEMOVE_NOT_PHYSICAL_POINTER'} else {'NOT_REQUESTED'}}
-                Save-CapSceneImage -AppRun $app -SceneName $scene -ZoomEvidence $null -Phase $Phase
+                if ($ActionSupplement) {
+                    if (-not $ImageBindings.ContainsKey($scene) -or
+                        [string]$ImageBindings[$scene] -cnotmatch '^[A-Fa-f0-9]{64}$') {
+                        throw "Terminal action supplement lacks an existing image binding for $scene."
+                    }
+                    $supplementReceipt=Invoke-CapMatchedTerminalSceneSupplement -AppRun $app `
+                        -Scene $scene -SeedRun $seed -TotalTabs $total -SelectedTab $selected -AgentTitle $title
+                    $supplementReceipt.imageBindingSha256=[string]$ImageBindings[$scene]
+                    $app.SObservation | Add-Member -NotePropertyName actionSupplement -NotePropertyValue $supplementReceipt
+                    $actionSupplementReceipts.Add($supplementReceipt)
+                } else {
+                    Save-CapSceneImage -AppRun $app -SceneName $scene -ZoomEvidence $null -Phase $Phase
+                }
             }
             Close-CapGraphCodeApp -AppRun $app -NormalExit
+            if ($supplementReceipt) {
+                $layoutFiles=@(Get-ChildItem -LiteralPath $roots.Local -Recurse -File -Filter '*.json' -ErrorAction SilentlyContinue |
+                    Sort-Object FullName | ForEach-Object {
+                        [pscustomobject]@{
+                            relativePath=[IO.Path]::GetRelativePath($roots.Local,$_.FullName)
+                            sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+                            length=[long]$_.Length
+                        }
+                    })
+                $supplementReceipt | Add-Member -NotePropertyName persistedLayoutFiles -NotePropertyValue $layoutFiles
+            }
         } finally {
             if ($app) {Close-CapGraphCodeApp -AppRun $app}
             if ($seed) {Close-CapOfflineSeed -SeedRun $seed}
             Close-CapPeer -PeerRun $peer -Label $pipe
         }
     }
-    if (-not $SkipRestart) {Invoke-CapMatchedRestartCapture -Phase $Phase -Fixture $fixture}
+    if (-not $SkipRestart -and -not $ActionSupplement) {
+        Invoke-CapMatchedRestartCapture -Phase $Phase -Fixture $fixture
+    }
 }
 
 function Set-CapMatchedTabHover {

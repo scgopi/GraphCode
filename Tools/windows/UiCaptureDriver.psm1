@@ -20,8 +20,26 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class GraphCodeUiaGateState {
+  [StructLayout(LayoutKind.Sequential)]
+  private struct Point { public int X, Y; }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct KeybdInput {
+    public ushort VirtualKey, ScanCode;
+    public uint Flags, Time;
+    public UIntPtr ExtraInfo;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct KeyInputRecord {
+    public uint Type;
+    public KeybdInput Key;
+    public uint Pad0, Pad1;
+  }
   [DllImport("user32.dll", SetLastError = true)]
   private static extern bool PostMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern bool ScreenToClient(IntPtr window, ref Point point);
+  [DllImport("user32.dll", SetLastError = true, EntryPoint = "SendInput")]
+  private static extern uint SendKeyInputs(uint count, KeyInputRecord[] inputs, int size);
   private delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
   [DllImport("user32.dll")]
   private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
@@ -54,6 +72,45 @@ public static class GraphCodeUiaGateState {
   }
   public static bool IsForegroundWindow(IntPtr window) {
     return window != IntPtr.Zero && GetForegroundWindow() == window;
+  }
+  public static bool PostPointerClickScreen(IntPtr window, int screenX, int screenY) {
+    var point = new Point { X = screenX, Y = screenY };
+    if (window == IntPtr.Zero || !ScreenToClient(window, ref point)) return false;
+    var packed = (IntPtr)((point.Y << 16) | (point.X & 0xffff));
+    return PostMessage(window, 0x0200, UIntPtr.Zero, packed) &&
+      PostMessage(window, 0x0201, (UIntPtr)1, packed) &&
+      PostMessage(window, 0x0202, UIntPtr.Zero, packed);
+  }
+  public static int SendUnicodeText(string text) {
+    if (String.IsNullOrEmpty(text)) return 0;
+    var inputs = new KeyInputRecord[text.Length * 2];
+    int offset = 0;
+    foreach (char character in text) {
+      inputs[offset++] = new KeyInputRecord {
+        Type = 1, Key = new KeybdInput { ScanCode = character, Flags = 4 }
+      };
+      inputs[offset++] = new KeyInputRecord {
+        Type = 1, Key = new KeybdInput { ScanCode = character, Flags = 6 }
+      };
+    }
+    uint sent = SendKeyInputs((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(KeyInputRecord)));
+    if (sent != inputs.Length) return 0;
+    return text.Length;
+  }
+  public static int SendKeyInput(ushort virtualKey, int count) {
+    if (count <= 0) return 0;
+    var inputs = new KeyInputRecord[count * 2];
+    for (int index = 0; index < count; index++) {
+      inputs[index * 2] = new KeyInputRecord {
+        Type = 1, Key = new KeybdInput { VirtualKey = virtualKey }
+      };
+      inputs[index * 2 + 1] = new KeyInputRecord {
+        Type = 1, Key = new KeybdInput { VirtualKey = virtualKey, Flags = 2 }
+      };
+    }
+    uint sent = SendKeyInputs((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(KeyInputRecord)));
+    if (sent != inputs.Length) return 0;
+    return count;
   }
   public static bool PostHover(IntPtr window, int x, int y) {
     return PostMessage(window, 0x0200, UIntPtr.Zero, (IntPtr)((y << 16) | (x & 0xffff)));
@@ -1030,7 +1087,8 @@ function Get-CapActionSpec {
     param(
         [Parameter(Mandatory)][ValidateSet('actual-size', 'open-project', 'overview-destination', 'open-loop', 'file-exit',
             'quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel',
-            'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-select-tab','workspace-close-tab',
+            'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-split-down',
+            'workspace-select-tab','workspace-close-tab',
             'wire-node','mark-entry','attention-action')][string]$Action,
         [string]$Name,
         [string]$SubjectId
@@ -1064,6 +1122,8 @@ function Get-CapActionSpec {
             AutomationIdPrefix=$null;Name='New Tab';CommandId=$null}}
         'workspace-split-right' {return [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId 'workspace-split-right:control')
             AutomationIdPrefix=$null;Name='Split Right';CommandId=$null}}
+        'workspace-split-down' {return [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId 'workspace-split-down:control')
+            AutomationIdPrefix=$null;Name='Split Down';CommandId=$null}}
         'workspace-select-tab' {
             if ($SubjectId -cnotmatch '^(?:[0-9]|1[01])$' -or [string]::IsNullOrWhiteSpace($Name)) {throw 'Matched tab selection requires its bounded index and actual name.'}
             return [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId "workspace-tab:$SubjectId")
@@ -1789,7 +1849,8 @@ function Invoke-CapAction {
     if ($Action -in @('reply', 'reclaim', 'keep')) { throw "Mutating graph action '$Action' is prohibited by the capture contract." }
     if ($Action -notin @('actual-size', 'open-project', 'overview-destination', 'open-loop', 'file-exit',
         'quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel',
-        'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-select-tab','workspace-close-tab',
+        'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-split-down',
+        'workspace-select-tab','workspace-close-tab',
         'wire-node','mark-entry','attention-action')) {
         throw "Unsupported capture action '$Action'."
     }
@@ -1830,7 +1891,8 @@ function Invoke-CapAction {
     $null = Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity -WindowProcessResolver $WindowProcessResolver
     $null = Assert-CapUiaProcessIds -ExpectedProcessId $ProcessIdentity.Pid -ObservedProcessIds @([int]$current.ProcessId)
     if ($Action -in @('quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel',
-        'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-select-tab','workspace-close-tab',
+        'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-split-down',
+        'workspace-select-tab','workspace-close-tab',
         'wire-node','mark-entry','attention-action')) {
         if (-not $current.IsEnabled) { throw 'D action target is disabled.' }
         if ($current.ControlType -ne [System.Windows.Automation.ControlType]::Button -and
