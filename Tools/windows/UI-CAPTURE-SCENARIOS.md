@@ -121,6 +121,9 @@ production startup refusal before launch, and initial/placed identity guard
 drift with modeled metrics. Its accepted startup intercepts the launcher without
 starting a process; it is not native-window evidence. ValidationRunner requires
 all 57 with zero skips, alongside the 18 import and unchanged 182/185 baseline.
+The W1 targeting repair expands that window-binding suite to **62** contracts:
+five additional startup refusals require an explicit nonnull, source/hash-bound
+source/target plan before either the stub or app can launch.
 
 `Tests\ActionTopologyImport.Tests.ps1` adds **16 separately counted contracts**
 for production import, lexical top-level scope, exact topology copies, layout/
@@ -130,6 +133,54 @@ inventories, and cleanup/idempotence with modeled launcher output. The 18 import
 contracts also exercise all five qualified topology/seed preparation paths
 through the unmodified production entry dry run. ValidationRunner requires all
 16 with zero skips without replacing the existing suites or baseline cases.
+
+### W1 target selection and native form observation
+
+The prepared action plan includes `wireTargetBinding` for WireCompletion and
+FinalBoundedActions. It binds the owned project path, exact source and target
+UUIDs and stable UIA IDs, source-derived title-band geometry, and hashes of
+GraphCanvas, DesignTokens, NativeForms and SheetFramework. Unknown geometry
+refuses; there is no generic midpoint or offset fallback. After arming Wire,
+the worker reacquires immutable owned card/control observations twice, checks
+the exact armed status and source-bound window metrics, and refuses identity,
+runtime-ID, bounds, scale, or overlap drift. The selected point is inside the
+title band above the source-defined inline actions, not the card midpoint.
+
+The physical screen-to-client conversion and posted mouse-message dispatch
+enter per-monitor-v2 awareness and restore the caller's context in `finally`.
+W1 requires the native recipient to equal the held app's intended root HWND.
+The intent/result trace records source/target binding, safe bounds, screen and
+client points, packed LPARAM, recipient PID/HWND, foreground HWND, DPI context,
+and individual message-post results. These are **posted window messages**, not
+physical cursor movement or a W6 hover result.
+
+Native modal observation now enumerates the held process's window hierarchy.
+It requires exactly one visible GraphCodeSheetHost owned by the app root and
+one visible GraphCodeNativeForm descendant through the viewport. The Create
+button belongs to the sheet footer, so UIA observation/invocation uses that
+owned host rather than the child content. The trace retains pre/post hierarchy
+censuses and observed modal controls, including on timeout. Missing hosts or
+not-yet-created content are polled within the clipped action deadline;
+ambiguity, foreign identity, replacement, or native query errors refuse.
+The original action exception is retained if cleanup also fails; launcher EOF
+is never relabeled target-private pipe EOF.
+
+`Tests\WireTargeting.Tests.ps1` adds **56 separately counted contracts**, required
+by ValidationRunner with zero skips. They exercise the actual shared production
+target/oracle/stability/dispatch helpers with modeled negative cases and a
+harmless native owned popup/child fixture. The native fixture checks actual
+PMv2 conversion, message acceptance and awareness restoration on the current
+desktop; it is not GraphCode/provider or product-action evidence. Dispatch
+failure cases inject rejected native-post results into the same dispatch loop.
+The preserved legacy behavioral run demonstrates the top-level-only child miss
+and midpoint/Mark collision separately from passing results.
+
+The production `-DryRun` also validates `wireTargetBinding` before launching its
+harmless child and records `wireAlgorithmPreflight`, which exercises the shared
+target and descendant-oracle algorithms with an explicitly labeled **model
+fixture**. It does not create native fixture windows or validate product
+behavior. Old plans lacking the target binding must be prepared again; no
+historical failed action is retried or reconstructed by this repair.
 
 ## Live transition rehearsal
 

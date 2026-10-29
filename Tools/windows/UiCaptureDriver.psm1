@@ -80,12 +80,8 @@ public static class GraphCodeUiaGateState {
     return window != IntPtr.Zero && GetForegroundWindow() == window;
   }
   public static bool PostPointerClickScreen(IntPtr window, int screenX, int screenY) {
-    var point = new Point { X = screenX, Y = screenY };
-    if (window == IntPtr.Zero || !ScreenToClient(window, ref point)) return false;
-    var packed = (IntPtr)((point.Y << 16) | (point.X & 0xffff));
-    return PostMessage(window, 0x0200, UIntPtr.Zero, packed) &&
-      PostMessage(window, 0x0201, (UIntPtr)1, packed) &&
-      PostMessage(window, 0x0202, UIntPtr.Zero, packed);
+    CapNative.PostPointerClickScreen(window, screenX, screenY, false);
+    return true;
   }
   public static long[] MovePointerScreen(int screenX, int screenY) {
     if (!SetCursorPos(screenX, screenY)) return new long[0];
@@ -132,9 +128,6 @@ public static class GraphCodeUiaGateState {
   }
 }
 '@
-if (-not ('GraphCodeUiaGateState' -as [type])) {
-    Add-Type -TypeDefinition $helperSource
-}
 
 $nativeSource = @'
 using System;
@@ -167,6 +160,22 @@ public sealed class CapCaptureResult {
   public int SampledColors { get; set; }
   public int NonMagentaSamples { get; set; }
   public uint Dpi { get; set; }
+}
+
+public sealed class CapWindowNode {
+  public long Handle, Parent, Owner;
+  public int ProcessId;
+  public string ClassName, Name;
+  public bool Visible, Enabled;
+  public int[] Bounds;
+}
+
+public sealed class CapPointerReceipt {
+  public long Window, Recipient, Foreground, PackedLParam, CursorWindow;
+  public int ProcessId, RecipientProcessId, ScreenX, ScreenY, ClientX, ClientY, CursorX, CursorY;
+  public long DpiContext;
+  public bool MovePosted, DownPosted, UpPosted;
+  public string Delivery = "POSTED_WINDOW_MESSAGES_NOT_PHYSICAL_POINTER";
 }
 
 public static class CapNative {
@@ -236,6 +245,23 @@ public static class CapNative {
   private static extern bool GetMonitorInfo(IntPtr monitor, ref NativeMonitorInfo info);
   [DllImport("user32.dll", SetLastError=true)]
   private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+  [DllImport("user32.dll")] private static extern IntPtr GetThreadDpiAwarenessContext();
+  [DllImport("user32.dll", SetLastError=true)] private static extern bool EnumWindows(WindowCallback callback, IntPtr value);
+  [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr parent, WindowCallback callback, IntPtr value);
+  private delegate bool WindowCallback(IntPtr window, IntPtr value);
+  [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+  [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint command);
+  [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll")] private static extern bool IsWindowEnabled(IntPtr window);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder name, int size);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  private static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, UIntPtr count,
+    StringBuilder text, uint flags, uint timeout, out UIntPtr result);
+  [DllImport("user32.dll", SetLastError=true)] private static extern bool ScreenToClient(IntPtr window, ref NativePoint point);
+  [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(NativePoint point);
+  [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll", SetLastError=true)] private static extern bool GetCursorPos(out NativePoint point);
+  [DllImport("user32.dll", SetLastError=true)] private static extern bool PostMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
   private static extern bool WaitNamedPipeW(string name, uint timeout);
 
@@ -246,9 +272,127 @@ public static class CapNative {
     return previous;
   }
 
-  private static void RestoreDpiAwareness(IntPtr previous) {
-    if (SetThreadDpiAwarenessContext(previous) == IntPtr.Zero)
-      throw new InvalidOperationException("Cannot restore the capture thread DPI awareness: " + Marshal.GetLastWin32Error());
+  private static void RestoreDpiAwareness(IntPtr previous, Exception primary = null) {
+    if (SetThreadDpiAwarenessContext(previous) == IntPtr.Zero) {
+      var error = new InvalidOperationException("Cannot restore the capture thread DPI awareness: " + Marshal.GetLastWin32Error());
+      if (primary != null) throw new AggregateException("Native operation and DPI restoration failed.", primary, error);
+      throw error;
+    }
+  }
+
+  public static CapWindowNode[] WindowHierarchy(int expectedPid) {
+    var rows = new System.Collections.Generic.List<CapWindowNode>();
+    IntPtr previous = EnterPerMonitorV2();
+    Exception primary = null;
+    try {
+      Exception failure = null;
+      var clock = System.Diagnostics.Stopwatch.StartNew();
+      WindowCallback record = delegate(IntPtr window, IntPtr value) {
+       try {
+        if (clock.ElapsedMilliseconds > 2000) throw new InvalidOperationException("Owned window census exceeded 2000ms.");
+        uint pid;
+        if (GetWindowThreadProcessId(window, out pid) == 0)
+          throw new InvalidOperationException("Window census process query failed.");
+        if (pid != expectedPid) return true;
+        var cls = new StringBuilder(256);
+        var name = new StringBuilder(512);
+        if (GetClassName(window, cls, cls.Capacity) == 0)
+          throw new InvalidOperationException("Window census class query failed.");
+        UIntPtr textResult;
+        if (SendMessageTimeoutW(window, 0x000D, (UIntPtr)name.Capacity, name, 2, 50, out textResult) == IntPtr.Zero)
+          throw new InvalidOperationException("Window census text query failed/timed out for HWND " + window);
+        NativeRect bounds;
+        if (!GetWindowRect(window, out bounds))
+          throw new InvalidOperationException("Window census bounds query failed.");
+        rows.Add(new CapWindowNode { Handle=window.ToInt64(), Parent=GetAncestor(window, 1).ToInt64(),
+          Owner=GetWindow(window, 4).ToInt64(), ProcessId=(int)pid, ClassName=cls.ToString(), Name=name.ToString(),
+          Visible=IsWindowVisible(window), Enabled=IsWindowEnabled(window),
+          Bounds=new int[] {bounds.Left,bounds.Top,bounds.Right,bounds.Bottom} });
+        return true;
+       } catch (Exception error) { failure=error; return false; }
+      };
+      bool complete = EnumWindows(delegate(IntPtr window, IntPtr value) {
+        if (failure != null) return false;
+        uint pid;
+        GetWindowThreadProcessId(window, out pid);
+        if (pid == expectedPid) {
+          if (!record(window, value)) return false;
+          EnumChildWindows(window, record, value);
+        }
+        return failure == null;
+      }, IntPtr.Zero);
+      if (failure != null) {
+        failure.Data["ObservedRows"]=rows.ToArray();
+        throw failure;
+      }
+      if (!complete) throw new InvalidOperationException("Owned EnumWindows failed: " + Marshal.GetLastWin32Error());
+      return rows.ToArray();
+    } catch (Exception error) { primary=error; throw; }
+    finally { RestoreDpiAwareness(previous, primary); }
+  }
+
+  public static int[] ConvertPointerScreen(IntPtr window, int screenX, int screenY) {
+    IntPtr previous=EnterPerMonitorV2();
+    Exception primary=null;
+    try {
+      if (screenX < short.MinValue || screenX > short.MaxValue || screenY < short.MinValue || screenY > short.MaxValue)
+        throw new InvalidOperationException("Pointer screen coordinates exceed signed native conversion range.");
+      var point=new NativePoint { X=screenX, Y=screenY };
+      if (!ScreenToClient(window, ref point))
+        throw new InvalidOperationException("ScreenToClient failed: " + Marshal.GetLastWin32Error() +
+          "; HWND=" + window + "; screen=" + screenX + "," + screenY + "; DPI=PMv2");
+      if (point.X < short.MinValue || point.X > short.MaxValue || point.Y < short.MinValue || point.Y > short.MaxValue)
+        throw new InvalidOperationException("Pointer client coordinates exceed signed LPARAM range.");
+      return new int[] { point.X, point.Y };
+    } catch (Exception error) { primary=error; throw; }
+    finally { RestoreDpiAwareness(previous, primary); }
+  }
+
+  public static CapPointerReceipt PostPointerClickScreen(IntPtr window, int screenX, int screenY, bool requireRecipient = true) {
+    IntPtr previous = EnterPerMonitorV2();
+    Exception primary=null;
+    try {
+      NativePoint cursor;
+      if (!GetCursorPos(out cursor))
+        throw new InvalidOperationException("Pointer cursor observation failed: " + Marshal.GetLastWin32Error());
+      var point = new NativePoint { X=screenX, Y=screenY };
+      var recipient = WindowFromPoint(point);
+      uint pid=0, recipientPid=0;
+      uint intendedThread = window == IntPtr.Zero ? 0 : GetWindowThreadProcessId(window, out pid);
+      uint recipientThread = recipient == IntPtr.Zero ? 0 : GetWindowThreadProcessId(recipient, out recipientPid);
+      if (intendedThread == 0 ||
+          (requireRecipient && (recipient != window || recipientThread == 0 || recipientPid != pid)))
+        throw new InvalidOperationException("Pointer recipient differs from intended owned HWND; intended=" +
+          window + "; intendedPID=" + pid + "; recipient=" + recipient + "; recipientPID=" + recipientPid +
+          "; screen=" + screenX + "," + screenY + "; foreground=" + GetForegroundWindow() +
+          "; cursor=" + cursor.X + "," + cursor.Y + "; cursorWindow=" + WindowFromPoint(cursor) + "; DPI=PMv2.");
+      var client=ConvertPointerScreen(window, screenX, screenY);
+      point.X=client[0]; point.Y=client[1];
+      long packed = (point.Y & 0xffff) << 16 | (point.X & 0xffff);
+      var result = new CapPointerReceipt { Window=window.ToInt64(), Recipient=recipient.ToInt64(),
+        Foreground=GetForegroundWindow().ToInt64(), ProcessId=(int)pid, RecipientProcessId=(int)recipientPid,
+        ScreenX=screenX, ScreenY=screenY, ClientX=point.X, ClientY=point.Y, PackedLParam=packed,
+        DpiContext=GetThreadDpiAwarenessContext().ToInt64(), CursorX=cursor.X, CursorY=cursor.Y,
+        CursorWindow=WindowFromPoint(cursor).ToInt64() };
+      DispatchPointerMessages(result, delegate(uint message, uint keys, long position) {
+        return PostMessage(window, message, (UIntPtr)keys, new IntPtr(position));
+      });
+      return result;
+    } catch (Exception error) { primary=error; throw; }
+    finally { RestoreDpiAwareness(previous, primary); }
+  }
+
+  public static void DispatchPointerMessages(CapPointerReceipt result, Func<uint,uint,long,bool> poster) {
+      result.MovePosted = poster(0x0200, 0, result.PackedLParam);
+      if (result.MovePosted) result.DownPosted = poster(0x0201, 1, result.PackedLParam);
+      if (result.DownPosted) result.UpPosted = poster(0x0202, 0, result.PackedLParam);
+      if (!result.MovePosted || !result.DownPosted || !result.UpPosted)
+        throw new InvalidOperationException("Native pointer dispatch failed: " +
+          Marshal.GetLastWin32Error() + "; HWND=" + result.Window + "; screen=" + result.ScreenX + "," + result.ScreenY +
+          "; client=" + result.ClientX + "," + result.ClientY + "; LPARAM=" + result.PackedLParam + "; move/down/up=" +
+          result.MovePosted + "/" + result.DownPosted + "/" + result.UpPosted +
+          "; recipient=" + result.Recipient + "; foreground=" + result.Foreground + "; DPI=" + result.DpiContext +
+          "; cursor=" + result.CursorX + "," + result.CursorY + "; cursorWindow=" + result.CursorWindow);
   }
 
   private static long FileTime(NativeFileTime value) {
@@ -496,7 +640,7 @@ public static class CapNative {
 '@
 
 if (-not ('CapNative' -as [type])) {
-    Add-Type -TypeDefinition $nativeSource -ReferencedAssemblies @(
+    Add-Type -TypeDefinition ($nativeSource + [regex]::Replace($helperSource,'(?m)^using .*;\r?$','')) -ReferencedAssemblies @(
         [System.Drawing.Bitmap].Assembly.Location,
         [System.Drawing.Graphics].Assembly.Location,
         [System.Drawing.Color].Assembly.Location,
@@ -1750,6 +1894,190 @@ function Find-CapAutomationElement {
         }
         throw
     }
+}
+
+function Get-CapWireTargetBinding {
+    param([Parameter(Mandatory)][string]$Repository,[Parameter(Mandatory)][string]$OwnedRoot)
+    $sources=[ordered]@{}
+    foreach ($file in @('GraphCanvas.zig','DesignTokens.zig','NativeForms.zig','SheetFramework.zig')) {
+        $path=Join-Path $Repository "graphcode-windows\src\$file"
+        $sources[$file]=[IO.File]::ReadAllText($path)
+    }
+    $canvas=$sources['GraphCanvas.zig']
+    $unwired=[regex]::Match($canvas,'(?s)fn unwiredActionBoundsForZoom\(.*?\n\}')
+    $numbers=@([regex]::Matches($unwired.Value,'scaledValue\((\d+), zoom\)') |
+        ForEach-Object {[int]$_.Groups[1].Value})
+    $width=[regex]::Match($sources['DesignTokens.zig'],'loop_card_width: i32 = (\d+);')
+    $height=[regex]::Match($sources['DesignTokens.zig'],'loop_card_height: i32 = (\d+);')
+    if (($numbers -join ',') -cne '11,31,84,51,90,31,176,51' -or
+        $width.Groups[1].Value -cne '250' -or $height.Groups[1].Value -cne '96' -or
+        $sources['NativeForms.zig'] -notmatch 'c\.WS_CHILD \| c\.WS_VISIBLE \| c\.WS_CLIPCHILDREN' -or
+        $sources['NativeForms.zig'] -notmatch 'sheet\.viewport,' -or
+        $sources['NativeForms.zig'] -notmatch 'const class_name = .*"GraphCodeNativeForm"' -or
+        $sources['SheetFramework.zig'] -notmatch 'const host_class = .*"GraphCodeSheetHost"') {
+        throw 'Wire target source geometry or sheet hierarchy changed; no guessed fallback.'
+    }
+    $project=Join-Path ([IO.Path]::GetFullPath($OwnedRoot).TrimEnd('\')) 'fixtures\wire-project'
+    $source='60000000-0000-4000-8000-000000000001'
+    $target='60000000-0000-4000-8000-000000000002'
+    return [pscustomobject]@{
+        schemaVersion=1L;scene='s-goal-unwired-unselected';phase='wire-completion'
+        projectPath=$project;sourceNodeId=$source;targetNodeId=$target
+        sourceCardId=(Get-CapMatchedAutomationId "project-card:$project`:$source")
+        targetCardId=(Get-CapMatchedAutomationId "project-card:$project`:$target")
+        wireIdentity="wire-node:$project`:$source"
+        wireId=(Get-CapMatchedAutomationId "wire-node:$project`:$source")
+        sourceName='Wire source';targetName='Wire target'
+        cardWH=@(250,96)
+        # The title band ends before the first source-defined inline action.
+        safeLogicalBounds=@($numbers[0],0,$numbers[6],$numbers[1])
+        sheetClass='GraphCodeSheetHost';contentClass='GraphCodeNativeForm'
+        sourceHashes=[pscustomobject]([ordered]@{
+            canvas=(Get-FileHash (Join-Path $Repository 'graphcode-windows\src\GraphCanvas.zig')).Hash
+            tokens=(Get-FileHash (Join-Path $Repository 'graphcode-windows\src\DesignTokens.zig')).Hash
+            forms=(Get-FileHash (Join-Path $Repository 'graphcode-windows\src\NativeForms.zig')).Hash
+            sheets=(Get-FileHash (Join-Path $Repository 'graphcode-windows\src\SheetFramework.zig')).Hash
+        })
+    }
+}
+
+function Assert-CapWireTargetBinding {
+    param([AllowNull()]$Binding,[Parameter(Mandatory)][string]$Repository,
+        [Parameter(Mandatory)][string]$OwnedRoot)
+    $expected=Get-CapWireTargetBinding -Repository $Repository -OwnedRoot $OwnedRoot
+    if ($null -eq $Binding -or -not [Text.Json.Nodes.JsonNode]::DeepEquals(
+        [Text.Json.Nodes.JsonNode]::Parse(($Binding|ConvertTo-Json -Depth 20 -Compress)),
+        [Text.Json.Nodes.JsonNode]::Parse(($expected|ConvertTo-Json -Depth 20 -Compress)))) {
+        throw 'Wire planned source/target binding differs or is missing.'
+    }
+    return $Binding
+}
+
+function Get-CapWireTargetObservation {
+    param([Parameter(Mandatory)]$Binding,[Parameter(Mandatory)][object[]]$Rows,
+        [Parameter(Mandatory)][int]$ExpectedProcessId,[Parameter(Mandatory)][uint32]$Dpi)
+    $null=Assert-CapUiaProcessIds -ExpectedProcessId $ExpectedProcessId `
+        -ObservedProcessIds @($Rows|ForEach-Object {[int]$_.ProcessId})
+    $source=@($Rows|Where-Object AutomationId -CEQ $Binding.sourceCardId)
+    $target=@($Rows|Where-Object AutomationId -CEQ $Binding.targetCardId)
+    $wire=@($Rows|Where-Object AutomationId -CEQ $Binding.wireId)
+    $status=@($Rows|Where-Object AutomationId -CEQ 'status')
+    if ($source.Count -ne 1 -or $target.Count -ne 1 -or $wire.Count -ne 1 -or
+        $source[0].Name -cne $Binding.sourceName -or $target[0].Name -cne $Binding.targetName -or
+        $wire[0].Name -cne 'Wire it up' -or $status.Count -ne 1 -or
+        $status[0].Name -cne 'Choose a target loop to wire this entry') {
+        throw 'Wire source/target identity or active Wire mode differs.'
+    }
+    $scale=$Dpi/96.0
+    foreach ($card in @($source[0],$target[0])) {
+        $b=@($card.Bounds)
+        if ($card.IsOffscreen -or -not $card.IsEnabled -or $b.Count -ne 4 -or
+            @($b|Where-Object {-not [double]::IsFinite($_)}).Count -ne 0 -or
+            [Math]::Abs(($b[2]-$b[0])-$Binding.cardWH[0]*$scale) -gt 1 -or
+            [Math]::Abs(($b[3]-$b[1])-$Binding.cardWH[1]*$scale) -gt 1) {
+            throw 'Wire card bounds/scale are stale or invalid.'
+        }
+    }
+    $bounds=@($target[0].Bounds)
+    $safe=@(
+        ($bounds[0]+$Binding.safeLogicalBounds[0]*$scale),
+        ($bounds[1]+$Binding.safeLogicalBounds[1]*$scale),
+        ($bounds[0]+$Binding.safeLogicalBounds[2]*$scale),
+        ($bounds[1]+$Binding.safeLogicalBounds[3]*$scale))
+    $point=@([int][Math]::Floor(($safe[0]+$safe[2])/2),[int][Math]::Floor(($safe[1]+$safe[3])/2))
+    foreach ($row in $Rows) {
+        if ($row.AutomationId -ceq $Binding.targetCardId -or $row.AutomationId -cin @('graph','status')) {continue}
+        $b=@($row.Bounds)
+        if (-not $row.IsOffscreen -and $b.Count -eq 4 -and $point[0] -ge $b[0] -and
+            $point[0] -lt $b[2] -and $point[1] -ge $b[1] -and $point[1] -lt $b[3]) {
+            throw "Unsafe wire target point overlaps another card/control: $($row.AutomationId)"
+        }
+    }
+    if ($point[0] -le $bounds[0] -or $point[0] -ge $bounds[2] -or
+        $point[1] -le $bounds[1] -or $point[1] -ge $bounds[3]) {throw 'Unsafe wire target point outside card.'}
+    return [pscustomobject]@{binding=$Binding;source=$source[0];target=$target[0]
+        mode=$status[0].Name;safeBounds=$safe;screenPoint=$point;dpi=$Dpi}
+}
+
+function Resolve-CapOwnedSheet {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rows,
+        [Parameter(Mandatory)][long]$RootHandle,[Parameter(Mandatory)][int]$ExpectedProcessId,
+        [string]$SheetClass='GraphCodeSheetHost',[string]$ContentClass='GraphCodeNativeForm')
+    $null=Assert-CapUiaProcessIds -ExpectedProcessId $ExpectedProcessId `
+        -ObservedProcessIds @($Rows|ForEach-Object {[int]$_.ProcessId})
+    $hosts=@($Rows|Where-Object {$_.ClassName -ceq $SheetClass -and $_.Owner -eq $RootHandle -and $_.Visible})
+    if ($hosts.Count -eq 0) {return $null}
+    if ($hosts.Count -ne 1) {throw 'Ambiguous owned sheet hosts.'}
+    $hostRow=$hosts[0]
+    $contents=@(foreach ($row in $Rows) {
+        if ($row.ClassName -cne $ContentClass -or -not $row.Visible) {continue}
+        $parent=[long]$row.Parent
+        $seen=[Collections.Generic.HashSet[long]]::new()
+        while ($parent -ne 0 -and $parent -ne $hostRow.Handle) {
+            if (-not $seen.Add($parent)) {throw 'Cyclic sheet hierarchy.'}
+            $parents=@($Rows|Where-Object Handle -EQ $parent)
+            if ($parents.Count -ne 1) {throw 'Missing or ambiguous sheet ancestor.'}
+            $parent=[long]$parents[0].Parent
+        }
+        if ($parent -eq $hostRow.Handle) {$row}
+    })
+    if ($contents.Count -eq 0) {return $null}
+    if ($contents.Count -ne 1) {throw 'Missing or ambiguous owned sheet child content.'}
+    return [pscustomobject]@{host=$hostRow;content=$contents[0]}
+}
+
+function Assert-CapWireTargetStable {
+    param([Parameter(Mandatory)]$First,[Parameter(Mandatory)]$Second,
+        [Parameter(Mandatory)][int[]]$RootBefore,[Parameter(Mandatory)][int[]]$RootAfter)
+    if ($RootBefore.Count -eq 0 -or ($RootBefore -join ',') -cne ($RootAfter -join ',') -or
+        ($First|ConvertTo-Json -Depth 20 -Compress) -cne ($Second|ConvertTo-Json -Depth 20 -Compress)) {
+        throw 'Wire target element/root identity or bounds drifted before dispatch.'
+    }
+}
+
+function Get-CapWireAlgorithmPreflight {
+    param([Parameter(Mandatory)]$Binding,[Parameter(Mandatory)][int]$ExpectedProcessId)
+    $rows=@(foreach ($spec in @(
+        @($Binding.sourceCardId,$Binding.sourceName,@(0,0,250,96)),
+        @($Binding.targetCardId,$Binding.targetName,@(300,0,550,96)),
+        @($Binding.wireId,'Wire it up',@(11,31,84,51)),
+        @('fixture-target-mark','Mark as entry',@(390,31,476,51)),
+        @('status','Choose a target loop to wire this entry',@(0,150,500,180))
+    )) {
+        [pscustomobject]@{AutomationId=$spec[0];Name=$spec[1];Bounds=$spec[2]
+            ProcessId=$ExpectedProcessId;IsEnabled=$true;IsOffscreen=$false}
+    })
+    $target=Get-CapWireTargetObservation -Binding $Binding -Rows $rows `
+        -ExpectedProcessId $ExpectedProcessId -Dpi 96
+    $sheetRows=@(
+        [pscustomobject]@{Handle=2L;Owner=1L;Parent=0L;ProcessId=$ExpectedProcessId
+            ClassName=$Binding.sheetClass;Visible=$true},
+        [pscustomobject]@{Handle=3L;Owner=0L;Parent=2L;ProcessId=$ExpectedProcessId
+            ClassName='fixture-viewport';Visible=$true},
+        [pscustomobject]@{Handle=4L;Owner=0L;Parent=3L;ProcessId=$ExpectedProcessId
+            ClassName=$Binding.contentClass;Visible=$true})
+    $sheet=Resolve-CapOwnedSheet -Rows $sheetRows -RootHandle 1 -ExpectedProcessId $ExpectedProcessId
+    if ($null -eq $sheet) {throw 'Wire algorithm fixture did not resolve owned sheet content.'}
+    return [pscustomobject]@{kind='MODEL_FIXTURE_SHARED_PRODUCTION_ALGORITHMS_NOT_NATIVE_ACTION'
+        target=$target;sheet=$sheet;runtimeWindowEvidence=$false;productLaunches=0;providerLaunches=0}
+}
+
+function Get-CapOwnedWindowHierarchy {
+    param([Parameter(Mandatory)][IntPtr]$RootHandle,[Parameter(Mandatory)]$ProcessIdentity)
+    $null=Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity
+    try {$rows=@([CapNative]::WindowHierarchy($ProcessIdentity.Pid))}
+    catch {
+        $cause=$_.Exception
+        while ($cause.InnerException) {$cause=$cause.InnerException}
+        Write-CapTrace -Command 'OwnedWindowCensusFailure' -Parameters @{
+            root=[long]$RootHandle;error=$cause.Message
+            observedRows=($cause.Data['ObservedRows']|ConvertTo-Json -Depth 10 -Compress)}
+        throw
+    }
+    $null=Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters @{
+        root=[long]$RootHandle;rows=($rows|ConvertTo-Json -Depth 10 -Compress)}
+    return $rows
 }
 
 function Get-CapDirectChildren {
@@ -6152,6 +6480,8 @@ function Assert-CapNoWorkerTransientArtifacts {
 }
 
 Export-ModuleMember -Function @(
+    'Get-CapWireTargetBinding','Assert-CapWireTargetBinding','Get-CapWireTargetObservation',
+    'Resolve-CapOwnedSheet','Get-CapOwnedWindowHierarchy','Assert-CapWireTargetStable','Get-CapWireAlgorithmPreflight',
     'Get-CapMatchedSceneNames','Get-CapMatchedFocusedSceneNames','Get-CapMatchedFocusedClassification',
     'Get-CapMatchedCapturePlan',
     'Get-CapActionWindowBindings','Assert-CapActionWindowBindings',

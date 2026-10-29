@@ -6070,9 +6070,9 @@ $actionBindingSummaries=@($actionBindingOutput | Where-Object {
   })
 if ($actionBindingSummaries.Count -ne 1) {throw "RED: action binding structured count missing or duplicated"}
 $actionBindingSummary=ConvertFrom-Json $actionBindingSummaries[0]
-if ($actionBindingSummary.executed -ne 57 -or $actionBindingSummary.passed -ne 57 -or
+if ($actionBindingSummary.executed -ne 62 -or $actionBindingSummary.passed -ne 62 -or
     $actionBindingSummary.failed -ne 0 -or $actionBindingSummary.skipped -ne 0) {
-  throw "RED: action window binding requires all 57 contracts without skips"
+  throw "RED: action window binding requires all 62 contracts without skips"
 }
 $actionTopologyOutput=@(& $pwsh -NoProfile -File (Join-Path $PSScriptRoot "ActionTopologyImport.Tests.ps1"))
 $actionTopologyOutput | ForEach-Object {Write-Host $_}
@@ -6085,6 +6085,18 @@ $actionTopologySummary=ConvertFrom-Json $actionTopologySummaries[0]
 if ($actionTopologySummary.executed -ne 16 -or $actionTopologySummary.passed -ne 16 -or
     $actionTopologySummary.failed -ne 0 -or $actionTopologySummary.skipped -ne 0) {
   throw "RED: action topology import requires all 16 contracts without skips"
+}
+$wireTargetingOutput=@(& $pwsh -NoProfile -File (Join-Path $PSScriptRoot 'WireTargeting.Tests.ps1'))
+$wireTargetingOutput|ForEach-Object {Write-Host $_}
+if ($LASTEXITCODE -ne 0) {throw 'RED: wire targeting contract child failed'}
+$wireTargetingSummaries=@($wireTargetingOutput|Where-Object {
+    $_ -is [string] -and $_.StartsWith('{"suite":"WireTargeting",')
+})
+if ($wireTargetingSummaries.Count -ne 1) {throw 'RED: wire targeting count missing or duplicated'}
+$wireTargetingSummary=ConvertFrom-Json $wireTargetingSummaries[0]
+if ($wireTargetingSummary.executed -ne 56 -or $wireTargetingSummary.passed -ne 56 -or
+    $wireTargetingSummary.failed -ne 0 -or $wireTargetingSummary.skipped -ne 0) {
+    throw 'RED: wire targeting requires all 56 contracts without skips'
 }
 $agentCommandOutput = @(& $pwsh -NoProfile -File (
     Join-Path $PSScriptRoot "Invoke-AgentCommand.Tests.ps1"))

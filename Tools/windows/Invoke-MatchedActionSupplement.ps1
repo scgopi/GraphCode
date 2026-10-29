@@ -129,6 +129,7 @@ $dryRunProof=$null
 try {
     Assert-CapWorkerDeadline 'action entry'
     $boundWindows=@(Assert-CapActionWindowContext)
+    $wireTargetPreflight=if ($plan.group -cne 'TerminalActions') {Get-CapWorkerWireBinding} else {$null}
     $windowPreflight=@(foreach ($binding in $boundWindows) {
         foreach ($scene in $binding.sceneNames) {
             $identity=Get-CapWorkerWindowIdentity -Phase $binding.actionPhase -SceneName $scene
@@ -141,6 +142,9 @@ try {
         }
     })
     if ($DryRun) {
+        $wireAlgorithmPreflight=if ($null -ne $wireTargetPreflight) {
+            Get-CapWireAlgorithmPreflight -Binding $wireTargetPreflight -ExpectedProcessId $selfIdentity.Pid
+        } else {$null}
         $helperAvailability=@(foreach ($name in @(
             'Install-CapQualifiedActionTopology','Start-CapMatchedActionSeeds','Close-CapMatchedActionSeeds'
         )) {
@@ -181,6 +185,8 @@ try {
             providerLaunches=0L
             windowIdentityValidation='SOURCE_PHASE_BINDINGS_VALIDATED_BEFORE_LAUNCH_RUNTIME_WINDOW_NOT_EXECUTED'
             windowBindings=$windowPreflight
+            wireTargetBinding=$wireTargetPreflight
+            wireAlgorithmPreflight=$wireAlgorithmPreflight
             helperAvailability=$helperAvailability
             topologyPreparation=$topologyPreparation
             toolingSourceHead=$head

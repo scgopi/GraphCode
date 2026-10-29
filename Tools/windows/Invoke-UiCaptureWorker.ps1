@@ -149,6 +149,13 @@ function Assert-CapActionWindowContext {
     } finally {$held.Pin.Dispose()}
 }
 
+function Get-CapWorkerWireBinding {
+    $null=Assert-CapActionWindowContext
+    $binding=if ($plan.PSObject.Properties['wireTargetBinding']) {$plan.wireTargetBinding} else {$null}
+    return Assert-CapWireTargetBinding -Binding $binding `
+        -Repository ([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))) -OwnedRoot $root
+}
+
 function Get-CapWorkerWindowIdentity {
     param([Parameter(Mandatory)][string]$Phase,[string]$SceneName='')
     if ($actionSupplementMode) {
@@ -1384,6 +1391,7 @@ function Start-CapGraphCodeApp {
     if ($actionSupplementMode) {
         $null=Get-CapWorkerWindowIdentity -Phase $Phase -SceneName $SceneName
         $null=Get-CapMatchedWindowGeometry -Phase $Phase -SceneName $SceneName
+        if ($Phase -ceq 'wire-completion') {$null=Get-CapWorkerWireBinding}
     }
     $binaryKey = if ($Phase -eq 'before') { 'graphcode-before.exe' } else { 'graphcode-after.exe' }
     $binaryPath = if ($rehearsal) { Assert-CapOwnedPath $job.rehearsalTarget.path }
@@ -2453,18 +2461,63 @@ function Invoke-CapMatchedTerminalSceneSupplement {
     return [pscustomobject]$receipt
 }
 
+function Read-CapWireTargetObservation {
+    param([Parameter(Mandatory)]$AppRun,[Parameter(Mandatory)]$Binding)
+    $null=Assert-CapRootProcess -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
+    $graph=Find-CapAutomationElement -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity `
+        -ExpectedProcessId $AppRun.Run.Identity.Pid -Name 'Graph' -AutomationId 'graph'
+    $status=Find-CapAutomationElement -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity `
+        -ExpectedProcessId $AppRun.Run.Identity.Pid -Name 'Choose a target loop to wire this entry' -AutomationId 'status'
+    $rows=@(@(Get-CapDirectChildren -Parent $graph)+@($status)|ForEach-Object {
+        $current=$_.Current
+        $b=$current.BoundingRectangle
+        [pscustomobject]@{AutomationId=$current.AutomationId;Name=$current.Name;ProcessId=$current.ProcessId
+            IsEnabled=$current.IsEnabled;IsOffscreen=$current.IsOffscreen
+            RuntimeId=@($_.GetRuntimeId());Bounds=@($b.Left,$b.Top,$b.Right,$b.Bottom)}
+    })
+    $metrics=Get-CapWindowMetrics -Window $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
+    $identity=Get-CapWorkerWindowIdentity -Phase 'wire-completion' -SceneName $Binding.scene
+    $geometry=Get-CapMatchedWindowGeometry -Phase 'wire-completion' -SceneName $Binding.scene
+    $null=Assert-CapDpiWindowIdentity -Metrics $metrics -Identity $identity -ExpectedOuterBounds $geometry.OuterBounds
+    $observation=Get-CapWireTargetObservation -Binding $Binding -Rows $rows `
+        -ExpectedProcessId $AppRun.Run.Identity.Pid -Dpi $metrics.Dpi
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters @{
+        observation=($observation|ConvertTo-Json -Depth 20 -Compress)
+        rows=($rows|ConvertTo-Json -Depth 10 -Compress)}
+    return $observation
+}
+
+function Read-CapWireWindowObservation {
+    param([Parameter(Mandatory)]$AppRun,[Parameter(Mandatory)][string]$Stage)
+    $hierarchy=@(Get-CapOwnedWindowHierarchy -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity)
+    $element=[Windows.Automation.AutomationElement]::FromHandle($AppRun.Window)
+    $uia=@($element.FindAll([Windows.Automation.TreeScope]::Descendants,
+        [Windows.Automation.Condition]::TrueCondition)|ForEach-Object {
+        $c=$_.Current;$b=$c.BoundingRectangle
+        [pscustomobject]@{name=$c.Name;id=$c.AutomationId;processId=$c.ProcessId;class=$c.ClassName
+            enabled=$c.IsEnabled;offscreen=$c.IsOffscreen;bounds=@($b.Left,$b.Top,$b.Right,$b.Bottom)}
+    })
+    Write-CapTrace -Command 'WireRootWindowObservation' -Parameters @{
+        stage=$Stage;hierarchy=($hierarchy|ConvertTo-Json -Depth 10 -Compress)
+        uia=($uia|ConvertTo-Json -Depth 10 -Compress)}
+    $null=Assert-CapUiaProcessIds -ExpectedProcessId $AppRun.Run.Identity.Pid `
+        -ObservedProcessIds @($uia|ForEach-Object {[int]$_.processId})
+    return $hierarchy
+}
+
 function Invoke-CapWireCompletionSupplement {
     param([Parameter(Mandatory)][string]$StubDaemonPath)
     $phase='wire-completion'
     $null=Get-CapWorkerWindowIdentity -Phase $phase -SceneName 's-goal-unwired-unselected'
+    $binding=Get-CapWorkerWireBinding
     $roots=Initialize-CapPhaseRoot -PhaseRoot (Join-Path $runDirectory $phase)
-    $projectRoot=Join-Path $root 'fixtures\wire-project'
+    $projectRoot=$binding.projectPath
     $null=New-Item -ItemType Directory -Path $projectRoot -Force
-    $sourceId='60000000-0000-4000-8000-000000000001'
-    $targetId='60000000-0000-4000-8000-000000000002'
+    $sourceId=$binding.sourceNodeId
+    $targetId=$binding.targetNodeId
     $pipe="gc-wire-$([guid]::NewGuid().ToString('N'))"
     $resultPath=Join-Path $roots.Peer 'stub-result.json'
-    $stub=$null;$app=$null;$stubCleanup=$null
+    $stub=$null;$app=$null;$stubCleanup=$null;$primary=$null
     try {
         $stub=Start-CapManagedProcess -FilePath (Join-Path $PSHOME 'pwsh.exe') -ArgumentList @(
             '-NoProfile','-File',$StubDaemonPath,
@@ -2482,52 +2535,76 @@ function Invoke-CapWireCompletionSupplement {
         }
         $null=Invoke-CapSceneAction -AppRun $app -Action 'open-project' -Name 'Stub project'
         $null=Invoke-CapSceneAction -AppRun $app -Action 'actual-size'
-        $graph=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity `
-            -ExpectedProcessId $app.Run.Identity.Pid -Name 'Graph' -AutomationId 'graph'
-        $children=@(Get-CapDirectChildren -Parent $graph)
-        $sourceCardId=Get-CapMatchedAutomationId "project-card:$projectRoot`:$sourceId"
-        $targetCardId=Get-CapMatchedAutomationId "project-card:$projectRoot`:$targetId"
-        $sourceCard=@($children | Where-Object {
-            $_.Current.AutomationId -ceq $sourceCardId -and $_.Current.Name -ceq 'Wire source'})
-        $targetCard=@($children | Where-Object {
-            $_.Current.AutomationId -ceq $targetCardId -and $_.Current.Name -ceq 'Wire target'})
-        if ($sourceCard.Count -ne 1 -or $targetCard.Count -ne 1) {
-            throw 'Wire supplement did not expose its exact source and target cards.'
-        }
-        $wireIdentity="wire-node:$projectRoot`:$sourceId"
-        $wireId=Get-CapMatchedAutomationId $wireIdentity
-        $wire=@($children | Where-Object {
-            $_.Current.AutomationId -ceq $wireId -and $_.Current.Name -ceq 'Wire it up'})
-        if ($wire.Count -ne 1) {throw 'Wire supplement source omitted its exact Wire it up control.'}
-        $null=Invoke-CapSceneAction -AppRun $app -Action 'wire-node' -SubjectId $wireIdentity
+        $sourceCardId=$binding.sourceCardId
+        $targetCardId=$binding.targetCardId
+        $wireId=$binding.wireId
+        $heldRootElement=[Windows.Automation.AutomationElement]::FromHandle($app.Window)
+        $rootRuntime=@($heldRootElement.GetRuntimeId())
+        $beforeHierarchy=@(Read-CapWireWindowObservation -AppRun $app -Stage 'before-arm')
+        if ($null -ne (Resolve-CapOwnedSheet -Rows $beforeHierarchy -RootHandle $app.Window `
+            -ExpectedProcessId $app.Run.Identity.Pid)) {throw 'Wire action started with an existing owned modal sheet.'}
+        $null=Invoke-CapSceneAction -AppRun $app -Action 'wire-node' -SubjectId $binding.wireIdentity
         $wireStatus=Wait-CapMatchedWireMode -AppRun $app `
             -DeadlineUtc (Get-CapActionDeadline -WorkerDeadlineUtc $leaseDeadlineUtc)
-        $targetBounds=$targetCard[0].Current.BoundingRectangle
-        $targetX=[int](($targetBounds.Left+$targetBounds.Right)/2)
-        $targetY=[int](($targetBounds.Top+$targetBounds.Bottom)/2)
-        if (-not [GraphCodeUiaGateState]::PostPointerClickScreen($app.Window,$targetX,$targetY)) {
-            throw 'Wire supplement target click was rejected.'
-        }
-        $form=[IntPtr]::Zero
-        $deadline=[DateTime]::UtcNow.AddSeconds(5)
+        $binding=Get-CapWorkerWireBinding
+        $targetObservation=Read-CapWireTargetObservation -AppRun $app -Binding $binding
+        $reacquired=Read-CapWireTargetObservation -AppRun $app -Binding $binding
+        Assert-CapWireTargetStable -First $targetObservation -Second $reacquired -RootBefore $rootRuntime `
+            -RootAfter @([Windows.Automation.AutomationElement]::FromHandle($app.Window).GetRuntimeId())
+        $null=Assert-CapUiaProcessIds -ExpectedProcessId $app.Run.Identity.Pid `
+            -ObservedProcessIds @($heldRootElement.Current.ProcessId)
+        $null=Assert-CapRootProcess -RootHandle $app.Window -ProcessIdentity $app.Run.Identity
+        $targetX=$reacquired.screenPoint[0];$targetY=$reacquired.screenPoint[1]
+        Write-CapTrace -Command 'WirePointerDispatchIntent' -Parameters @{
+            root=[long]$app.Window;process=$app.Run.Identity.Pid;generation=$app.Run.Identity.CreationFileTimeUtc
+            target=($reacquired|ConvertTo-Json -Depth 20 -Compress)
+            beforeHierarchy=($beforeHierarchy|ConvertTo-Json -Depth 10 -Compress)
+            rootRuntimeId=($rootRuntime|ConvertTo-Json -Compress)}
+        $dispatch=[CapNative]::PostPointerClickScreen($app.Window,$targetX,$targetY)
+        Write-CapTrace -Command 'WirePointerDispatchResult' -Parameters @{
+            receipt=($dispatch|ConvertTo-Json -Depth 10 -Compress)}
+        $sheet=$null
+        $deadline=Get-CapActionDeadline -WorkerDeadlineUtc $leaseDeadlineUtc -MaximumWaitSeconds 5
         do {
-            $form=[GraphCodeUiaGateState]::FindTopLevel('GraphCodeNativeForm',[uint32]$app.Run.Identity.Pid)
-            if ($form -ne [IntPtr]::Zero) {break}
+            $hierarchy=@(Read-CapWireWindowObservation -AppRun $app -Stage 'after-posted-target')
+            $sheet=Resolve-CapOwnedSheet -Rows $hierarchy -RootHandle $app.Window `
+                -ExpectedProcessId $app.Run.Identity.Pid
+            if ($null -ne $sheet) {break}
             Assert-CapWorkerDeadline 'Wire completion native form';Start-Sleep -Milliseconds 100
         } while ([DateTime]::UtcNow -lt $deadline)
-        if ($form -eq [IntPtr]::Zero) {throw 'Wire supplement target did not open the native edge form.'}
-        $formElement=[Windows.Automation.AutomationElement]::FromHandle($form)
+        if ($null -eq $sheet) {throw 'Wire supplement target did not expose an owned sheet and native edge child; see hierarchy census.'}
+        $formElement=[Windows.Automation.AutomationElement]::FromHandle([IntPtr]$sheet.host.Handle)
+        $modalRuntime=@($formElement.GetRuntimeId())
+        $modalControls=@($formElement.FindAll([Windows.Automation.TreeScope]::Descendants,
+            [Windows.Automation.Condition]::TrueCondition)|ForEach-Object {
+                $c=$_.Current
+                [pscustomobject]@{name=$c.Name;id=$c.AutomationId;processId=$c.ProcessId
+                    class=$c.ClassName;enabled=$c.IsEnabled;offscreen=$c.IsOffscreen}
+            })
+        Write-CapTrace -Command 'WireOwnedModalControls' -Parameters @{
+            sheet=($sheet|ConvertTo-Json -Depth 10 -Compress)
+            controls=($modalControls|ConvertTo-Json -Depth 10 -Compress)}
+        $null=Assert-CapUiaProcessIds -ExpectedProcessId $app.Run.Identity.Pid `
+            -ObservedProcessIds @($modalControls|ForEach-Object {[int]$_.processId})
         $buttonCondition=[Windows.Automation.AndCondition]::new(
             [Windows.Automation.PropertyCondition]::new(
                 [Windows.Automation.AutomationElement]::ControlTypeProperty,
                 [Windows.Automation.ControlType]::Button),
             [Windows.Automation.PropertyCondition]::new(
                 [Windows.Automation.AutomationElement]::NameProperty,'Create'))
-        $create=$formElement.FindFirst([Windows.Automation.TreeScope]::Descendants,$buttonCondition)
-        if ($null -eq $create -or -not $create.Current.IsEnabled) {
+        $creates=@($formElement.FindAll([Windows.Automation.TreeScope]::Descendants,$buttonCondition))
+        if ($creates.Count -ne 1 -or -not $creates[0].Current.IsEnabled -or $creates[0].Current.IsOffscreen) {
             throw 'Wire supplement native edge form omitted its enabled Create action.'
         }
-        $create.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $latest=Resolve-CapOwnedSheet -Rows @(
+            Get-CapOwnedWindowHierarchy -RootHandle $app.Window -ProcessIdentity $app.Run.Identity) `
+            -RootHandle $app.Window -ExpectedProcessId $app.Run.Identity.Pid
+        if ($null -eq $latest -or $latest.host.Handle -ne $sheet.host.Handle -or
+            $latest.content.Handle -ne $sheet.content.Handle -or ($modalRuntime -join ',') -cne
+            (@([Windows.Automation.AutomationElement]::FromHandle([IntPtr]$latest.host.Handle).GetRuntimeId()) -join ',')) {
+            throw 'Owned wire sheet was replaced before Create.'
+        }
+        $creates[0].GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
         $stubResult=$null
         $deadline=[DateTime]::UtcNow.AddSeconds(5)
         do {
@@ -2572,8 +2649,13 @@ function Invoke-CapWireCompletionSupplement {
             sourceCardAutomationId=$sourceCardId
             targetCardAutomationId=$targetCardId
             wireAutomationId=$wireId
-            armedStatus=$wireStatus.Current.Name
+            armedStatus=$reacquired.mode
             targetScreenPoint=@($targetX,$targetY)
+            targetObservation=$reacquired
+            pointerDispatch=$dispatch
+            windowHierarchyBefore=$beforeHierarchy
+            windowHierarchyAfter=$hierarchy
+            modalControls=$modalControls
             edgeId=$edge.id
             edgeSpec=[pscustomobject]@{
                 kind=$edge.kind;condition=$edge.condition
@@ -2592,16 +2674,29 @@ function Invoke-CapWireCompletionSupplement {
             correlated=$stubResult.unansweredRequests.Count -eq 0
         }
         return $receipt
+    } catch {
+        $primary=$_
+        Write-CapTrace -Command 'WireSupplementPrimaryFailure' -Parameters @{error=$_.Exception.ToString()}
+        throw
     } finally {
-        if ($app) {Close-CapGraphCodeApp -AppRun $app}
-        if ($stub) {
-            $stubCleanup=Stop-CapManagedProcess -Identity $stub.Identity -TimeoutMilliseconds 5000
-            if (-not $stub.StdoutTask.Wait(2000) -or -not $stub.StderrTask.Wait(2000)) {
-                throw 'Wire supplement stub streams did not reach EOF.'
+        $wireCleanupErrors=[Collections.Generic.List[object]]::new()
+        try {if ($app) {Close-CapGraphCodeApp -AppRun $app}}
+        catch {$wireCleanupErrors.Add($_)}
+        try {
+            if ($stub) {
+                $stubCleanup=Stop-CapManagedProcess -Identity $stub.Identity -TimeoutMilliseconds 5000
+                if (-not $stub.StdoutTask.Wait(2000) -or -not $stub.StderrTask.Wait(2000)) {
+                    throw 'Wire supplement stub streams did not reach EOF.'
+                }
+                $stub.Identity.Process.Dispose()
             }
-            $stub.Identity.Process.Dispose()
+            if ($stubCleanup) {$cleanupReceipts.Add($stubCleanup)}
+        } catch {$wireCleanupErrors.Add($_)}
+        foreach ($cleanupError in $wireCleanupErrors) {
+            $cleanupFailures.Add("Wire supplement cleanup: $($cleanupError.Exception.Message)")
+            Write-CapTrace -Command 'WireSupplementCleanupFailure' -Parameters @{error=$cleanupError.Exception.ToString()}
         }
-        if ($stubCleanup) {$cleanupReceipts.Add($stubCleanup)}
+        if (-not $primary -and $wireCleanupErrors.Count -gt 0) {throw $wireCleanupErrors[0]}
     }
 }
 

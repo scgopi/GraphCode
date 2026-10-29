@@ -44,6 +44,8 @@ function Initialize-BindingCase {
         group=$Group;sourceHead=$sourceHead;sourceTree=('b'*40)
         expectedScenes=@($bindings|ForEach-Object {$_.sceneNames})
         actionWindowBindings=$bindings;jobPath=(Join-Path $caseRoot 'job.json');jobSha256=''
+        wireTargetBinding=(Get-CapWireTargetBinding `
+            -Repository ([IO.Path]::GetFullPath((Join-Path $driverDirectory '..\..'))) -OwnedRoot $caseRoot)
     }
     $script:planPath=Join-Path $caseRoot 'plan.json'
     $script:authorizationPath=Join-Path $caseRoot 'authorization.json'
@@ -178,6 +180,23 @@ try {$null=Assert-CapDpiWindowIdentity -Metrics $metrics -Identity (
     -ExpectedOuterBounds $geometry.OuterBounds} catch {$failure=$_}
 Assert-BindingCase ($null -ne $failure -and $failure.Exception.Message.Contains('identity differs')) 'Placed guard accepted drift.'
 $results.Add(@{name='placed guard rejects drift after identity reacquire in metrics model';passed=$true})
+foreach ($fault in @('missing','null','targetNodeId','sourceNodeId','sourceHashes')) {
+    Initialize-BindingCase
+    switch ($fault) {
+        'missing' {$plan.PSObject.Properties.Remove('wireTargetBinding')}
+        'null' {$plan.wireTargetBinding=$null}
+        default {$plan.wireTargetBinding.$fault='foreign'}
+    }
+    Save-BindingCase
+    $failure=$null
+    try {Start-CapGraphCodeApp -Roots @{} -Phase 'wire-completion' `
+        -SceneName 's-goal-unwired-unselected' -PipeName 'NO_LAUNCH' -SessionPrefix 'NO_LAUNCH'|Out-Null}
+    catch {$failure=$_}
+    Assert-BindingCase ($null -ne $failure -and $failure.Exception.Message.Contains('planned source/target binding')) `
+        "Startup did not reject $fault wire target before launch: $failure"
+    $results.Add(@{name="startup rejects $fault wire target before launch";passed=$true})
+}
+Initialize-BindingCase
 $reachedLaunch=$false
 & {
     function Start-CapJobLauncher {
@@ -199,4 +218,4 @@ $report=[ordered]@{suite='ActionWindowIdentity';executed=$results.Count;passed=$
     productLaunches=0;providerLaunches=0;runtimeWindowEvidence=$false;cases=@($results)}
 $null=Write-BindingJson (Join-Path $caseRoot 'report.json') $report
 [pscustomobject]$report|Select-Object suite,executed,passed,failed,skipped|ConvertTo-Json -Compress
-if ($results.Count -ne 57) {throw "Unexpected binding contract count: $($results.Count)"}
+if ($results.Count -ne 62) {throw "Unexpected binding contract count: $($results.Count)"}

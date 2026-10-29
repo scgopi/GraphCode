@@ -196,6 +196,9 @@ $plan=[ordered]@{
     existingSceneManifestSha256=$ExistingSceneManifestSha256.ToUpperInvariant()
     expectedScenes=$expectedScenes
     actionWindowBindings=$actionWindowBindings
+    wireTargetBinding=$(if ($Group -cne 'TerminalActions') {
+        Get-CapWireTargetBinding -Repository $repositoryRoot -OwnedRoot $root
+    } else {$null})
     imageBindings=$bindings
     expectedReceiptCount=[long]$expectedScenes.Count
     qualifiedAuthority=$(if ($Group -ceq 'FinalBoundedActions') {
