@@ -2166,6 +2166,13 @@ pub const Workspace = struct {
         return tabLabel(tab);
     }
 
+    pub fn minimumChromeWidth(self: *const Workspace) i32 {
+        const count = std.math.cast(i32, self.tabCount()) orelse return std.math.maxInt(i32);
+        const controls = 3 * Tokens.tab_control_width + 2 * Tokens.tab_control_gap;
+        return count *| Tokens.tab_min_width +| @max(0, count - 1) *| Tokens.tab_gap +|
+            (2 * Tokens.tab_bar_inset + Tokens.tab_controls_gap + controls);
+    }
+
     pub fn resize(self: *Workspace, origin_x: i32, origin_y: i32, width: i32, height: i32) void {
         self.collapsed = false;
         self.layout_origin_x = origin_x;
@@ -2242,7 +2249,7 @@ pub const Workspace = struct {
         if (self.collapsed or index >= self.layout.tabs.items.len) return null;
         const inset = Dpi.scale(Tokens.tab_bar_inset, self.dpi);
         const gap = Dpi.scale(Tokens.tab_gap, self.dpi);
-        const available = self.tabsRight() - self.layout_origin_x - 2 * inset;
+        const available = self.tabsRight() - self.layout_origin_x - inset;
         if (available <= 0) return null;
         const capacity: usize = @intCast(@max(1, @divTrunc(available + gap, Dpi.scale(Tokens.tab_min_width, self.dpi) + gap)));
         const count = @min(self.layout.tabs.items.len, capacity);
@@ -2328,7 +2335,7 @@ pub const Workspace = struct {
                 .bottom = bounds.y,
             },
             .title = if (pane.launches_agent) (if (self.boundQuickChatID() != null) "chat" else "agent") else "shell",
-            .detail = if (pane.launches_agent) self.agent_pane_detail else "",
+            .detail = if (pane.launches_agent) self.agent_pane_detail else ZmxSession.defaultShellDetail(),
             .focused = position == tab.focused_pane,
         };
     }
@@ -7641,45 +7648,71 @@ const PaneHeaderChrome = struct {
 };
 const pane_focus_hint = "Ctrl+Shift+] to focus";
 
+const PaneHeaderTextLayout = struct {
+    title: c.RECT,
+    focused: ?c.RECT,
+    trailing: ?c.RECT,
+};
+
+fn paneHeaderTextLayout(hdc: c.HDC, header: PaneHeaderChrome, dpi: u32) !PaneHeaderTextLayout {
+    const right = header.bounds.right - Dpi.scale(8, dpi);
+    const left = @min(right, header.bounds.left + Dpi.scale(19, dpi));
+    const gap = Dpi.scale(6, dpi);
+    const title_width = try chromeTextWidthForDpi(hdc, header.title, 10.5, .semibold, dpi);
+    const title = c.RECT{
+        .left = left,
+        .top = header.bounds.top,
+        .right = @min(right, left + title_width),
+        .bottom = header.bounds.bottom,
+    };
+    var layout = PaneHeaderTextLayout{ .title = title, .focused = null, .trailing = null };
+    var trailing_left = title.right + gap;
+    if (header.focused) {
+        const focused_width = try chromeTextWidthForDpi(hdc, "focused", 9.5, .card_mono, dpi);
+        if (trailing_left + focused_width <= right) {
+            layout.focused = .{
+                .left = trailing_left,
+                .top = header.bounds.top,
+                .right = trailing_left + focused_width,
+                .bottom = header.bounds.bottom,
+            };
+            trailing_left += focused_width + gap;
+        }
+    }
+    const text = if (header.focused) header.detail else pane_focus_hint;
+    if (text.len != 0 and trailing_left < right) {
+        const width = try chromeTextWidthForDpi(hdc, text, 9.5, .card_mono, dpi);
+        layout.trailing = .{
+            .left = @max(trailing_left, right - width),
+            .top = header.bounds.top,
+            .right = right,
+            .bottom = header.bounds.bottom,
+        };
+    }
+    return layout;
+}
+
 fn paintPaneHeader(hdc: c.HDC, header: PaneHeaderChrome, dpi: u32) void {
     const bounds = header.bounds;
     const background = blendChromeColor(if (header.focused) Tokens.pane_focus_tint else 0x00FFFFFF, Tokens.window_tone, if (header.focused) 10 else 3);
     fillRect(hdc, bounds, background);
     if (bounds.right - bounds.left < Dpi.scale(24, dpi)) return;
+    const text = paneHeaderTextLayout(hdc, header, dpi) catch |err| {
+        std.log.warn("Unable to measure pane header text: {s}", .{@errorName(err)});
+        return;
+    };
     paintChromeDotForDpi(hdc, .{
         .left = bounds.left + Dpi.scale(8, dpi),
         .top = bounds.top + Dpi.scale(8, dpi),
         .right = bounds.left + Dpi.scale(13, dpi),
         .bottom = bounds.top + Dpi.scale(13, dpi),
     }, if (header.focused) Tokens.pane_focus_tint else blendChromeColor(0x00FFFFFF, background, 30), background, false, dpi);
-    drawChromeTextForDpi(hdc, header.title, .{
-        .left = bounds.left + Dpi.scale(19, dpi),
-        .top = bounds.top,
-        .right = @min(bounds.left + Dpi.scale(62, dpi), bounds.right - Dpi.scale(8, dpi)),
-        .bottom = bounds.bottom,
-    }, 10.5, .semibold, if (header.focused) blendChromeColor(0x00FFC58C, background, 90) else blendChromeColor(0x00FFFFFF, background, 45), dpi);
-    if (header.focused) {
-        drawChromeTextForDpi(hdc, "focused", .{
-            .left = bounds.left + Dpi.scale(65, dpi),
-            .top = bounds.top,
-            .right = @min(bounds.left + Dpi.scale(122, dpi), bounds.right - Dpi.scale(8, dpi)),
-            .bottom = bounds.bottom,
-        }, 9.5, .card_mono, blendChromeColor(0x00FFFFFF, background, 35), dpi);
-        if (header.detail.len != 0 and bounds.right - bounds.left >= Dpi.scale(180, dpi)) {
-            drawChromeTextForDpi(hdc, header.detail, .{
-                .left = @max(bounds.left + Dpi.scale(128, dpi), bounds.right - Dpi.scale(128, dpi)),
-                .top = bounds.top,
-                .right = bounds.right - Dpi.scale(8, dpi),
-                .bottom = bounds.bottom,
-            }, 9.5, .card_mono, blendChromeColor(0x00FFFFFF, background, 35), dpi);
-        }
-    } else if (bounds.right - bounds.left >= Dpi.scale(240, dpi)) {
-        drawChromeTextForDpi(hdc, pane_focus_hint, .{
-            .left = bounds.right - Dpi.scale(144, dpi),
-            .top = bounds.top,
-            .right = bounds.right - Dpi.scale(8, dpi),
-            .bottom = bounds.bottom,
-        }, 9.5, .card_mono, blendChromeColor(0x00FFFFFF, background, 35), dpi);
+    drawChromeTextForDpi(hdc, header.title, text.title, 10.5, .semibold, if (header.focused) blendChromeColor(0x00FFC58C, background, 90) else blendChromeColor(0x00FFFFFF, background, 45), dpi);
+    if (text.focused) |focused| {
+        drawChromeTextForDpi(hdc, "focused", focused, 9.5, .card_mono, blendChromeColor(0x00FFFFFF, background, 35), dpi);
+    }
+    if (text.trailing) |trailing| {
+        drawChromeTextWithFormat(hdc, if (header.focused) header.detail else pane_focus_hint, trailing, 9.5, .card_mono, blendChromeColor(0x00FFFFFF, background, 35), dpi, (chrome_text_format & ~@as(c.UINT, c.DT_LEFT)) | c.DT_RIGHT);
     }
 }
 
@@ -7723,9 +7756,13 @@ fn selectChromeFontForDpi(hdc: c.HDC, size: f32, style: AppFont.Style, dpi: u32)
 }
 
 fn chromeTextWidth(hdc: c.HDC, text: []const u8, size: f32, style: AppFont.Style) !i32 {
+    return chromeTextWidthForDpi(hdc, text, size, style, Dpi.base_dpi);
+}
+
+fn chromeTextWidthForDpi(hdc: c.HDC, text: []const u8, size: f32, style: AppFont.Style, dpi: u32) !i32 {
     const wide = try std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, text);
     defer std.heap.page_allocator.free(wide);
-    const old_font = try selectChromeFont(hdc, size, style);
+    const old_font = try selectChromeFontForDpi(hdc, size, style, dpi);
     defer _ = c.SelectObject(hdc, old_font);
     var measured: c.SIZE = undefined;
     if (c.GetTextExtentPoint32W(hdc, wide.ptr, std.math.cast(i32, wide.len) orelse return error.WorkspaceTextTooLong, &measured) == 0)
@@ -7742,6 +7779,10 @@ fn drawChromeTextForDpi(hdc: c.HDC, text: []const u8, bounds: c.RECT, size: f32,
 }
 
 fn drawChromeTextWithFont(hdc: c.HDC, text: []const u8, bounds: c.RECT, size: f32, style: AppFont.Style, color: u32, dpi: u32) void {
+    drawChromeTextWithFormat(hdc, text, bounds, size, style, color, dpi, chrome_text_format);
+}
+
+fn drawChromeTextWithFormat(hdc: c.HDC, text: []const u8, bounds: c.RECT, size: f32, style: AppFont.Style, color: u32, dpi: u32, format: c.UINT) void {
     if (text.len == 0 or bounds.right <= bounds.left or bounds.bottom <= bounds.top) return;
     const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, text) catch |err| {
         std.log.warn("Unable to prepare workspace text: {s}", .{@errorName(err)});
@@ -7760,7 +7801,7 @@ fn drawChromeTextWithFont(hdc: c.HDC, text: []const u8, bounds: c.RECT, size: f3
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
     var target = bounds;
-    if (c.DrawTextW(hdc, wide.ptr, length, &target, chrome_text_format) == 0)
+    if (c.DrawTextW(hdc, wide.ptr, length, &target, format) == 0)
         std.log.warn("Unable to paint workspace text", .{});
 }
 
@@ -8176,6 +8217,138 @@ test "workspace chrome selected tab is the only filled semibold pill" {
     try std.testing.expect(chrome_text_format & c.DT_NOPREFIX != 0);
     try std.testing.expect(chrome_text_format & c.DT_END_ELLIPSIS != 0);
     try std.testing.expect(chrome_text_format & c.DT_VCENTER != 0);
+}
+
+test "terminal parity shell header identifies the pinned provider shell" {
+    var workspace = Workspace{
+        .parent = null,
+        .allocator = std.testing.allocator,
+        .zmx_path = &.{},
+        .cwd = &.{},
+        .input_queue = .{ .allocator = std.testing.allocator },
+        .layout = try WorkspaceLayout.Layout.init(std.testing.allocator, "shell-detail"),
+        .layout_path = &.{},
+        .project_key = &.{},
+        .layout_width = 1000,
+        .layout_height = 600,
+    };
+    defer workspace.layout.deinit();
+    try workspace.layout.addTab("shell", false);
+    try std.testing.expectEqualStrings("cmd", workspace.paneHeaderChrome(0).?.detail);
+    try workspace.layout.splitFocused(.horizontal, "split-shell");
+    for (0..2) |index| try std.testing.expectEqualStrings("cmd", workspace.paneHeaderChrome(index).?.detail);
+}
+
+test "terminal parity host propagates the tab strip intrinsic minimum" {
+    const app_source = @embedFile("App.zig");
+    try std.testing.expect(std.mem.indexOf(u8, app_source, "workspace.minimumChromeWidth()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_source, "self.fitWorkspaceWindow(") != null);
+    const publish_start = std.mem.indexOf(u8, app_source, "fn publishWorkspaceTabs(").?;
+    const publish_end = std.mem.indexOfScalarPos(u8, app_source, publish_start, '}').?;
+    try std.testing.expect(std.mem.indexOf(u8, app_source[publish_start..publish_end], "self.layoutWorkspace();") != null);
+}
+
+test "terminal parity intrinsic width displays all twelve tabs without changing density or selection" {
+    const allocator = std.testing.allocator;
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        var workspace = Workspace{
+            .parent = null,
+            .allocator = allocator,
+            .zmx_path = &.{},
+            .cwd = &.{},
+            .input_queue = .{ .allocator = allocator },
+            .layout = try WorkspaceLayout.Layout.init(allocator, "chrome-minimum"),
+            .layout_path = &.{},
+            .project_key = &.{},
+            .layout_height = Dpi.scale(600, dpi),
+            .dpi = dpi,
+        };
+        defer workspace.layout.deinit();
+        for (0..12) |index| {
+            var id: [32]u8 = undefined;
+            try workspace.layout.addTab(try std.fmt.bufPrint(&id, "shell-{d}", .{index}), false);
+        }
+        try std.testing.expectEqual(@as(i32, 1254), workspace.minimumChromeWidth());
+        workspace.layout_width = Dpi.scale(workspace.minimumChromeWidth(), dpi);
+        for ([_]usize{ 0, 11 }) |selected| {
+            try workspace.layout.selectTab(selected);
+            for (0..12) |index| {
+                const bounds = workspace.visibleTabBounds(index) orelse return error.TabMissingAtIntrinsicWidth;
+                try std.testing.expectEqual(Dpi.scale(92, dpi), bounds.right - bounds.left);
+                try std.testing.expectEqual(Dpi.scale(25, dpi), bounds.bottom - bounds.top);
+                try std.testing.expectEqual(index, workspace.tabActionAt(bounds.left + 1, bounds.top + 1).?.index);
+                if (index == 11) try std.testing.expectEqual(Dpi.scale(14, dpi), workspace.chromeControlsLeft() - bounds.right);
+            }
+            try std.testing.expectEqual(selected, workspace.layout.selected_tab);
+        }
+        workspace.layout_width = Dpi.scale(420, dpi);
+        const last = workspace.visibleTabBounds(11).?;
+        try std.testing.expect(workspace.visibleTabBounds(0) == null);
+        try std.testing.expectEqual(@as(usize, 11), workspace.tabActionAt(last.left + 1, last.top + 1).?.index);
+    }
+}
+
+test "terminal parity pane label metrics follow the source font roles without fixed title slots" {
+    const dc = c.CreateCompatibleDC(null) orelse return error.TestDcFailed;
+    defer _ = c.DeleteDC(dc);
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        for ([_][]const u8{ "shell", "agent", "chat" }) |title| {
+            const header = PaneHeaderChrome{
+                .bounds = .{ .left = 0, .top = 0, .right = Dpi.scale(600, dpi), .bottom = Dpi.scale(22, dpi) },
+                .title = title,
+                .detail = "cmd",
+                .focused = true,
+            };
+            const layout = try paneHeaderTextLayout(dc, header, dpi);
+            try std.testing.expectEqual(try chromeTextWidthForDpi(dc, title, 10.5, .semibold, dpi), layout.title.right - layout.title.left);
+            try std.testing.expectEqual(Dpi.scale(6, dpi), layout.focused.?.left - layout.title.right);
+            try std.testing.expectEqual(header.bounds.right - Dpi.scale(8, dpi), layout.trailing.?.right);
+            try std.testing.expectEqual(try chromeTextWidthForDpi(dc, "cmd", 9.5, .card_mono, dpi), layout.trailing.?.right - layout.trailing.?.left);
+            var font = std.mem.zeroes(c.LOGFONTW);
+            try std.testing.expect(c.GetObjectW(AppFont.getStyleForDpi(10.5, .semibold, dpi), @sizeOf(c.LOGFONTW), &font) != 0);
+            try std.testing.expectEqual(@as(c.LONG, c.FW_SEMIBOLD), font.lfWeight);
+            try std.testing.expectEqual(-AppFont.styleHeight(10.5, dpi), font.lfHeight);
+        }
+    }
+}
+
+test "terminal parity pane detail sits at the trailing inset at each DPI" {
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        const width = Dpi.scale(600, dpi);
+        const height = Dpi.scale(22, dpi);
+        const dc = c.CreateCompatibleDC(null) orelse return error.TestDcFailed;
+        defer _ = c.DeleteDC(dc);
+        var info = std.mem.zeroes(c.BITMAPINFO);
+        info.bmiHeader.biSize = @sizeOf(c.BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = -height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = c.BI_RGB;
+        var bits: ?*anyopaque = null;
+        const bitmap = c.CreateDIBSection(dc, &info, c.DIB_RGB_COLORS, &bits, null, 0) orelse return error.TestBitmapFailed;
+        defer _ = c.DeleteObject(bitmap);
+        const previous = c.SelectObject(dc, bitmap);
+        defer _ = c.SelectObject(dc, previous);
+        paintPaneHeader(dc, .{
+            .bounds = .{ .left = 0, .top = 0, .right = width, .bottom = height },
+            .title = "shell",
+            .detail = "cmd",
+            .focused = true,
+        }, dpi);
+        _ = c.GdiFlush();
+        const pixels: [*]const u32 = @ptrCast(@alignCast(bits.?));
+        const background = pixels[0] & 0x00ffffff;
+        var painted: usize = 0;
+        const start: usize = @intCast(width - Dpi.scale(35, dpi));
+        const end: usize = @intCast(width - Dpi.scale(8, dpi));
+        for (0..@intCast(height)) |row| {
+            for (start..end) |column| {
+                if (pixels[row * @as(usize, @intCast(width)) + column] & 0x00ffffff != background) painted += 1;
+            }
+        }
+        try std.testing.expect(painted > 0);
+    }
 }
 
 test "workspace terminal chrome keeps mac logical density at every DPI and expands twelve tabs at 1508" {

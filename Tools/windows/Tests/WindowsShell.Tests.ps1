@@ -1018,6 +1018,14 @@ Invoke-Native "Terminal input queue tests" {
   $include = Join-Path $winghosttyRoot "include"
   $winghosttyLib = Join-Path $winghosttyRoot "zig-out\lib\winghostty-win32-host.lib"
   $terminalVtLib = Join-Path $shellRoot "zig-out\lib\ghostty-vt-static.lib"
+  $zmxSource = Get-Content -LiteralPath (Join-Path $env:GRAPHCODE_ZMX_ROOT "src\main_windows.zig") -Raw
+  $sessionSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\ZmxSession.zig") -Raw
+  $configuredShell = [regex]::Match($sessionSource, 'pub const default_shell = "([^"]+)";')
+  Assert-Contract $configuredShell.Success "plain-shell presentation must name the pinned provider executable"
+  $providerShell = [regex]::Match($zmxSource, '(?s)fn runSession\(.*?\.shell = "([^"]+)"')
+  Assert-Contract ($providerShell.Success -and
+    $providerShell.Groups[1].Value -ceq $configuredShell.Groups[1].Value) `
+    "plain-shell detail must match the actual pinned Windows zmx HostSpec shell"
   if (-not (Test-Path -LiteralPath $include -PathType Container)) {
     throw "Winghostty headers are required for terminal input tests."
   }

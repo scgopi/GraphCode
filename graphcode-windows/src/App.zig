@@ -1111,7 +1111,11 @@ fn minimumWindowHeight(hwnd: c.HWND, dpi: u32) i32 {
 
 /// The outer window width whose client area is `min_client_width` at `dpi`, in physical pixels.
 fn minimumWindowWidth(hwnd: c.HWND, dpi: u32) i32 {
-    var frame = c.RECT{ .left = 0, .top = 0, .right = physicalCoordinate(min_client_width, dpi), .bottom = 0 };
+    return windowWidthForClient(hwnd, dpi, min_client_width);
+}
+
+fn windowWidthForClient(hwnd: c.HWND, dpi: u32, client_width: i32) i32 {
+    var frame = c.RECT{ .left = 0, .top = 0, .right = physicalCoordinate(client_width, dpi), .bottom = 0 };
     const style: c.DWORD = @truncate(@as(usize, @bitCast(c.GetWindowLongPtrW(hwnd, c.GWL_STYLE))));
     const ex_style: c.DWORD = @truncate(@as(usize, @bitCast(c.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE))));
     const has_menu: c.BOOL = if (c.GetMenu(hwnd) != null) 1 else 0;
@@ -1639,6 +1643,7 @@ pub const App = struct {
     canvas_press_project_path: []u8 = &.{},
     canvas_press_node_id: []u8 = &.{},
     workspace: ?*TerminalWorkspace.Workspace = null,
+    fitting_workspace_window: bool = false,
     pending_session_restart: ?PendingSessionRestart = null,
     navigation_cursor: Navigation.Cursor = .{},
     workspace_controls: WorkspaceControls.State = .{ .panel_visible = false },
@@ -7711,6 +7716,7 @@ pub const App = struct {
 
     /// The workspace's tabs changed: UIA republishes them so its tab list is the drawn one.
     fn publishWorkspaceTabs(self: *App) void {
+        self.layoutWorkspace();
         self.syncAccessibility();
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
@@ -7900,8 +7906,10 @@ pub const App = struct {
     }
 
     fn layoutWorkspace(self: *App) void {
+        if (self.fitting_workspace_window) return;
         var client: c.RECT = undefined;
         if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
+        if (self.fitWorkspaceWindow(client) and c.GetClientRect(self.window.hwnd, &client) == 0) return;
         const restore_header = self.header_focus != null and c.GetFocus() == self.window.hwnd;
         const previous_transition = self.header_focus_transition;
         self.header_focus_transition = previous_transition or restore_header;
@@ -7942,6 +7950,55 @@ pub const App = struct {
                 panel_height,
             );
         }
+    }
+
+    fn workspaceMinimumWindowWidth(self: *const App) i32 {
+        if (self.surface != .workspace or self.workspace == null) return minimumWindowWidth(self.window.hwnd, self.dpi);
+        const monitor = c.MonitorFromWindow(self.window.hwnd, c.MONITOR_DEFAULTTONEAREST);
+        var info = std.mem.zeroes(c.MONITORINFO);
+        info.cbSize = @sizeOf(c.MONITORINFO);
+        if (monitor == null or c.GetMonitorInfoW(monitor, &info) == 0) {
+            std.log.warn("Unable to query terminal workspace work area; window expansion disabled", .{});
+            return minimumWindowWidth(self.window.hwnd, self.dpi);
+        }
+        const work_width = info.rcWork.right - info.rcWork.left;
+        var client_width = min_client_width;
+        if (self.workspace) |workspace| {
+            client_width = @max(client_width, workspace.minimumChromeWidth() +|
+                (if (self.workspace_controls.rail_visible) Tokens.sidebar_width else @as(i32, 0)) +|
+                (if (self.workspace_controls.panel_visible) Tokens.loop_detail_width else @as(i32, 0)));
+        }
+        const desired = windowWidthForClient(self.window.hwnd, self.dpi, @min(client_width, Dpi.unscale(work_width, self.dpi)));
+        return @min(desired, work_width);
+    }
+
+    fn fitWorkspaceWindow(self: *App, client: c.RECT) bool {
+        if (self.surface != .workspace or self.workspace == null or c.IsZoomed(self.window.hwnd) != 0 or c.IsIconic(self.window.hwnd) != 0) return false;
+        var bounds: c.RECT = undefined;
+        if (c.GetWindowRect(self.window.hwnd, &bounds) == 0) {
+            std.log.warn("Unable to read terminal workspace window bounds", .{});
+            return false;
+        }
+        const width = self.workspaceMinimumWindowWidth();
+        if (bounds.right - bounds.left >= width or client.right <= 0) return false;
+        var left = bounds.left;
+        const monitor = c.MonitorFromWindow(self.window.hwnd, c.MONITOR_DEFAULTTONEAREST);
+        var info = std.mem.zeroes(c.MONITORINFO);
+        info.cbSize = @sizeOf(c.MONITORINFO);
+        if (monitor == null or c.GetMonitorInfoW(monitor, &info) == 0) {
+            std.log.warn("Unable to query terminal workspace placement work area", .{});
+            self.setStatus("Unable to expand window for terminal tabs");
+            return false;
+        }
+        left = @max(info.rcWork.left, @min(left, info.rcWork.right - width));
+        self.fitting_workspace_window = true;
+        defer self.fitting_workspace_window = false;
+        if (c.SetWindowPos(self.window.hwnd, null, left, bounds.top, width, bounds.bottom - bounds.top, c.SWP_NOZORDER | c.SWP_NOACTIVATE) == 0) {
+            std.log.warn("Unable to fit terminal tab strip to window", .{});
+            self.setStatus("Unable to expand window for terminal tabs");
+            return false;
+        }
+        return true;
     }
 
     fn status(self: *const App) []const u8 {
@@ -10179,7 +10236,7 @@ fn onWindowMessage(
             // Workspace panel, Activity strip, and status line stacked under it. A 452-DIP client
             // minimum keeps a readable detail surface; larger system minima remain authoritative.
             const info = Win32.messagePointer(*c.MINMAXINFO, lparam);
-            const minimum_width = minimumWindowWidth(hwnd, app.dpi);
+            const minimum_width = app.workspaceMinimumWindowWidth();
             if (minimum_width > info.ptMinTrackSize.x) info.ptMinTrackSize.x = minimum_width;
             const minimum = minimumWindowHeight(hwnd, app.dpi);
             if (minimum > info.ptMinTrackSize.y) info.ptMinTrackSize.y = minimum;
@@ -14377,6 +14434,172 @@ test "responsive sidebar enforces a minimum client width at standard DPIs" {
         info.ptMinTrackSize.x = minimum_width + 50;
         try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&info)), &result));
         try std.testing.expectEqual(minimum_width + 50, info.ptMinTrackSize.x);
+    }
+}
+
+test "terminal parity native minimum grows the host and publishes every fitting tab without layout mutation" {
+    const NativeDispatch = struct {
+        extern "user32" fn SetThreadDpiAwarenessContext(value: usize) callconv(.winapi) usize;
+        extern "user32" fn GetThreadDpiAwarenessContext() callconv(.winapi) usize;
+        extern "user32" fn GetWindowDpiAwarenessContext(hwnd: c.HWND) callconv(.winapi) usize;
+        extern "user32" fn GetAwarenessFromDpiAwarenessContext(context: usize) callconv(.winapi) c_int;
+
+        app: *App,
+        original: c.WNDPROC,
+        minimum_messages: usize = 0,
+
+        fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.c) c.LRESULT {
+            const self: *@This() = @ptrFromInt(@as(usize, @bitCast(c.GetWindowLongPtrW(hwnd, c.GWLP_USERDATA))));
+            if (message == c.WM_GETMINMAXINFO) {
+                self.minimum_messages += 1;
+                var result: c.LRESULT = 0;
+                if (onWindowMessage(self.app, hwnd, message, wparam, lparam, &result)) return result;
+            }
+            return c.CallWindowProcW(self.original, hwnd, message, wparam, lparam);
+        }
+    };
+    const previous_dpi_context = NativeDispatch.SetThreadDpiAwarenessContext(@bitCast(@as(isize, -4)));
+    if (previous_dpi_context == 0) return error.TerminalMinimumDpiContextFailed;
+    defer {
+        const restored = NativeDispatch.SetThreadDpiAwarenessContext(previous_dpi_context);
+        std.debug.assert(restored != 0);
+        const context = NativeDispatch.GetThreadDpiAwarenessContext();
+        std.debug.assert(NativeDispatch.GetAwarenessFromDpiAwarenessContext(context) == NativeDispatch.GetAwarenessFromDpiAwarenessContext(previous_dpi_context));
+        std.debug.print("TERMINAL_NATIVE_DPI restored-context={d} restored-awareness={d}\n", .{ context, NativeDispatch.GetAwarenessFromDpiAwarenessContext(context) });
+    }
+    const Sink = struct {
+        workspace: *TerminalWorkspace.Workspace,
+        count: usize = 0,
+        failure: ?anyerror = null,
+
+        fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+        fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+            self.count = 0;
+            for (elements) |element| {
+                if (!std.mem.startsWith(u8, element.identity, "workspace-tab:")) continue;
+                self.check(element) catch |err| {
+                    self.failure = err;
+                };
+                self.count += 1;
+            }
+        }
+        fn check(self: *@This(), element: Accessibility.DynamicElement) !void {
+            const index = try std.fmt.parseInt(usize, element.identity["workspace-tab:".len..], 10);
+            const bounds = self.workspace.visibleTabBounds(index) orelse return error.PublishedHiddenTab;
+            try std.testing.expectEqualDeep(
+                [4]i32{ bounds.left, bounds.top, bounds.right, bounds.bottom },
+                [4]i32{ element.left, element.top, element.right, element.bottom },
+            );
+            try std.testing.expect(bounds.right > bounds.left and bounds.bottom > bounds.top);
+            try std.testing.expectEqual(index == self.workspace.layout.selected_tab, element.selected);
+        }
+    };
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        var app = try overviewTestApp(dpi);
+        defer {
+            const hwnd = app.window.hwnd;
+            deinitOverviewTestApp(&app);
+            std.debug.assert(c.IsWindow(hwnd) == 0);
+            std.debug.print("TERMINAL_NATIVE_WINDOW dpi={d} destroyed=true\n", .{dpi});
+        }
+        const thread_awareness = NativeDispatch.GetAwarenessFromDpiAwarenessContext(NativeDispatch.GetThreadDpiAwarenessContext());
+        const window_awareness = NativeDispatch.GetAwarenessFromDpiAwarenessContext(NativeDispatch.GetWindowDpiAwarenessContext(app.window.hwnd));
+        try std.testing.expectEqual(@as(c_int, 2), thread_awareness);
+        try std.testing.expectEqual(@as(c_int, 2), window_awareness);
+        std.debug.print("TERMINAL_NATIVE_DPI injected={d} actual-window={d} previous-awareness={d} thread-awareness={d} window-awareness={d}\n", .{
+            dpi,
+            Win32.dpiForWindow(app.window.hwnd),
+            NativeDispatch.GetAwarenessFromDpiAwarenessContext(previous_dpi_context),
+            thread_awareness,
+            window_awareness,
+        });
+        var workspace = TerminalWorkspace.Workspace{
+            .parent = app.window.hwnd,
+            .allocator = app.allocator,
+            .zmx_path = &.{},
+            .cwd = &.{},
+            .input_queue = .{ .allocator = app.allocator },
+            .layout = try @import("WorkspaceLayout.zig").Layout.init(app.allocator, "terminal-minimum"),
+            .layout_path = &.{},
+            .project_key = &.{},
+            .dpi = dpi,
+        };
+        defer workspace.layout.deinit();
+        app.workspace = &workspace;
+        defer app.workspace = null;
+        app.surface = .workspace;
+        app.workspace_controls.panel_visible = true;
+        var dispatch = NativeDispatch{ .app = &app, .original = null };
+        const previous_context = c.SetWindowLongPtrW(app.window.hwnd, c.GWLP_USERDATA, @bitCast(@intFromPtr(&dispatch)));
+        defer _ = c.SetWindowLongPtrW(app.window.hwnd, c.GWLP_USERDATA, previous_context);
+        const previous_proc = c.SetWindowLongPtrW(app.window.hwnd, c.GWLP_WNDPROC, @bitCast(@intFromPtr(&NativeDispatch.windowProc)));
+        if (previous_proc == 0) return error.TerminalMinimumSubclassFailed;
+        dispatch.original = @ptrFromInt(@as(usize, @bitCast(previous_proc)));
+        defer _ = c.SetWindowLongPtrW(app.window.hwnd, c.GWLP_WNDPROC, previous_proc);
+        for (0..12) |index| {
+            var id: [32]u8 = undefined;
+            try workspace.layout.addTab(try std.fmt.bufPrint(&id, "shell-{d}", .{index}), false);
+        }
+        try workspace.layout.selectTab(0);
+        var temporary = std.testing.tmpDir(.{});
+        defer temporary.cleanup();
+        const directory = try temporary.dir.realpathAlloc(app.allocator, ".");
+        defer app.allocator.free(directory);
+        const before_path = try std.fs.path.join(app.allocator, &.{ directory, "before.json" });
+        defer app.allocator.free(before_path);
+        const after_path = try std.fs.path.join(app.allocator, &.{ directory, "after.json" });
+        defer app.allocator.free(after_path);
+        try workspace.layout.save(before_path);
+        var monitor = std.mem.zeroes(c.MONITORINFO);
+        monitor.cbSize = @sizeOf(c.MONITORINFO);
+        try std.testing.expect(c.GetMonitorInfoW(c.MonitorFromWindow(app.window.hwnd, c.MONITOR_DEFAULTTONEAREST), &monitor) != 0);
+        std.debug.print("TERMINAL_NATIVE_MONITOR dpi={d} monitor={d},{d},{d},{d} work={d},{d},{d},{d}\n", .{
+            dpi,                     monitor.rcMonitor.left,   monitor.rcMonitor.top,
+            monitor.rcMonitor.right, monitor.rcMonitor.bottom, monitor.rcWork.left,
+            monitor.rcWork.top,      monitor.rcWork.right,     monitor.rcWork.bottom,
+        });
+        const work_width = monitor.rcWork.right - monitor.rcWork.left;
+        const desired = windowWidthForClient(app.window.hwnd, dpi, 1254 + Tokens.sidebar_width + Tokens.loop_detail_width);
+        var info = std.mem.zeroes(c.MINMAXINFO);
+        _ = c.SendMessageW(app.window.hwnd, c.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&info)));
+        try std.testing.expectEqual(@as(usize, 1), dispatch.minimum_messages);
+        try std.testing.expectEqual(@min(desired, work_width), info.ptMinTrackSize.x);
+        app.publishWorkspaceTabs();
+        var window: c.RECT = undefined;
+        try std.testing.expect(c.GetWindowRect(app.window.hwnd, &window) != 0);
+        try std.testing.expectEqual(@max(physicalCoordinate(1200, dpi), @min(desired, work_width)), window.right - window.left);
+        var sink = Sink{ .workspace = &workspace };
+        app.syncAccessibilityTo(&sink, logicalClientRect(app.window.hwnd, dpi));
+        if (sink.failure) |err| return err;
+        try std.testing.expect(sink.count > 0);
+        if (desired <= work_width) try std.testing.expectEqual(@as(usize, 12), sink.count);
+        std.debug.print("TERMINAL_NATIVE_WIDTH dpi={d} desired={d} work={d} visible={d} selected={d}\n", .{ dpi, desired, work_width, sink.count, workspace.layout.selected_tab });
+        try std.testing.expectEqual(@as(usize, 0), workspace.layout.selected_tab);
+        try workspace.layout.save(after_path);
+        const before = try temporary.dir.readFileAlloc(app.allocator, "before.json", 1024 * 1024);
+        defer app.allocator.free(before);
+        const after = try temporary.dir.readFileAlloc(app.allocator, "after.json", 1024 * 1024);
+        defer app.allocator.free(after);
+        try std.testing.expectEqualSlices(u8, before, after);
+
+        // A monitor-constrained or maximized window retains the selected-tab
+        // overflow path; inject native maximized state without showing a window.
+        const style = c.GetWindowLongW(app.window.hwnd, c.GWL_STYLE);
+        _ = c.SetWindowLongW(app.window.hwnd, c.GWL_STYLE, style | c.WS_MAXIMIZE);
+        defer _ = c.SetWindowLongW(app.window.hwnd, c.GWL_STYLE, style);
+        try std.testing.expect(c.IsZoomed(app.window.hwnd) != 0);
+        try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, physicalCoordinate(900, dpi), physicalCoordinate(600, dpi), 0) != 0);
+        try workspace.layout.selectTab(11);
+        app.layoutWorkspace();
+        try std.testing.expect(c.GetWindowRect(app.window.hwnd, &window) != 0);
+        try std.testing.expectEqual(physicalCoordinate(900, dpi), window.right - window.left);
+        const last = workspace.visibleTabBounds(11) orelse return error.SelectedOverflowTabMissing;
+        try std.testing.expect(workspace.visibleTabBounds(0) == null);
+        try std.testing.expectEqual(@as(usize, 11), workspace.tabActionAt(last.left + 1, last.top + 1).?.index);
+        app.syncAccessibilityTo(&sink, logicalClientRect(app.window.hwnd, dpi));
+        if (sink.failure) |err| return err;
+        try std.testing.expect(sink.count > 0 and sink.count < 12);
+        std.debug.print("TERMINAL_NATIVE_WIDTH dpi={d} desired={d} work={d} overflow-visible={d} selected={d}\n", .{ dpi, desired, work_width, sink.count, workspace.layout.selected_tab });
     }
 }
 
@@ -22526,9 +22749,9 @@ test "loop detail UIA rectangles equal painted bounds and omit empty sparklines"
 
 test "DPI UIA terminal tab close and controls retain physical geometry" {
     try expectDpiAccessibility(.workspace, null, &.{
-        .{ .identity = "workspace-tab:0", .name = "Agent", .bounds = .{ .{ 228, 86, 520, 111 }, .{ 342, 129, 780, 167 }, .{ 456, 172, 1040, 222 } } },
-        .{ .identity = "workspace-tab:1", .name = "Shell", .bounds = .{ .{ 524, 86, 816, 111 }, .{ 786, 129, 1224, 167 }, .{ 1048, 172, 1632, 222 } } },
-        .{ .identity = "workspace-tab-close:1", .bounds = .{ .{ 792, 86, 816, 111 }, .{ 1188, 129, 1224, 167 }, .{ 1584, 172, 1632, 222 } } },
+        .{ .identity = "workspace-tab:0", .name = "Agent", .bounds = .{ .{ 228, 86, 527, 111 }, .{ 342, 129, 790, 167 }, .{ 456, 172, 1054, 222 } } },
+        .{ .identity = "workspace-tab:1", .name = "Shell", .bounds = .{ .{ 531, 86, 830, 111 }, .{ 796, 129, 1245, 167 }, .{ 1062, 172, 1660, 222 } } },
+        .{ .identity = "workspace-tab-close:1", .bounds = .{ .{ 806, 86, 830, 111 }, .{ 1209, 129, 1245, 167 }, .{ 1612, 172, 1660, 222 } } },
         .{ .identity = "workspace-split-right:control", .bounds = .{ .{ 844, 86, 868, 108 }, .{ 1266, 129, 1302, 162 }, .{ 1688, 172, 1736, 216 } } },
         .{ .identity = "workspace-split-down:control", .bounds = .{ .{ 870, 86, 894, 108 }, .{ 1305, 129, 1341, 162 }, .{ 1740, 172, 1788, 216 } } },
         .{ .identity = "workspace-new-tab:control", .bounds = .{ .{ 896, 86, 920, 108 }, .{ 1344, 129, 1380, 162 }, .{ 1792, 172, 1840, 216 } } },
@@ -25942,19 +26165,19 @@ test "Quick Chat parity UIA and Show in Graph preserve chat-only workspace actio
             .identity = "workspace-tab:0",
             .present = true,
             .name = "Shell",
-            .bounds = .{ .{ 8, 6, 285, 31 }, .{ 8, 6, 285, 31 }, .{ 8, 6, 285, 31 } },
+            .bounds = .{ .{ 8, 6, 290, 31 }, .{ 8, 6, 290, 31 }, .{ 8, 6, 290, 31 } },
         },
         .{
             .identity = "workspace-tab:1",
             .present = true,
             .name = "Copilot CLI",
-            .bounds = .{ .{ 289, 6, 566, 31 }, .{ 289, 6, 566, 31 }, .{ 289, 6, 566, 31 } },
+            .bounds = .{ .{ 294, 6, 576, 31 }, .{ 294, 6, 576, 31 }, .{ 294, 6, 576, 31 } },
         },
         .{
             .identity = "workspace-tab:2",
             .present = true,
             .name = "Copilot CLI",
-            .bounds = .{ .{ 570, 6, 848, 31 }, .{ 570, 6, 848, 31 }, .{ 570, 6, 848, 31 } },
+            .bounds = .{ .{ 580, 6, 862, 31 }, .{ 580, 6, 862, 31 }, .{ 580, 6, 862, 31 } },
         },
         .{
             .identity = "workspace-restart-session:chat-b",
