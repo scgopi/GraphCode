@@ -8,6 +8,7 @@ The Windows port must have runnable commands before implementation fleets begin.
 |---|---|
 | Windows investigation spikes | `pwsh Tools/windows/validate.ps1 -Task all` |
 | Validation runner contract | `pwsh Tools/windows/Tests/ValidationRunner.Tests.ps1` |
+| Isolated 30-key process environment boundary | `pwsh -NoProfile -File Tools\windows\Tests\IsolatedProcessEnvironment.Contracts.Tests.ps1 -Phase REGRESSION` |
 | Deterministic visual baseline | `pwsh Tools/windows/validate.ps1 -Task visual-baseline` |
 | TDD evidence contract | `pwsh Tools/tdd/Tests/TddEvidence.Tests.ps1` |
 | Platform/wire contracts | `pwsh Tools/windows/validate.ps1 -Task swift-contracts` |
@@ -33,6 +34,49 @@ The Windows port must have runnable commands before implementation fleets begin.
 | macOS app/daemon/CLI | `make test` |
 | macOS format/lint | `make check` |
 | DCO commit range | `git log --format=%B <base>..HEAD` plus trailer validation |
+
+### Isolated process environment boundary
+
+At isolated preflight/reader entry, `IsolatedProcessEnvironment.ps1` reasserts
+only `PATHEXT` and `PSModulePath`, using the reviewed expected map and explicit
+Process scope. It does not read User/Machine environment values, merge paths,
+invent defaults, or write the parent process. The entry validates its approved
+script path first. The full 30-key literal guard remains required, including
+exact key membership and zero unexpected keys; later mutation is still refused.
+
+The contract source provides `-Phase RED` (fresh-pwsh startup plus the old guard,
+deliberately failing), `-Phase GREEN` (same startup plus process-local reassertion)
+and `-Phase REGRESSION` (14 planned cases). Negatives cover missing/empty expected
+literals, extra keys, other-key drift, post-reassertion mutation, wrong entry
+path and refused User/Machine/Host target arguments. Child results contain only
+fixed codes/booleans; synthetic maps and raw streams remain in owned `.build`
+directories. Source preparation is not executed RED/GREEN evidence.
+
+Recovery supplied these official-document excerpts and revisions; no new fetch
+or independent documentation verification was performed for this correction:
+
+- [about_PSModulePath, PowerShell 7.6](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_psmodulepath?view=powershell-7.6),
+  MicrosoftDocs/PowerShell-Docs commit `f435f86004c327baf231bcca0ce689f94b98b798`:
+  "The value of `$Env:PSModulePath` is constructed each time PowerShell starts.
+  The value varies by version of PowerShell and how you launched it."
+  "On Windows, `PSModulePath` is treated similar to how the `Path` environment
+  variable is treated."
+- [about_Environment_Variables, PowerShell 7.6](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_environment_variables?view=powershell-7.6),
+  canonical commit `c4961eb5730e51304b82ed82fa663528f966c56f`:
+  "The Process scope contains the environment variables available in the current
+  process, or PowerShell session. This list of variables is inherited from the
+  parent process and is constructed from the variables in the Machine and User
+  scopes."
+  "When you change environment variables in PowerShell, the change affects only
+  the current session."
+
+The documentation directly supports `PSModulePath` startup construction, not
+`PATHEXT` rewriting. `PATHEXT` is included because the sealed Environment11
+diagnostic observed ordinal5 unequal as well as ordinal7; neither was a
+fresh-root rebind. That observation does not identify Inventory10's failing key
+or a startup cause. The original Inventory10/Environment11 evidence and guards
+remain immutable. Any corrected inventory entry must separately bind this
+helper and preserve its existing source/IL/reference policy.
 
 ## Required PR checks
 
