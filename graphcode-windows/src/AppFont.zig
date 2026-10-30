@@ -17,7 +17,7 @@ const Win32 = @import("Win32.zig");
 const c = Win32.c;
 const Dpi = @import("Dpi.zig");
 
-pub const Style = enum { regular, semibold, card_title, card_mono, card_state };
+pub const Style = enum { regular, semibold, bold, card_title, card_mono, card_state };
 const Face = enum { segoe, consolas };
 const CacheEntry = struct { size: i32, face: Face, weight: i32, font: c.HFONT };
 
@@ -83,7 +83,7 @@ pub fn getStyleForDpi(size: f32, style: Style, dpi: u32) c.HFONT {
     return getScaled(styleHeight(size, dpi), if (style == .card_mono) .consolas else .segoe, switch (style) {
         .regular, .card_mono => c.FW_NORMAL,
         .semibold, .card_title => c.FW_SEMIBOLD,
-        .card_state => c.FW_BOLD,
+        .bold, .card_state => c.FW_BOLD,
     });
 }
 
