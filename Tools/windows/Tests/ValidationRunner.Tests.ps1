@@ -3356,6 +3356,7 @@ function Test-ZigResolverDiagnostics([string] $source) {
 }
 
 & (Join-Path $PSScriptRoot "PesterVersion.Tests.ps1")
+& (Join-Path $PSScriptRoot "IsolatedProcessEnvironment.Contracts.Tests.ps1")
 
 $runner = Join-Path $PSScriptRoot "..\validate.ps1"
 if (-not (Test-Path $runner)) {
