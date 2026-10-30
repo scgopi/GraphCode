@@ -105,6 +105,12 @@ foreach ($name in @('Invoke-MatchedActionSupplement.ps1','Invoke-UiCaptureWorker
     'Stub-Daemon.ps1','Start-MatchedActionSessions.ps1')) {
     Copy-Item -LiteralPath (Join-Path $driverDirectory $name) -Destination (Join-Path $fixtureTools $name)
 }
+$fixtureSource=Join-Path $fixtureRepository 'graphcode-windows\src'
+$null=New-Item -ItemType Directory -Path $fixtureSource -Force
+foreach ($name in @('GraphCanvas.zig','DesignTokens.zig','NativeForms.zig','SheetFramework.zig')) {
+    Copy-Item -LiteralPath (Join-Path $driverDirectory "..\..\graphcode-windows\src\$name") `
+        -Destination (Join-Path $fixtureSource $name)
+}
 & git init --quiet $fixtureRepository
 & git -C $fixtureRepository config core.autocrlf false
 & git -C $fixtureRepository add .
@@ -140,6 +146,7 @@ foreach ($scenario in @('accepted','setup-refusal')) {
         sourceHead=$fixtureHead;sourceTree=$fixtureTree;group='FinalBoundedActions'
         expectedScenes=@($windowBindings|ForEach-Object {$_.sceneNames})
         actionWindowBindings=$windowBindings
+        wireTargetBinding=(Get-CapWireTargetBinding -Repository $fixtureRepository -OwnedRoot $owned)
         moduleSha256=(Get-FileHash (Join-Path $fixtureTools 'UiCaptureDriver.psm1')).Hash
         workerSha256=(Get-FileHash (Join-Path $fixtureTools 'Invoke-UiCaptureWorker.ps1')).Hash
         stubDaemonSha256=(Get-FileHash (Join-Path $fixtureTools 'Stub-Daemon.ps1')).Hash
@@ -231,6 +238,12 @@ foreach ($scenario in @('accepted','setup-refusal')) {
     Assert-ImportCase ($manifest.dryRun.helperAvailability.Count -eq 3 -and
         @($manifest.dryRun.helperAvailability | Where-Object available -NE $true).Count -eq 0 -and
         $manifest.dryRun.topologyPreparation.Count -eq 5) 'Production dry run omitted imported helpers or qualified topology preparation.'
+    Assert-ImportCase ($manifest.dryRun.wireTargetBinding.targetNodeId -ceq
+        $actionPlan.wireTargetBinding.targetNodeId -and
+        $manifest.dryRun.wireAlgorithmPreflight.kind -ceq
+        'MODEL_FIXTURE_SHARED_PRODUCTION_ALGORITHMS_NOT_NATIVE_ACTION' -and
+        $manifest.dryRun.wireAlgorithmPreflight.sheet.content.Handle -eq 4) `
+        'Production dry run omitted exact target binding or shared model algorithm preflight.'
     foreach ($prepared in $manifest.dryRun.topologyPreparation) {
         $source=@($topologies | Where-Object scene -CEQ $prepared.scene)
         $seedManifest=Get-Content $prepared.seedPlan.sessionManifestPath -Raw | ConvertFrom-Json -DateKind String

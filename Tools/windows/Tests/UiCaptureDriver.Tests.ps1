@@ -772,6 +772,20 @@ function Assert-CapRejects {
                 'CapNative|MonitorFromPoint|user32.dll|MonitorFromPoint',
                 'CapNative|GetMonitorInfo|user32.dll|GetMonitorInfoW',
                 'CapNative|SetThreadDpiAwarenessContext|user32.dll|SetThreadDpiAwarenessContext',
+                'CapNative|GetThreadDpiAwarenessContext|user32.dll|GetThreadDpiAwarenessContext',
+                'CapNative|EnumWindows|user32.dll|EnumWindows',
+                'CapNative|EnumChildWindows|user32.dll|EnumChildWindows',
+                'CapNative|GetAncestor|user32.dll|GetAncestor',
+                'CapNative|GetWindow|user32.dll|GetWindow',
+                'CapNative|IsWindowVisible|user32.dll|IsWindowVisible',
+                'CapNative|IsWindowEnabled|user32.dll|IsWindowEnabled',
+                'CapNative|GetClassName|user32.dll|GetClassNameW',
+                'CapNative|SendMessageTimeoutW|user32.dll|SendMessageTimeoutW',
+                'CapNative|ScreenToClient|user32.dll|ScreenToClient',
+                'CapNative|WindowFromPoint|user32.dll|WindowFromPoint',
+                'CapNative|GetForegroundWindow|user32.dll|GetForegroundWindow',
+                'CapNative|GetCursorPos|user32.dll|GetCursorPos',
+                'CapNative|PostMessage|user32.dll|PostMessageA',
                 'CapNative|PrintWindow|user32.dll|PrintWindow',
                 'CapProcessJob|CreateJobObjectW|kernel32.dll|CreateJobObjectW',
                 'CapProcessJob|SetInformationJobObject|kernel32.dll|SetInformationJobObject',
@@ -785,7 +799,7 @@ function Assert-CapRejects {
                 'CapProcessJob|SetHandleInformation|kernel32.dll|SetHandleInformation'
             )
             $actual = @(Test-CapNativeBindings | ForEach-Object { "$($_.Type)|$($_.Method)|$($_.Library)|$($_.EntryPoint)" })
-            Assert-CapTest ($actual.Count -eq 42 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static42 export contract differs.'
+            Assert-CapTest ($actual.Count -eq 56 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static56 export contract differs.'
             return @{ subcases = 39; evidence = 'API export resolution only, no native window or GUI action.' }
         }
         Invoke-CapTest 'legacy mutable seed journal proof is refused and exact numbered terminal proof is accepted' {
