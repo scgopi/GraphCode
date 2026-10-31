@@ -21,7 +21,8 @@ env:
 # on every Windows-relevant pull request: windows-shell and packaging run in
 # windows-shell.yml (required check `windows-shell`), and hardening runs in
 # windows-hardening.yml (required `Deterministic hardening (...)` checks). The
-# remaining tasks are split across two parallel parts behind the required
+# remaining tasks and the source-only runner contract are split across three
+# parallel parts behind the required
 # `windows-spikes` aggregate job.
 jobs:
   changes:
@@ -58,15 +59,16 @@ jobs:
         shell: pwsh
         run: ./Tools/windows/validate.ps1 -Task privacy
 
-  # The Swift spikes, production package tests and clean-runtime smoke, and the
-  # swift-format gate. The runner contract also runs here, where Swift exists,
-  # so its unformatted-source negative control exercises the real formatter.
-  spikes-swift:
-    name: windows-spikes Swift
+  # ValidationRunner.Tests.ps1 is source-only but deliberately uses the real
+  # pinned Swift formatter for its negative control. Run it once on Windows
+  # 2022 in parallel instead of repeating it inside spikes-swift and both
+  # deterministic hardening legs. Windows 2025 remains covered by hardening.
+  validation-runner:
+    name: Validation runner contract
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.windows == 'true') }}
     runs-on: windows-2022
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -80,24 +82,11 @@ jobs:
           swift-build: 6.3.3-RELEASE
           cache: true
 
-      - name: Restore pinned Zig toolchains
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        timeout-minutes: 10
-        with:
-          path: |
-            .ci-tools/zig-0.15.2
-            .ci-tools/zig-0.16.0
-          key: windows-zig-v1-${{ hashFiles('Tools/windows/bootstrap.ps1') }}
-
-      - name: Bootstrap exact Windows dependencies
-        shell: pwsh
-        timeout-minutes: 30
-        run: ./Tools/windows/bootstrap.ps1 -ToolRoot .ci-tools -ProviderRoot .ci-providers
-
       - name: Verify validation runner contract
         shell: pwsh
         timeout-minutes: 15
-        run: ./Tools/windows/Tests/ValidationRunner.Tests.ps1
+        run: ./Tools/windows/Invoke-ValidationRunnerContract.ps1
+
       - name: Resolve capture contract failure diagnostics root
         id: capture_temp
         if: failure()
@@ -120,7 +109,7 @@ jobs:
         if: ${{ failure() && steps.capture_temp.conclusion == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ui-capture-spikes-swift-${{ github.run_attempt }}
+          name: ui-capture-validation-runner-${{ github.run_attempt }}
           path: |
             ${{ steps.capture_temp.outputs.root }}\gc-ui-capture-*\suite\**\*.json
             ${{ steps.capture_temp.outputs.root }}\gc-ui-capture-*\suite\**\*.jsonl
@@ -138,6 +127,48 @@ jobs:
             !${{ steps.capture_temp.outputs.root }}\g[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\suite\**\.git\**
           if-no-files-found: warn
           retention-days: 7
+
+  # The Swift spikes, production package tests and clean-runtime smoke, and the
+  # swift-format gate.
+  spikes-swift:
+    name: windows-spikes Swift
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.windows == 'true') }}
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        timeout-minutes: 5
+
+      # Keep the source topology check in this job so the existing runner
+      # contract verifies its timeout before the expensive Swift/provider work.
+      - name: Verify validation runner contract topology
+        shell: pwsh
+        timeout-minutes: 15
+        run: ./Tools/windows/Tests/WindowsCiTopology.Tests.ps1
+
+      - name: Install pinned Swift toolchain
+        uses: compnerd/gha-setup-swift@397094e75494a93fa8d81db0268dbc8f5d6cf7c6 # v0.4.1
+        timeout-minutes: 10
+        with:
+          swift-version: swift-6.3.3-release
+          swift-build: 6.3.3-RELEASE
+          cache: true
+
+      - name: Restore pinned Zig toolchains
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        timeout-minutes: 10
+        with:
+          path: |
+            .ci-tools/zig-0.15.2
+            .ci-tools/zig-0.16.0
+          key: windows-zig-v1-${{ hashFiles('Tools/windows/bootstrap.ps1') }}
+
+      - name: Bootstrap exact Windows dependencies
+        shell: pwsh
+        timeout-minutes: 30
+        run: ./Tools/windows/bootstrap.ps1 -ToolRoot .ci-tools -ProviderRoot .ci-providers
 
       - name: Run Swift Windows port validation
         shell: pwsh
@@ -210,7 +241,7 @@ jobs:
           retention-days: 7
 
   windows-spikes:
-    needs: [changes, spikes-swift, spikes-other]
+    needs: [changes, validation-runner, spikes-swift, spikes-other]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

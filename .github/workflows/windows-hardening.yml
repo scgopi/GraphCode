@@ -70,9 +70,12 @@ jobs:
         shell: pwsh
         run: ./Tools/windows/validate.ps1 -Task hardening
       - name: Verify runner contract
-        if: env.HARDENING_REQUIRED == 'true'
+        # Pull requests run this source contract in the windows-spikes aggregate
+        # once with pinned Swift. Keep one fallback for this workflow's independent
+        # scheduled and manual runs.
+        if: env.HARDENING_REQUIRED == 'true' && github.event_name != 'pull_request' && matrix.os == 'windows-2022'
         shell: pwsh
-        run: ./Tools/windows/Tests/ValidationRunner.Tests.ps1
+        run: ./Tools/windows/Invoke-ValidationRunnerContract.ps1
       - name: Resolve capture contract failure diagnostics root
         id: capture_temp
         if: failure()
