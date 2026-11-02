@@ -1,0 +1,875 @@
+{
+  "snapshotManifestSha256": "CC8ED5141AE38CB425F4E41AB7F2E4EF1F07F5AE4CAD7FA969A68645B07A0A2F",
+  "units": [
+    {
+      "id": "ui.activation.foreground-refused",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "195-290",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.activation.foreground-acquired",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "195-290",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.activation.ownership-refused",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "195-290",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.activation.invalid-window-refused",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "195-290",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.owned-key",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.foreign-foreground",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.foreign-focus",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.sibling-focus",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.missing-focus",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.dead-retained-process",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.hidden-window",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.disabled-window",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.owned-unicode",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.unicode-foreign-focus",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.owned-mouse",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.mouse-hit-loss",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.mouse-cursor-loss",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.mouse-foreign-foreground",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.owned-edit",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.edit-focus-loss-after-select",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.edit-focus-loss-after-read",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.owned-submenu-hover",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.submenu-foreign-foreground",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.submenu-unretained-process",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.input.submenu-covered-point",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "758-890",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.predicate.owned-shell",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1221-1255",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.predicate.owned-popup",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1221-1255",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.predicate.foreign-foreground",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1221-1255",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.predicate.foreign-foreground-root",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1221-1255",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.predicate.foreign-hit",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1221-1255",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.predicate.underlying-shell-hit",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1221-1255",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.predicate.hidden-popup",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1221-1255",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.predicate.unknown-owner",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1221-1255",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.predicate.foreign-popup",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1221-1255",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.predicate.absent-popup",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1221-1255",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.effect.owned",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1256-1328",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.effect.owned-enter",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1256-1328",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.effect.foreign-foreground",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1256-1328",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.effect.foreign-after-hover",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1256-1328",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.effect.foreign-before-enter",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1256-1328",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.effect.foreign-owner-all",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1256-1328",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.effect.foreign-hit",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1256-1328",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.effect.underlying-shell-hit",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1256-1328",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.effect.hidden-popup",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1256-1328",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.effect.cursor-changed",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1256-1328",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.effect.cursor-unreadable",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1256-1328",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.geometry.seven-pixel-band",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7626-7643",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.geometry.multiple-covers",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7626-7643",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.gate-state.activation-reference",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7408-7430",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.gate-state.input-reference",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7408-7430",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "5896-5924",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.lookup.named-direct-viewport",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.lookup.hidden-write-read",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.lookup.missing-id",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.lookup.missing-write-read",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.lookup.direct-precedence",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.lookup.wrong-root",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.lookup.wrong-viewport",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.lookup.other-sibling",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.lookup.no-deeper-fallback",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.lookup.direct-viewport-required",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.lookup.native-form",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.lookup.workspace-manager",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.lookup.unknown-content",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.lookup.null-parent",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.hit.nested-edit",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.hit.content-background",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.hit.wrong-root",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.hit.wrong-container",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.hit.no-recursion",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.native.hit.direct-child",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7431-7624",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.host-info.current-session",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "5896-5924",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.activation.source.actual",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "169-223",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.activation.source.unshared",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "169-223",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.activation.source.missing-initial-owner",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "169-223",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.activation.source.missing-fresh-owner",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "169-223",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.activation.source.missing-restore",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "169-223",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.activation.source.missing-native-error",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "169-223",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.source.actual",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1164-1220",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.source.bypass-guard",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1164-1220",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.source.stale-foreground",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1164-1220",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.source.stale-cursor",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1164-1220",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.source.missing-held-owner-check",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1164-1220",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.source.missing-pre-cursor-guard",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1164-1220",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.source.missing-pre-enter-guard",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1164-1220",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.source.wrong-hit-root",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1164-1220",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.popup.source.extra-input",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1164-1220",
+      "state": "Implemented"
+    },
+    {
+      "id": "ui.mock.isolation.absent",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "19-88",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.mock.isolation.empty",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "19-88",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.mock.isolation.valued",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "19-88",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.mock.isolation.failure-identity",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "19-88",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.mock.isolation.ordinary-diagnostic",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "19-88",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.initially-empty",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.initially-offscreen",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.already-visible",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.mark-only-empty",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.delayed-visible",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.outside-before-fit",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.wrong-source-owner",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.wrong-fit-owner",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.fit-offscreen",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.fit-disabled",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.remains-empty",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.remains-offscreen",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.wrong-id-after-fit",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.wrong-owner-after-fit",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.outside-after-fit",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.missing-after-fit",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.mutant-skip-fit",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.mutant-unsafe-offscreen-bounds",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.mutant-wrong-identity-accepted",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.recovery.visibility.mutant-outside-bounds-accepted",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "989-1162",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.visibility.actual",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1330-1424",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.visibility.missing-fit",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1330-1424",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.visibility.wrong-identity",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1330-1424",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.visibility.missing-offscreen",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1330-1424",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.visibility.ungated-bounds",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1330-1424",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.visibility.escaped-bounds",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1330-1424",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.visibility.stale-visibility",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1330-1424",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.visibility.missing-containment",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1330-1424",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.visibility.missing-require",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1330-1424",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.rejection",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.success",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.unavailable",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.foreign-pid",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.identity-drift",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.zero-bounds",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.offscreen",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.disabled",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.selected",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.runtime-unavailable",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.parent-unavailable",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.telemetry-write-failure",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.receipt-exists",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.receipt-unconfigured",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.deadline",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.long-identity",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.long-runtime",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.invalid-boolean",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.nonfinite-bounds",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.exception-chain",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.delete.select.foreign-parent",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "1426-1670",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.host-info.diagnostics",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "5896-5924",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.root.source-assertions",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "5342-7403",
+      "state": "Incomplete"
+    },
+    {
+      "id": "ui.production.consumer-linkage",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "169-194;6751-6778;7408-7430",
+      "state": "Incomplete"
+    }
+  ]
+}

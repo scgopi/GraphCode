@@ -7,7 +7,10 @@ namespace GraphCode.Validation.Ui;
 
 public static class SuiteRegistration
 {
-    public static IReadOnlyList<IValidationSuite> CreateSuites() => new IValidationSuite[] { new ActivationSuite() };
+    public static IReadOnlyList<IValidationSuite> CreateSuites() => new IValidationSuite[]
+    {
+        new ActivationSuite(), new ManagedUiSuite(), new NativeUiSuite()
+    };
 }
 
 public sealed class ActivationSuite : IValidationSuite
@@ -18,7 +21,7 @@ public sealed class ActivationSuite : IValidationSuite
         "ui.activation.foreground-refused",
         "ui.activation.foreground-acquired",
         "ui.activation.ownership-refused",
-        "ui.activation.invalid-window"
+        "ui.activation.invalid-window-refused"
     };
 
     public Task<IReadOnlyList<UnitResult>> RunAsync(ValidationContext context, CancellationToken cancellationToken)

@@ -1,18 +1,874 @@
 {
   "units": [
-    { "id": "ui.activation.foreground-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
-    { "id": "ui.activation.foreground-acquired", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
-    { "id": "ui.activation.ownership-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
-    { "id": "ui.activation.invalid-window", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
-    { "id": "ui.activation.source-boundary", "owner": "Ui", "minimumCount": 6, "requiredGroups": [] },
-    { "id": "ui.input.batch", "owner": "Ui", "minimumCount": 21, "requiredGroups": [] },
-    { "id": "ui.popup.predicate", "owner": "Ui", "minimumCount": 10, "requiredGroups": [] },
-    { "id": "ui.popup.source", "owner": "Ui", "minimumCount": 9, "requiredGroups": [] },
-    { "id": "ui.popup.effect", "owner": "Ui", "minimumCount": 11, "requiredGroups": [] },
-    { "id": "ui.native.lookup", "owner": "Ui", "minimumCount": 14, "requiredGroups": [] },
-    { "id": "ui.native.hit", "owner": "Ui", "minimumCount": 6, "requiredGroups": [] },
-    { "id": "ui.geometry", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
-    { "id": "ui.host-info", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
-    { "id": "ui.gate-state", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] }
+    {
+      "id": "ui.activation.foreground-refused",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.foreground-acquired",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.ownership-refused",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.invalid-window-refused",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.owned-key",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.foreign-foreground",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.foreign-focus",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.sibling-focus",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.missing-focus",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.dead-retained-process",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.hidden-window",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.disabled-window",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.owned-unicode",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.unicode-foreign-focus",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.owned-mouse",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.mouse-hit-loss",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.mouse-cursor-loss",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.mouse-foreign-foreground",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.owned-edit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.edit-focus-loss-after-select",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.edit-focus-loss-after-read",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.owned-submenu-hover",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.submenu-foreign-foreground",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.submenu-unretained-process",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.submenu-covered-point",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.owned-shell",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.owned-popup",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.foreign-foreground",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.foreign-foreground-root",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.foreign-hit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.underlying-shell-hit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.hidden-popup",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.unknown-owner",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.foreign-popup",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.absent-popup",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.owned",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.owned-enter",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.foreign-foreground",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.foreign-after-hover",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.foreign-before-enter",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.foreign-owner-all",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.foreign-hit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.underlying-shell-hit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.hidden-popup",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.cursor-changed",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.cursor-unreadable",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.geometry.seven-pixel-band",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.geometry.multiple-covers",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.gate-state.activation-reference",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.gate-state.input-reference",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.named-direct-viewport",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.hidden-write-read",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.missing-id",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.missing-write-read",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.direct-precedence",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.wrong-root",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.wrong-viewport",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.other-sibling",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.no-deeper-fallback",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.direct-viewport-required",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.native-form",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.workspace-manager",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.unknown-content",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.null-parent",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.hit.nested-edit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.hit.content-background",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.hit.wrong-root",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.hit.wrong-container",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.hit.no-recursion",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.hit.direct-child",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.host-info.current-session",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.source.actual",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.source.unshared",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.source.missing-initial-owner",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.source.missing-fresh-owner",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.source.missing-restore",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.source.missing-native-error",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.actual",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.bypass-guard",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.stale-foreground",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.stale-cursor",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.missing-held-owner-check",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.missing-pre-cursor-guard",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.missing-pre-enter-guard",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.wrong-hit-root",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.extra-input",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.mock.isolation.absent",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.mock.isolation.empty",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.mock.isolation.valued",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.mock.isolation.failure-identity",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.mock.isolation.ordinary-diagnostic",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.initially-empty",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.initially-offscreen",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.already-visible",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.mark-only-empty",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.delayed-visible",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.outside-before-fit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.wrong-source-owner",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.wrong-fit-owner",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.fit-offscreen",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.fit-disabled",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.remains-empty",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.remains-offscreen",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.wrong-id-after-fit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.wrong-owner-after-fit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.outside-after-fit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.missing-after-fit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.mutant-skip-fit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.mutant-unsafe-offscreen-bounds",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.mutant-wrong-identity-accepted",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.mutant-outside-bounds-accepted",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.actual",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.missing-fit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.wrong-identity",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.missing-offscreen",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.ungated-bounds",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.escaped-bounds",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.stale-visibility",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.missing-containment",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.missing-require",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.rejection",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.success",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.unavailable",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.foreign-pid",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.identity-drift",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.zero-bounds",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.offscreen",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.disabled",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.selected",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.runtime-unavailable",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.parent-unavailable",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.telemetry-write-failure",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.receipt-exists",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.receipt-unconfigured",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.deadline",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.long-identity",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.long-runtime",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.invalid-boolean",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.nonfinite-bounds",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.exception-chain",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.foreign-parent",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.host-info.diagnostics",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source-assertions",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.production.consumer-linkage",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    }
   ]
 }
