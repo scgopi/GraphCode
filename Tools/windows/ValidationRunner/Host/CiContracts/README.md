@@ -71,3 +71,14 @@ Explicitly loading the real Windows bindings fixed that harness error without
 replacing or weakening the retained-authority barrier. These focused results
 remain distinct from the integration owner's normal full-host run and from
 hosted CI, neither of which this lane ran.
+
+The compatibility wrapper scopes `DOTNET_ROOT` and `DOTNET_ROOT_X64` to the
+directory of a configured `GRAPHCODE_DOTNET10403` executable while launching
+the apphost, then restores exact process-level presence and values in `finally`.
+An unconfigured caller retains its existing CI/global runtime resolution.
+`PrivateSdkCaller.Tests.ps1` extracts that actual production helper and runs
+16 in-memory action/environment controls, including absent, empty, valued and
+mixed roots, original failure identity, output/error streams, native exit state
+and unchanged normal arguments. The standalone topology driver runs these
+controls too. They are reported separately from the seven mandatory root units
+and do not claim an actual private SDK installation or full-host execution.

@@ -142,10 +142,15 @@ $wrapper = Get-Content `
   (Join-Path $repoRoot "Tools\windows\Invoke-ValidationRunnerContract.ps1") -Raw
 Assert-Contract ($wrapper.Contains('Build-CompiledValidationRunner.ps1') -and
   $wrapper.Contains('ValidationRunner.exe') -and
-  $wrapper -match '(?m)^& \$runner --repository-root \$repoRoot --artifact-root \$artifactRoot 2>&1 \| ForEach-Object \{' -and
+  $wrapper -match '(?m)^\s*& \$runner --repository-root \$repoRoot --artifact-root \$artifactRoot 2>&1 \| ForEach-Object \{' -and
   $wrapper -notmatch 'ValidationRunner\.Tests\.ps1|--suite\b|--self-test\b|--fixture\b') `
   "the compatibility wrapper must build and execute only the normal compiled host"
 Assert-CompleteProof $wrapper
+
+$privateSdkArtifacts = Join-Path $repoRoot (".build\private-sdk-caller-" + [guid]::NewGuid().ToString("N"))
+$null = New-Item -ItemType Directory -Path $privateSdkArtifacts
+& (Join-Path $repoRoot "Tools\windows\ValidationRunner\Host\CiContracts\PrivateSdkCaller.Tests.ps1") `
+  -RepositoryRoot $repoRoot.Path -ArtifactRoot $privateSdkArtifacts
 
 Write-Host "Windows CI topology: $checks checks, 0 failures"
 exit 0

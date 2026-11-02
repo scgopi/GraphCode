@@ -1,6 +1,33 @@
 [CmdletBinding()]
 param()
 
+function Invoke-WithValidationRunnerRuntime([scriptblock] $Action) {
+  $selected = [Environment]::GetEnvironmentVariable("GRAPHCODE_DOTNET10403", "Process")
+  $prior = @{}
+  if (-not [string]::IsNullOrWhiteSpace($selected)) {
+    if (-not [IO.Path]::IsPathFullyQualified($selected) -or
+        -not (Test-Path -LiteralPath $selected -PathType Leaf)) {
+      throw "GRAPHCODE_DOTNET10403 must identify the selected private dotnet executable"
+    }
+    $runtimeRoot = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($selected))
+    $environment = [Environment]::GetEnvironmentVariables("Process")
+    foreach ($name in @("DOTNET_ROOT", "DOTNET_ROOT_X64")) {
+      $prior[$name] = @{ present = $environment.Contains($name); value = $environment[$name] }
+    }
+  }
+  try {
+    foreach ($name in $prior.Keys) {
+      [Environment]::SetEnvironmentVariable($name, $runtimeRoot, "Process")
+    }
+    & $Action
+  } finally {
+    foreach ($name in $prior.Keys) {
+      $value = if ($prior[$name].present) { $prior[$name].value } else { $null }
+      [Environment]::SetEnvironmentVariable($name, $value, "Process")
+    }
+  }
+}
+
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $assembly = & (Join-Path $PSScriptRoot "Build-CompiledValidationRunner.ps1") -Configuration Release
@@ -12,12 +39,15 @@ $artifactRoot = Join-Path $repoRoot (".build\validation-runner-contract-" + [gui
 $output = [Collections.Generic.List[string]]::new()
 $passMarkers = 0
 $executedMarkers = 0
-& $runner --repository-root $repoRoot --artifact-root $artifactRoot 2>&1 | ForEach-Object {
-  $line = "$_"
-  $output.Add($line)
-  Write-Host $line
+$exitCode = $null
+Invoke-WithValidationRunnerRuntime {
+  & $runner --repository-root $repoRoot --artifact-root $artifactRoot 2>&1 | ForEach-Object {
+    $line = "$_"
+    $output.Add($line)
+    Write-Host $line
+  }
+  $script:exitCode = $LASTEXITCODE
 }
-$exitCode = $LASTEXITCODE
 if ($exitCode -ne 0) {
   throw "Compiled validation failed with exit code $exitCode; evidence retained at $artifactRoot"
 }
