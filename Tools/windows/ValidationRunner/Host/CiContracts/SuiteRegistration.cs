@@ -11,7 +11,7 @@ public static class SuiteRegistration
             SourceContracts.Hardening, 7),
         new RootSuite("host.ci-partition", "Host\\CiContracts\\Partition.ps1", PartitionCases),
         new RootSuite("host.ci-aggregate", "Host\\CiContracts\\Aggregate.ps1", AggregateCases, SourceContracts.Aggregate, 8),
-        new RootSuite("host.ci-topology", null, [], SourceContracts.Topology, 36),
+        new RootSuite("host.ci-topology", null, [], SourceContracts.Topology, 39),
         new RootSuite("host.shell-section-gate", "Host\\CiContracts\\ShellSections.ps1", SectionCases),
         new RootSuite("host.zig-resolver", "Host\\CiContracts\\ZigResolver.ps1", ResolverCases)
     ];

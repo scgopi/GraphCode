@@ -44,10 +44,11 @@
     },
     {
       "unit": "host.ci-topology",
-      "expectedExpandedCount": 36,
+      "expectedExpandedCount": 39,
       "production": ".github/workflows/windows-*.yml and Tools/windows/Invoke-ValidationRunnerContract.ps1",
       "cases": [
         { "originalLines": "5233-5257", "ids": ["source.cold-cache.spikes-swift", "source.cold-cache.spikes-other", "source.cold-cache.packaging-real", "source.runner-topology-timeout"] },
+        { "originalLines": null, "purpose": "Hosted artifact loss regression: exact compiled evidence root must opt into hidden files; both missing and explicit false options are rejected", "ids": ["source.runner-hidden-evidence-scoped", "control.evidence.hidden-files-missing", "control.evidence.hidden-files-false"] },
         { "originalLines": "5258-5273", "ids": ["source.warmer-key.zig", "source.warmer-key.providers", "source.warmer-events-and-build-only"] },
         { "originalLines": "5277-5282", "ids": ["source.uia-diagnostics.shell", "source.uia-diagnostics.port"] },
         { "originalLines": "5283-5291", "ids": ["source.pinned-swift.shell", "source.pinned-swift.port", "source.pinned-swift.hardening"] },

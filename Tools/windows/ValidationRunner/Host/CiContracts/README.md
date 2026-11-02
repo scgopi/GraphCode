@@ -92,3 +92,12 @@ missing-prerequisite control, making the seven-family focused total **144**.
 Local verification reused real Pester 5.7.1 in both actual step bodies without
 downloading anything. Eight separate workflow-body mocks covered loaded,
 available, missing and save-failure branches; they are not full-host cases.
+
+The compiled evidence directory is hidden by name. Both explicitly scoped
+uploads now set `include-hidden-files: true` for the exact
+`.ci-validation-runner` path; no repository, home or broader directory is added
+to either upload. A source observation plus missing/false negative controls
+raise the topology count from 36 to **39**, and the focused root total from
+144 to **147**. The pre-fix run executed 39 cases with exactly the new source
+observation failing; this is a source-wiring regression, not a local execution
+of GitHub's artifact-upload service.

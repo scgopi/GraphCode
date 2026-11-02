@@ -251,8 +251,42 @@ internal static class SourceContracts
                 "Compatibility entry must execute only the compiled host, never the old monolith");
             AssertProof(wrapper);
         });
+        cases.Check("source.runner-hidden-evidence-scoped", () =>
+        {
+            AssertCompiledEvidenceUpload(port.Jobs["validation-runner"]);
+            AssertCompiledEvidenceUpload(hardening.Jobs["deterministic"]);
+        });
+        const string evidenceFixture = """
+              runner:
+                steps:
+                  - name: Retain compiled validation evidence
+                    uses: actions/upload-artifact@pinned
+                    with:
+                      path: .ci-validation-runner
+                      include-hidden-files: true
+            """;
+        foreach (var (id, replacement) in new[] { ("missing", ""), ("false", "include-hidden-files: false") })
+            cases.Check("control.evidence.hidden-files-" + id, () =>
+            {
+                AssertCompiledEvidenceUpload(evidenceFixture);
+                Reject(() => AssertCompiledEvidenceUpload(
+                    Mutate(evidenceFixture, "include-hidden-files: true", replacement)));
+            });
         AddCanonicalControls(cases);
         return cases.Result("host.ci-topology");
+    }
+
+    private static void AssertCompiledEvidenceUpload(string job)
+    {
+        var uploads = WorkflowText.Steps(job).Where(step =>
+            step.Contains("name: Retain compiled validation", StringComparison.Ordinal) &&
+            SourceCases.Match(step, @"(?m)^        uses: actions/upload-artifact@")).ToArray();
+        SourceCases.Require(uploads.Length == 1, "Expected exactly one explicitly scoped compiled evidence upload");
+        var upload = uploads[0];
+        var paths = Regex.Matches(upload, @"(?m)^          path: ([^\r\n]+)");
+        SourceCases.Require(paths.Count == 1 && paths[0].Groups[1].Value.Trim() == ".ci-validation-runner" &&
+            SourceCases.Match(upload, @"(?m)^          include-hidden-files: true[ \t]*\r?$"),
+            "Compiled evidence upload must include hidden files only under the exact .ci-validation-runner root");
     }
 
     internal static int ExeInvocations(string text) => Regex.Matches(text,
