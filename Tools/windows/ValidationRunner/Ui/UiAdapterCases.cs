@@ -203,11 +203,42 @@ internal static class UiAdapterCases
         "ui.root.source.line-7337",
         "ui.root.source.line-7344"
     };
+    internal static readonly string[] DerivedIds =
+    {
+        "ui.host-info.diagnostics",
+        "ui.root.source.line-5501",
+        "ui.root.source.line-5514",
+        "ui.root.source.line-5524",
+        "ui.root.source.line-5537",
+        "ui.root.source.line-5897",
+        "ui.root.source.line-5905",
+        "ui.root.source.line-5914",
+        "ui.root.source.line-5918",
+        "ui.root.source.line-6057",
+        "ui.root.source.line-6093",
+        "ui.root.source.line-6157",
+        "ui.root.source.line-6182",
+        "ui.root.source.line-6276",
+        "ui.root.source.line-6292",
+        "ui.root.source.line-6298",
+        "ui.root.source.line-6305",
+        "ui.root.source.line-6314",
+        "ui.root.source.line-6326",
+        "ui.root.source.line-6352",
+        "ui.root.source.line-6412",
+        "ui.root.source.line-6467",
+        "ui.root.source.line-6591",
+        "ui.root.source.line-6654",
+        "ui.root.source.line-6754",
+        "ui.root.source.line-6770",
+        "ui.root.source.line-7027"
+    };
     internal static IReadOnlyList<IValidationSuite> CreateSuites() => new IValidationSuite[]
     {
         new StandaloneSuites.CaseScriptSuite("ui.powershell-contracts", @"Tools\windows\ValidationRunner\Ui\UiPowerShellContracts.ps1", "UI_CASE_RESULT=", PowerShellIds),
         new StandaloneSuites.CaseScriptSuite("ui.delete-contracts", @"Tools\windows\ValidationRunner\Ui\UiDeleteContracts.ps1", "UI_CASE_RESULT=", DeleteIds),
         new StandaloneSuites.CaseScriptSuite("ui.root-source-contracts", @"Tools\windows\ValidationRunner\Ui\UiRootSourceContracts.ps1", "UI_CASE_RESULT=", RootSourceIds),
-        new StandaloneSuites.CaseScriptSuite("ui.functional-contracts", @"Tools\windows\ValidationRunner\Ui\UiFunctionalContracts.ps1", "UI_CASE_RESULT=", FunctionalIds)
+        new StandaloneSuites.CaseScriptSuite("ui.functional-contracts", @"Tools\windows\ValidationRunner\Ui\UiFunctionalContracts.ps1", "UI_CASE_RESULT=", FunctionalIds),
+        new StandaloneSuites.CaseScriptSuite("ui.derived-contracts", @"Tools\windows\ValidationRunner\Ui\UiDerivedContracts.ps1", "UI_CASE_RESULT=", DerivedIds)
     };
 }
