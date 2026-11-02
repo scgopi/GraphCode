@@ -4,7 +4,7 @@ using GraphCode.Windows;
 
 namespace GraphCode.Validation.Ui.Fixtures {
   public sealed class UiaWindowActivationFixture : IUiaWindowActivationOperations {
-    public string LastActivationDiagnostic;
+    public string LastActivationDiagnostic = "not attempted";
     public int GlobalKeys, Attachments, Mutations, OwnershipChecks;
     public bool Acquire, Owned;
     public IntPtr Foreground;
