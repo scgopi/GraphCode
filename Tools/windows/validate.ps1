@@ -262,7 +262,23 @@ function Install-AtomicRuntimePackage([string] $sourceDirectory, [string] $desti
 
 function Invoke-Native([string] $description, [scriptblock] $command) {
   Write-Host "==> $description"
-  & $command
+  $ownershipUnproven = $false
+  try {
+    & $command 2>&1 | ForEach-Object {
+      if ($_ -is [string] -and $_ -ceq "GRAPHCODE_VALIDATION_ROOT_RETENTION_REQUIRED=ownership_unproven") {
+        $ownershipUnproven = $true
+      }
+      $_
+    }
+  } catch {
+    if ($ownershipUnproven) { $_.Exception.Data["GraphCodeValidationRootRetentionRequired"] = $true }
+    throw
+  }
+  if ($ownershipUnproven) {
+    $failure = [InvalidOperationException]::new("$description reported unproven process ownership (exit code $LASTEXITCODE).")
+    $failure.Data["GraphCodeValidationRootRetentionRequired"] = $true
+    throw $failure
+  }
   if ($LASTEXITCODE -ne 0) {
     throw "$description failed with exit code $LASTEXITCODE"
   }
@@ -375,7 +391,10 @@ function Invoke-WindowsShellValidationIsolation(
     TMP = Join-Path $validationRoot "temp"
   }
   $savedEnvironment = @{}
+  $savedEnvironmentMembership = @{}
+  $processEnvironment = [Environment]::GetEnvironmentVariables([EnvironmentVariableTarget]::Process)
   foreach ($name in $ownedEnvironment.Keys) {
+    $savedEnvironmentMembership[$name] = $processEnvironment.Contains($name)
     $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable(
       $name,
       [EnvironmentVariableTarget]::Process
@@ -383,6 +402,7 @@ function Invoke-WindowsShellValidationIsolation(
   }
 
   $primaryError = $null
+  $actionStarted = $false
   $cleanupErrors = [Collections.Generic.List[Exception]]::new()
   try {
     New-Item -ItemType Directory -Force -Path @(
@@ -398,25 +418,87 @@ function Invoke-WindowsShellValidationIsolation(
       )
     }
     Write-Host "WINDOWS_SHELL_VALIDATION_ISOLATION_ROOT=$validationRoot"
+    $actionStarted = $true
     & $Action
   } catch {
     $primaryError = $_
   } finally {
     foreach ($entry in $savedEnvironment.GetEnumerator()) {
       try {
-        [Environment]::SetEnvironmentVariable(
-          $entry.Key,
-          $entry.Value,
-          [EnvironmentVariableTarget]::Process
-        )
+        if ($savedEnvironmentMembership[$entry.Key]) {
+          [Environment]::SetEnvironmentVariable(
+            $entry.Key,
+            $entry.Value,
+            [EnvironmentVariableTarget]::Process
+          )
+        } elseif (Test-Path -LiteralPath "Env:\$($entry.Key)") {
+          Remove-Item -LiteralPath "Env:\$($entry.Key)" -ErrorAction Stop
+        }
       } catch {
         $cleanupErrors.Add($_.Exception)
       }
     }
+    $retentionReceipt = Join-Path $validationRoot "ownership-unproven.json"
+    if ([IO.File]::Exists($retentionReceipt)) {
+      if ($null -eq $primaryError) {
+        $primaryError = [Management.Automation.ErrorRecord]::new(
+          [InvalidOperationException]::new("A child reported unproven ownership despite workload completion."),
+          "WindowsShellOwnershipUnproven", [Management.Automation.ErrorCategory]::InvalidResult, $validationRoot)
+      }
+      $primaryError.Exception.Data["GraphCodeValidationRootRetentionRequired"] = $true
+      $receiptStream = $null
+      try {
+        if ([IO.File]::GetAttributes($retentionReceipt) -band [IO.FileAttributes]::ReparsePoint) {
+          throw [IO.InvalidDataException]::new("Ownership retention receipt must not be a reparse point.")
+        }
+        $receiptStream = [IO.FileStream]::new($retentionReceipt, [IO.FileMode]::Open,
+          [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+        $bytes = [byte[]]::new(4097)
+        $count = 0
+        while ($count -lt $bytes.Length) {
+          $read = $receiptStream.Read($bytes, $count, $bytes.Length - $count)
+          if ($read -eq 0) { break }
+          $count += $read
+        }
+        if ($count -gt 4096) { throw [IO.InvalidDataException]::new("Ownership retention receipt exceeds its 4096-byte limit.") }
+        $receipt = [Text.UTF8Encoding]::new($false, $true).GetString($bytes, 0, $count) |
+          ConvertFrom-Json -Depth 4 -ErrorAction Stop
+        if ($receipt.schemaVersion -ne 1 -or $receipt.reason -cne "ownership_unproven" -or
+            $receipt.validationRoot -isnot [string] -or
+            [IO.Path]::GetFullPath($receipt.validationRoot) -ine [IO.Path]::GetFullPath($validationRoot)) {
+          throw [IO.InvalidDataException]::new("Ownership retention receipt schema, reason or validation root is invalid.")
+        }
+      } catch {
+        $cleanupErrors.Add($_.Exception)
+      } finally {
+        if ($receiptStream) { $receiptStream.Dispose() }
+      }
+    }
+    if ($actionStarted -and $null -ne $primaryError) {
+      if ($primaryError.Exception.Data["GraphCodeValidationRootRetentionRequired"] -isnot [bool] -or
+          -not $primaryError.Exception.Data["GraphCodeValidationRootRetentionRequired"]) {
+        $primaryError.Exception.Data["GraphCodeValidationRootRetentionReason"] = "workload_failed_without_cleanup_proof"
+      }
+      $primaryError.Exception.Data["GraphCodeValidationRootRetentionRequired"] = $true
+    }
+    $retainRoot = $null -ne $primaryError -and
+      $primaryError.Exception.Data["GraphCodeValidationRootRetentionRequired"] -is [bool] -and
+      $primaryError.Exception.Data["GraphCodeValidationRootRetentionRequired"]
     try {
-      Remove-Item -LiteralPath $validationRoot -Recurse -Force -ErrorAction Stop
+      if ($retainRoot) {
+        if (-not [IO.Directory]::Exists($validationRoot)) {
+          throw [IO.IOException]::new("Requested validation root retention failed: $validationRoot no longer exists.")
+        }
+        $retainedRoots = if ($primaryError.Exception.Data.Contains("GraphCodeValidationRetainedRoots")) {
+          @($primaryError.Exception.Data["GraphCodeValidationRetainedRoots"])
+        } else { @() }
+        $primaryError.Exception.Data["GraphCodeValidationRetainedRoots"] = @($retainedRoots) + @($validationRoot)
+        Write-Host "WINDOWS_SHELL_VALIDATION_ISOLATION_ROOT_RETAINED=$validationRoot"
+      } else {
+        Remove-Item -LiteralPath $validationRoot -Recurse -Force -ErrorAction Stop
+      }
     } catch {
-      if (-not (
+      if ($retainRoot -or -not (
           $_.Exception -is [Management.Automation.ItemNotFoundException] -or
           $_.Exception -is [IO.DirectoryNotFoundException]
         )) {
@@ -447,10 +529,15 @@ function Invoke-WindowsShellValidationIsolation(
     foreach ($cleanupError in $cleanupErrors) {
       $failures.Add($cleanupError)
     }
-    throw [AggregateException]::new(
+    $aggregate = [AggregateException]::new(
       "Windows shell validation failed and isolation cleanup detected additional errors.",
       $failures.ToArray()
     )
+    if ($retainRoot) {
+      $aggregate.Data["GraphCodeValidationRootRetentionRequired"] = $true
+      $aggregate.Data["GraphCodeValidationRetainedRoots"] = $primaryError.Exception.Data["GraphCodeValidationRetainedRoots"]
+    }
+    throw $aggregate
   }
   if ($cleanupErrors.Count -eq 1) {
     throw $cleanupErrors[0]
@@ -1253,43 +1340,21 @@ function Invoke-Task([string] $name) {
         (ConvertTo-Json -InputObject $preUiaSnapshot -Compress -Depth 4))
       $repositoryPrefix = ([IO.Path]::GetFullPath($repoRoot)).TrimEnd('\', '/') +
         [IO.Path]::DirectorySeparatorChar
-      $ownedSurvivors = @($preUiaProcesses | Where-Object {
+      $unexpectedCandidates = @($preUiaProcesses | Where-Object {
         $identity = "$([int]$_.ProcessId)|$($_.CreationDate.ToUniversalTime().ToString('o'))"
         $_.ExecutablePath -and
           $_.ExecutablePath.StartsWith($repositoryPrefix, [StringComparison]::OrdinalIgnoreCase) -and
           -not $uiaProductProcessBaseline.Contains($identity)
       })
-      foreach ($survivor in $ownedSurvivors) {
-        $current = Get-CimInstance Win32_Process -Filter `
-          "ProcessId = $([int]$survivor.ProcessId)" -ErrorAction Stop
-        if ($null -eq $current -or
-            [string]$current.CreationDate -cne [string]$survivor.CreationDate) {
-          continue
-        }
-        Stop-Process -Id ([int]$survivor.ProcessId) -Force -ErrorAction Stop
+      if ($unexpectedCandidates.Count -gt 0) {
+        $ownershipFailure = [InvalidOperationException]::new("Unexpected GraphCode process candidates before UIA: " +
+          (($unexpectedCandidates | ForEach-Object { [int]$_.ProcessId }) -join ',') +
+          ". These candidates are not attested as run-owned; no processes were terminated. " +
+          "Review the advisory snapshot and stop them through their owning session before rerunning validation.")
+        $ownershipFailure.Data["GraphCodeValidationRootRetentionRequired"] = $true
+        throw $ownershipFailure
       }
-      $remainingSurvivors = @()
-      foreach ($survivor in $ownedSurvivors) {
-        for ($attempt = 0; $attempt -lt 30; $attempt++) {
-          $current = Get-CimInstance Win32_Process -Filter `
-            "ProcessId = $([int]$survivor.ProcessId)" -ErrorAction Stop
-          if ($null -eq $current -or
-              [string]$current.CreationDate -cne [string]$survivor.CreationDate) {
-            break
-          }
-          Start-Sleep -Milliseconds 100
-        }
-        $current = Get-CimInstance Win32_Process -Filter `
-          "ProcessId = $([int]$survivor.ProcessId)" -ErrorAction Stop
-        if ($null -ne $current -and
-            [string]$current.CreationDate -ceq [string]$survivor.CreationDate) {
-          $remainingSurvivors += [int]$survivor.ProcessId
-        }
-      }
-      if ($remainingSurvivors.Count -gt 0) {
-        throw "Owned GraphCode processes survived pre-UIA cleanup: $($remainingSurvivors -join ',')"
-      }
-      Write-Host "WINDOWS_SHELL_PRE_UIA_CLEANUP=verified terminated=$($ownedSurvivors.Count)"
+      Write-Host "WINDOWS_SHELL_PRE_UIA_CLEANUP=no_candidates_observed terminated=0"
       Invoke-Native "Native UI Automation live gate" {
         & (Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1") `
           -Shell (Join-Path $repoRoot "graphcode-windows\zig-out\bin\graphcode-windows.exe") `

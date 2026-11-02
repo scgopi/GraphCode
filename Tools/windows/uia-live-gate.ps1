@@ -5,13 +5,30 @@ param(
   [string[]] $ArgumentList = @(),
   [switch]$SidebarParityOnly,
   [switch]$UnwiredRecoveryOnly,
-  [switch]$CycleHierarchyOnly
+  [switch]$CycleHierarchyOnly,
+  [string] $DeleteSelectFailureReceipt = $env:GRAPHCODE_UIA_DELETE_SELECT_FAILURE_RECEIPT
 )
 
 $ErrorActionPreference = "Stop"
+Import-Module -Name (Join-Path $PSScriptRoot "ShellProcessOwnership.psm1") -ErrorAction Stop
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Drawing
+$uiaActivationType = "GraphCode.Windows.UiaWindowActivation" -as [type]
+if ($null -eq $uiaActivationType) {
+  $uiaActivationDirectory = Join-Path ([IO.Path]::GetTempPath()) ("gc-uia-activation-" + [guid]::NewGuid().ToString("N"))
+  $null = New-Item -ItemType Directory -Path $uiaActivationDirectory -ErrorAction Stop
+  $uiaActivationAssemblyPath = Join-Path $uiaActivationDirectory "UiaWindowActivation.dll"
+  # Keep the assembly file for this host's lifetime so later helper compilation can reference it.
+  Add-Type -Path (Join-Path $PSScriptRoot "UiaWindowActivation.cs") -OutputAssembly $uiaActivationAssemblyPath
+  Add-Type -Path $uiaActivationAssemblyPath
+  $uiaActivationType = "GraphCode.Windows.UiaWindowActivation" -as [type]
+}
+$uiaActivationAssemblyPath = $uiaActivationType.Assembly.Location
+if (-not [IO.Path]::IsPathFullyQualified($uiaActivationAssemblyPath) -or
+    -not [IO.File]::Exists($uiaActivationAssemblyPath)) {
+  throw "UIA activation component has no file-backed assembly reference"
+}
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -151,8 +168,6 @@ public static class GraphCodeUiaGateState {
   [DllImport("user32.dll")]
   private static extern IntPtr SetActiveWindow(IntPtr window);
   [DllImport("user32.dll")]
-  private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
-  [DllImport("user32.dll")]
   private static extern bool IsWindowVisible(IntPtr window);
   [DllImport("user32.dll")]
   private static extern bool IsWindowEnabled(IntPtr window);
@@ -285,16 +300,20 @@ public static class GraphCodeUiaGateState {
     if (menu == IntPtr.Zero || !GetMenuItemRect(owner, menu, (uint)position, out item)) return false;
     int x = item.Right - Math.Min(12, (item.Right - item.Left) / 2);
     int y = (item.Top + item.Bottom) / 2;
+    uint ownerProcess = WindowProcessId(owner);
+    IntPtr popup = FindPopupForMenu(ownerProcess, menu);
+    if (popup == IntPtr.Zero) return false;
+    RequireOwnedPopupForeground(popup, owner, ownerProcess);
+    IntPtr hit = WindowFromPoint(new ScreenPoint { X = x, Y = y });
+    if (GetAncestor(hit, 2) != popup || WindowProcessId(hit) != ownerProcess)
+      throw new InvalidOperationException("Submenu hover point is covered; no cursor movement was injected");
     if (!SetCursorPos(x, y))
       throw new InvalidOperationException(String.Format("SetCursorPos for submenu failed: Win32Error={0}", Marshal.GetLastWin32Error()));
     ScreenPoint at;
     if (!GetCursorPos(out at)) return false;
-    uint ownerProcess;
-    GetWindowThreadProcessId(owner, out ownerProcess);
-    IntPtr popup = FindPopupForMenu(ownerProcess, menu);
-    if (popup == IntPtr.Zero) return false;
     var client = new ScreenPoint { X = x, Y = y };
     if (!ScreenToClient(popup, ref client)) return false;
+    RequireOwnedPopupForeground(popup, owner, ownerProcess);
     SendMessage(popup, 0x0200, UIntPtr.Zero, MouseLParam(client.X, client.Y));
     bool hilite = false;
     for (int attempt = 0; attempt < 50 && !hilite; attempt++) {
@@ -417,31 +436,84 @@ public static class GraphCodeUiaGateState {
   }
   public static bool FocusControl(IntPtr parent, IntPtr control) {
     if (parent == IntPtr.Zero || control == IntPtr.Zero) return false;
-    ActivateWindow(parent);
+    uint expectedProcessId = WindowProcessId(parent);
+    RequireOwnedInputWindow(parent, expectedProcessId);
+    if (WindowProcessId(control) != expectedProcessId || GetAncestor(control, 2) != parent ||
+        !ActivateWindow(parent)) return false;
     uint ignoredProcessId;
     uint parentThread = GetWindowThreadProcessId(parent, out ignoredProcessId);
     uint currentThread = GetCurrentThreadId();
     bool attached = currentThread != parentThread &&
       AttachThreadInput(currentThread, parentThread, true);
     try {
+      RequireOwnedForeground(parent, expectedProcessId);
       SetFocus(control);
-      return IsForegroundWindow(parent) && GetFocus() == control;
+      return IsForegroundWindow(parent) && FocusedControlInDialog(parent) == control;
     } finally {
       if (attached) AttachThreadInput(currentThread, parentThread, false);
     }
   }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct GuiThreadInfo {
+    public int Size;
+    public uint Flags;
+    public IntPtr Active, Focus, Capture, MenuOwner, MoveSize, Caret;
+    public RECT CaretRectangle;
+  }
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadInfo info);
   public static IntPtr FocusedControlInDialog(IntPtr parent) {
-    if (parent == IntPtr.Zero) return IntPtr.Zero;
-    uint ignoredProcessId;
-    uint parentThread = GetWindowThreadProcessId(parent, out ignoredProcessId);
-    uint currentThread = GetCurrentThreadId();
-    bool attached = currentThread != parentThread &&
-      AttachThreadInput(currentThread, parentThread, true);
-    try {
-      return GetFocus();
-    } finally {
-      if (attached) AttachThreadInput(currentThread, parentThread, false);
-    }
+    uint processId;
+    uint thread = GetWindowThreadProcessId(parent, out processId);
+    var info = new GuiThreadInfo { Size = Marshal.SizeOf(typeof(GuiThreadInfo)) };
+    if (thread == 0 || !GetGUIThreadInfo(thread, ref info))
+      throw new InvalidOperationException("Owned focus could not be observed through GetGUIThreadInfo");
+    return info.Focus;
+  }
+  private static readonly System.Collections.Generic.Dictionary<uint, System.Diagnostics.Process>
+    RetainedProcesses = new System.Collections.Generic.Dictionary<uint, System.Diagnostics.Process>();
+  public static void RetainProcess(System.Diagnostics.Process process) {
+    if (process == null || process.Handle == IntPtr.Zero)
+      throw new InvalidOperationException("UIA process has no retained launch handle");
+    RetainedProcesses[checked((uint)process.Id)] = process;
+  }
+  private static bool IsRetainedProcessAlive(uint processId) {
+    System.Diagnostics.Process process;
+    if (!RetainedProcesses.TryGetValue(processId, out process)) return false;
+    try { return process.Handle != IntPtr.Zero && !process.HasExited; }
+    catch (ObjectDisposedException) { return false; }
+    catch (InvalidOperationException) { return false; }
+  }
+  private static void RequireOwnedInputWindow(IntPtr owner, uint expectedProcessId) {
+    if (owner == IntPtr.Zero || expectedProcessId == 0 || !IsRetainedProcessAlive(expectedProcessId) ||
+        WindowProcessId(owner) != expectedProcessId || !WindowIsVisible(owner) || !WindowIsEnabled(owner))
+      throw new InvalidOperationException("Input target lost retained process/window ownership; no input was injected");
+  }
+  private static void RequireOwnedForeground(IntPtr owner, uint expectedProcessId) {
+    RequireOwnedInputWindow(owner, expectedProcessId);
+    IntPtr foreground = GetForegroundWindow();
+    if (foreground != owner || WindowProcessId(foreground) != expectedProcessId)
+      throw new InvalidOperationException("Owned foreground changed; no input was injected");
+  }
+  public static void RequireOwnedKeyboardInput(IntPtr owner, uint expectedProcessId, IntPtr expectedFocus) {
+    RequireOwnedForeground(owner, expectedProcessId);
+    IntPtr focus = FocusedControlInDialog(owner);
+    if (focus == IntPtr.Zero || WindowProcessId(focus) != expectedProcessId ||
+        GetAncestor(focus, 2) != owner || (expectedFocus != IntPtr.Zero && focus != expectedFocus))
+      throw new InvalidOperationException("Owned keyboard focus changed; no key input was injected");
+    RequireOwnedForeground(owner, expectedProcessId);
+  }
+  private static void RequireOwnedMouseInput(
+    IntPtr owner, uint expectedProcessId, ScreenPoint expected, IntPtr expectedControl
+  ) {
+    RequireOwnedForeground(owner, expectedProcessId);
+    ScreenPoint actual;
+    if (!GetCursorPos(out actual) || actual.X != expected.X || actual.Y != expected.Y)
+      throw new InvalidOperationException("Owned mouse cursor changed; no mouse input was injected");
+    IntPtr hit = WindowFromPoint(actual);
+    if (hit == IntPtr.Zero || GetAncestor(hit, 2) != owner || WindowProcessId(hit) != expectedProcessId ||
+        (expectedControl != IntPtr.Zero && !ResolvesToControl(expectedControl, owner, actual)))
+      throw new InvalidOperationException("Owned mouse hit changed; no mouse input was injected");
   }
   public static bool IsControlOwnedBy(IntPtr parent, IntPtr control, int controlId) {
     return parent != IntPtr.Zero && control != IntPtr.Zero &&
@@ -456,45 +528,35 @@ public static class GraphCodeUiaGateState {
       GetWindowRect(window, out rect) && rect.Right > rect.Left && rect.Bottom > rect.Top;
   }
   public static string LastActivationDiagnostic = "not attempted";
+  private sealed class WindowActivationOperations : GraphCode.Windows.IUiaWindowActivationOperations {
+    public uint WindowProcessId(IntPtr window) {
+      return GraphCodeUiaGateState.WindowProcessId(window);
+    }
+    public bool IsRetainedProcessAlive(uint processId) {
+      return GraphCodeUiaGateState.IsRetainedProcessAlive(processId);
+    }
+    public void ShowWindow(IntPtr window, int command) {
+      GraphCodeUiaGateState.ShowWindow(window, command);
+    }
+    public GraphCode.Windows.UiaActivationCallResult BringWindowToTop(IntPtr window) {
+      bool succeeded = GraphCodeUiaGateState.BringWindowToTop(window);
+      int error = Marshal.GetLastWin32Error();
+      return new GraphCode.Windows.UiaActivationCallResult(succeeded, error);
+    }
+    public GraphCode.Windows.UiaActivationCallResult SetForegroundWindow(IntPtr window) {
+      bool succeeded = GraphCodeUiaGateState.SetForegroundWindow(window);
+      int error = Marshal.GetLastWin32Error();
+      return new GraphCode.Windows.UiaActivationCallResult(succeeded, error);
+    }
+    public bool IsForegroundWindow(IntPtr window) {
+      return GraphCodeUiaGateState.IsForegroundWindow(window);
+    }
+  }
+  private static readonly GraphCode.Windows.IUiaWindowActivationOperations ActivationOperations =
+    new WindowActivationOperations();
   public static bool ActivateWindow(IntPtr window) {
-    if (window == IntPtr.Zero) {
-      LastActivationDiagnostic = "invalid target HWND";
-      return false;
-    }
-    IntPtr foreground = GetForegroundWindow();
-    uint ignoredForegroundProcessId;
-    uint foregroundThread = foreground == IntPtr.Zero ? 0 :
-      GetWindowThreadProcessId(foreground, out ignoredForegroundProcessId);
-    uint ignoredTargetProcessId;
-    uint targetThread = GetWindowThreadProcessId(window, out ignoredTargetProcessId);
-    uint currentThread = GetCurrentThreadId();
-    bool needsForegroundAttach = foregroundThread != 0 && currentThread != foregroundThread;
-    bool attachForeground = !needsForegroundAttach ||
-      AttachThreadInput(currentThread, foregroundThread, true); int foregroundAttachError = Marshal.GetLastWin32Error();
-    bool needsTargetAttach = currentThread != targetThread;
-    bool attachTarget = !needsTargetAttach ||
-      AttachThreadInput(currentThread, targetThread, true); int targetAttachError = Marshal.GetLastWin32Error();
-    try {
-      ShowWindow(window, 9);
-      bool broughtToTop = BringWindowToTop(window);
-      int bringError = Marshal.GetLastWin32Error();
-      keybd_event(0x12, 0, 0, UIntPtr.Zero);
-      keybd_event(0x12, 0, 0x0002, UIntPtr.Zero);
-      SetActiveWindow(window);
-      bool foregroundSet = SetForegroundWindow(window); int foregroundError = Marshal.GetLastWin32Error();
-      bool observed = IsForegroundWindow(window);
-      LastActivationDiagnostic = String.Format(
-        "AttachThreadInput(foreground)={0} GetLastError={1} AttachThreadInput(target)={2} GetLastError={3} BringWindowToTop={4} GetLastError={5} SetForegroundWindow={6} GetLastError={7} (FALSE can leave no meaningful last error) observedForeground={8}",
-        attachForeground, needsForegroundAttach && !attachForeground ? foregroundAttachError : 0,
-        attachTarget, needsTargetAttach && !attachTarget ? targetAttachError : 0,
-        broughtToTop, broughtToTop ? 0 : bringError,
-        foregroundSet, foregroundSet ? 0 : foregroundError, observed
-      );
-      return observed;
-    } finally {
-      if (needsTargetAttach && attachTarget) AttachThreadInput(currentThread, targetThread, false);
-      if (needsForegroundAttach && attachForeground) AttachThreadInput(currentThread, foregroundThread, false);
-    }
+    return GraphCode.Windows.UiaWindowActivation.ActivateWindow(
+      ActivationOperations, window, out LastActivationDiagnostic);
   }
   public static bool IsForegroundWindow(IntPtr window) {
     return window != IntPtr.Zero && GetForegroundWindow() == window;
@@ -520,17 +582,6 @@ public static class GraphCodeUiaGateState {
     var text = new StringBuilder(length + 1);
     GetWindowText(window, text, text.Capacity);
     return text.ToString();
-  }
-  public static void HideWindow(IntPtr window) {
-    if (window != IntPtr.Zero) ShowWindow(window, 0);
-  }
-  public static void HideProcessWindows(uint processId) {
-    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
-      uint owner;
-      GetWindowThreadProcessId(window, out owner);
-      if (owner == processId) HideWindow(window);
-      return true;
-    }, IntPtr.Zero);
   }
   // Diagnostic only (Tools/windows/uia-live-gate.ps1's Get-DirectChildren
   // exhaustion path): enumerates every top-level window currently owned by
@@ -653,6 +704,8 @@ public static class GraphCodeUiaGateState {
       PostMessage(window, 0x0205, UIntPtr.Zero, point);
   }
   public static int[] ClickOwnedScreenRectangle(IntPtr owner, int left, int top, int right, int bottom, bool rightClick) {
+    uint expectedProcessId = WindowProcessId(owner);
+    RequireOwnedForeground(owner, expectedProcessId);
     if (!WindowIsVisible(owner) || right <= left || bottom <= top)
       throw new InvalidOperationException("Owned rectangle is not visibly hittable");
     var point = new ScreenPoint { X = (left + right) / 2, Y = (top + bottom) / 2 };
@@ -668,6 +721,7 @@ public static class GraphCodeUiaGateState {
       new Input { Type = 0, Mouse = new MouseInput { Flags = rightClick ? 0x0008u : 0x0002u } },
       new Input { Type = 0, Mouse = new MouseInput { Flags = rightClick ? 0x0010u : 0x0004u } }
     };
+    RequireOwnedMouseInput(owner, expectedProcessId, point, IntPtr.Zero);
     uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input)));
     if (sent != inputs.Length)
       throw new InvalidOperationException(String.Format("Owned rectangle SendInput sent {0}/{1}", sent, inputs.Length));
@@ -686,6 +740,16 @@ public static class GraphCodeUiaGateState {
     return PostMessage(owner, 0x0201, (UIntPtr)0x0001, MouseLParam(point.X, point.Y)) &&
       PostMessage(owner, 0x0202, UIntPtr.Zero, MouseLParam(point.X, point.Y));
   }
+  public static bool IsOwnedPopupInput(
+    IntPtr owner, IntPtr popup, uint expectedProcessId, uint popupProcessId,
+    uint foregroundProcessId, IntPtr foregroundRoot, uint pointProcessId,
+    IntPtr pointRoot, bool popupVisible
+  ) {
+    return owner != IntPtr.Zero && popup != IntPtr.Zero && expectedProcessId != 0 &&
+      popupProcessId == expectedProcessId && foregroundProcessId == expectedProcessId &&
+      (foregroundRoot == owner || foregroundRoot == popup) &&
+      pointProcessId == expectedProcessId && pointRoot == popup && popupVisible;
+  }
   public sealed class PopupItemHit {
     public int Position, ItemId, Left, Top, Right, Bottom;
     public int ScreenX, ScreenY, ClientX, ClientY, CursorBeforeX, CursorBeforeY;
@@ -693,7 +757,7 @@ public static class GraphCodeUiaGateState {
     public bool Hilite, UsedKeyboardFallback, UsedSelectItemFallback;
     public bool HiliteAtEnterFallback, HiliteBeforeEnter;
   }
-  public static PopupItemHit ClickPopupMenuItem(IntPtr popup, IntPtr owner, int position, int commandId) {
+  public static PopupItemHit ClickPopupMenuItem(IntPtr popup, IntPtr owner, int position, int commandId, uint expectedProcessId) {
     if (popup == IntPtr.Zero || position < 0) return null;
     IntPtr menu = PopupMenuHandle(popup);
     RECT item;
@@ -712,6 +776,7 @@ public static class GraphCodeUiaGateState {
     ScreenPoint before, at;
     if (!GetCursorPos(out before))
       throw new InvalidOperationException(String.Format("GetCursorPos before popup click failed: Win32Error={0}", Marshal.GetLastWin32Error()));
+    RequireOwnedPopupForeground(popup, owner, expectedProcessId);
     if (!SetCursorPos(screenX, screenY))
       throw new InvalidOperationException(String.Format("SetCursorPos for popup click failed: Win32Error={0}", Marshal.GetLastWin32Error()));
     if (!GetCursorPos(out at))
@@ -739,6 +804,19 @@ public static class GraphCodeUiaGateState {
       new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0002 } },
       new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0004 } }
     };
+    ScreenPoint cursorBeforeInput;
+    if (!GetCursorPos(out cursorBeforeInput) || cursorBeforeInput.X != screenX || cursorBeforeInput.Y != screenY)
+      throw new InvalidOperationException("Popup input cursor changed; no mouse input was injected");
+    uint inputOwnerProcessId = WindowProcessId(owner);
+    if (inputOwnerProcessId != expectedProcessId || !IsRetainedProcessAlive(expectedProcessId))
+      throw new InvalidOperationException("Popup input ownership changed; no mouse input was injected");
+    IntPtr foregroundBeforeInput = GetForegroundWindow();
+    IntPtr inputPointWindow = WindowFromPoint(cursorBeforeInput);
+    if (!IsOwnedPopupInput(
+      owner, popup, inputOwnerProcessId, WindowProcessId(popup),
+      WindowProcessId(foregroundBeforeInput), GetAncestor(foregroundBeforeInput, 2),
+      WindowProcessId(inputPointWindow), GetAncestor(inputPointWindow, 2), IsWindowVisible(popup)))
+      throw new InvalidOperationException("Popup input ownership changed; no mouse input was injected");
     uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input)));
     if (sent != inputs.Length)
       throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} popup mouse events: Win32Error={2}", sent, inputs.Length, Marshal.GetLastWin32Error()));
@@ -759,6 +837,7 @@ public static class GraphCodeUiaGateState {
     if (IsWindowVisible(popup)) {
       if (!hiliteBeforeEnter)
         throw new InvalidOperationException(String.Format("Popup item {0} was not hilited before the Enter fallback (hilite at fallback={1})", commandId, hiliteAtEnterFallback));
+      RequireOwnedPopupForeground(popup, owner, expectedProcessId);
       keyboardFallback =
         PostMessage(popup, 0x0100, (UIntPtr)0x0D, IntPtr.Zero) &&
         PostMessage(popup, 0x0101, (UIntPtr)0x0D, IntPtr.Zero);
@@ -776,6 +855,14 @@ public static class GraphCodeUiaGateState {
       HiliteAtEnterFallback = hiliteAtEnterFallback,
       HiliteBeforeEnter = hiliteBeforeEnter
     };
+  }
+  private static void RequireOwnedPopupForeground(IntPtr popup, IntPtr owner, uint expectedProcessId) {
+    IntPtr foreground = GetForegroundWindow();
+    IntPtr foregroundRoot = GetAncestor(foreground, 2);
+    if (expectedProcessId == 0 || !IsRetainedProcessAlive(expectedProcessId) || WindowProcessId(owner) != expectedProcessId ||
+      WindowProcessId(popup) != expectedProcessId || WindowProcessId(foreground) != expectedProcessId ||
+      (foregroundRoot != owner && foregroundRoot != popup) || !IsWindowVisible(popup))
+      throw new InvalidOperationException("Popup input ownership changed; no further input was injected");
   }
   // Sidebar.updateBannerRect/updateBannerAt are pixel-only hit-test geometry with
   // no UIA identity of their own, so a genuine click requires the real live client
@@ -1144,6 +1231,8 @@ public static class GraphCodeUiaGateState {
       hit.Samples = samples;
     }
     if (!hit.HitTarget) return hit;
+    uint expectedProcessId = WindowProcessId(dialog);
+    RequireOwnedForeground(dialog, expectedProcessId);
     ScreenPoint before, at;
     if (!GetCursorPos(out before))
       throw new InvalidOperationException(String.Format("GetCursorPos before control click failed: Win32Error={0}", Marshal.GetLastWin32Error()));
@@ -1159,22 +1248,38 @@ public static class GraphCodeUiaGateState {
       new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0002 } },
       new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0004 } }
     };
+    RequireOwnedMouseInput(dialog, expectedProcessId, center, target);
     uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input)));
     if (sent != inputs.Length)
       throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} control mouse events: Win32Error={2}", sent, inputs.Length, Marshal.GetLastWin32Error()));
     return hit;
   }
-  public static int SendKeyInput(ushort virtualKey, int count) {
+  public static int SendKeyInput(IntPtr owner, uint expectedProcessId, IntPtr expectedFocus, ushort virtualKey, int count) {
     if (count <= 0) return 0;
     var inputs = new KeyInputRecord[count * 2];
     for (int index = 0; index < count; index++) {
       inputs[index * 2] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = virtualKey } };
       inputs[index * 2 + 1] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = virtualKey, Flags = 0x0002 } };
     }
+    RequireOwnedKeyboardInput(owner, expectedProcessId, expectedFocus);
     uint sent = SendKeyInputs((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(KeyInputRecord)));
     if (sent != inputs.Length)
       throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} key events (cbSize={2}): Win32Error={3}", sent, inputs.Length, Marshal.SizeOf(typeof(KeyInputRecord)), Marshal.GetLastWin32Error()));
     return count;
+  }
+  public static int[] SendUnicodeInput(IntPtr owner, uint expectedProcessId, IntPtr expectedFocus, string text) {
+    var records = new KeyInputRecord[text.Length * 2];
+    int offset = 0;
+    foreach (char character in text) {
+      records[offset++] = new KeyInputRecord { Type = 1, Key = new KeybdInput { ScanCode = character, Flags = 4 } };
+      records[offset++] = new KeyInputRecord { Type = 1, Key = new KeybdInput { ScanCode = character, Flags = 6 } };
+    }
+    if (records.Length == 0) return new int[] { 0, 0 };
+    RequireOwnedKeyboardInput(owner, expectedProcessId, expectedFocus);
+    uint sent = SendKeyInputs((uint)records.Length, records, Marshal.SizeOf(typeof(KeyInputRecord)));
+    if (sent != records.Length)
+      throw new InvalidOperationException(String.Format("Owned Unicode SendInput injected {0}/{1}", sent, records.Length));
+    return new int[] { checked((int)sent), records.Length };
   }
   public static bool TypeEditTextById(IntPtr parent, int controlId, string text) {
     LastEditClearExpected = LastEditClearSent = 0;
@@ -1182,25 +1287,19 @@ public static class GraphCodeUiaGateState {
     LastEditUsedMessageFallback = false;
     IntPtr edit = ControlById(parent, controlId);
     if (edit == IntPtr.Zero || !FocusControl(parent, edit)) return false;
+    uint expectedProcessId = WindowProcessId(parent);
     SendMessage(edit, 0x00B1, UIntPtr.Zero, new IntPtr(-1));
     var clear = new KeyInputRecord[2];
     clear[0] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x2E } };
     clear[1] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x2E, Flags = 2 } };
     LastEditClearExpected = (uint)clear.Length;
+    RequireOwnedKeyboardInput(parent, expectedProcessId, edit);
     LastEditClearSent = SendKeyInputs(LastEditClearExpected, clear, Marshal.SizeOf(typeof(KeyInputRecord)));
     if (LastEditClearSent != LastEditClearExpected) return false;
     bool cleared = String.IsNullOrEmpty(EditBufferText(edit));
-    var records = new KeyInputRecord[text.Length * 2];
-    int offset = 0;
-    foreach (char character in text) {
-      records[offset++] = new KeyInputRecord { Type = 1, Key = new KeybdInput { ScanCode = character, Flags = 4 } };
-      records[offset++] = new KeyInputRecord { Type = 1, Key = new KeybdInput { ScanCode = character, Flags = 6 } };
-    }
-    LastEditTextExpected = (uint)records.Length;
-    if (records.Length > 0) {
-      LastEditTextSent = SendKeyInputs(LastEditTextExpected, records, Marshal.SizeOf(typeof(KeyInputRecord)));
-      if (LastEditTextSent != LastEditTextExpected) return false;
-    }
+    int[] typed = SendUnicodeInput(parent, expectedProcessId, edit, text);
+    LastEditTextExpected = checked((uint)typed[1]);
+    LastEditTextSent = checked((uint)typed[0]);
     bool matched = cleared && String.Equals(EditTextById(parent, controlId), text, StringComparison.Ordinal);
     if (!matched) {
       SendMessageString(edit, 0x000C, UIntPtr.Zero, text);
@@ -1253,7 +1352,11 @@ public static class GraphCodeUiaGateState {
 }
 "@ -ReferencedAssemblies @(
   [System.Windows.Automation.AutomationElement].Assembly.Location,
-  [System.Windows.Automation.AutomationEventArgs].Assembly.Location
+  [System.Windows.Automation.AutomationEventArgs].Assembly.Location,
+  [Diagnostics.Process].Assembly.Location,
+  "System.Collections",
+  "System.ComponentModel.Primitives",
+  $uiaActivationAssemblyPath
 )
 
 Add-Type -TypeDefinition @"
@@ -1529,6 +1632,61 @@ function Require([bool] $condition, [string] $message) {
   if (-not $condition) { throw $message }
 }
 
+function Wait-UiaUnwiredRecoveryVisibility($root, $rawWalker, $process, $wire, $mark) {
+  $wireId = [string]$wire.Current.AutomationId
+  $markId = [string]$mark.Current.AutomationId
+  Require ($process.Id -gt 0 -and
+    $wire.Current.ProcessId -eq $process.Id -and $mark.Current.ProcessId -eq $process.Id -and
+    $wireId.StartsWith("wire-node-", [StringComparison]::Ordinal) -and
+    $markId.StartsWith("mark-entry-", [StringComparison]::Ordinal) -and
+    $wire.Current.Name -ceq "Wire it up" -and $mark.Current.Name -ceq "Mark as entry") `
+    "Unwired recovery source controls did not belong to the owned graph"
+  function Test-RecoveryVisibility($wire, $mark, $graph, [int] $owner, [string] $wireId, [string] $markId) {
+    if ($null -eq $wire -or $null -eq $mark -or $null -eq $graph -or
+        $graph.Current.ProcessId -ne $owner -or $graph.Current.AutomationId -cne "graph" -or
+        $wire.Current.ProcessId -ne $owner -or $mark.Current.ProcessId -ne $owner -or
+        $wire.Current.AutomationId -cne $wireId -or $mark.Current.AutomationId -cne $markId -or
+        $wire.Current.Name -cne "Wire it up" -or $mark.Current.Name -cne "Mark as entry" -or
+        $graph.Current.IsOffscreen) { return $false }
+    $graphBounds = $graph.Current.BoundingRectangle
+    if ($graphBounds.IsEmpty -or $graphBounds.Width -le 0 -or $graphBounds.Height -le 0) { return $false }
+    foreach ($control in @($wire, $mark)) {
+      if ($control.Current.IsOffscreen) { return $false }
+      $bounds = $control.Current.BoundingRectangle
+      if ($bounds.IsEmpty -or $bounds.Width -le 0 -or $bounds.Height -le 0 -or
+          $bounds.Left -lt $graphBounds.Left -or $bounds.Top -lt $graphBounds.Top -or
+          $bounds.Right -gt $graphBounds.Right -or $bounds.Bottom -gt $graphBounds.Bottom) { return $false }
+    }
+    return $true
+  }
+  $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+  Require ($null -ne $graph -and $graph.Current.ProcessId -eq $process.Id -and
+    $graph.Current.AutomationId -ceq "graph") "Unwired recovery graph did not belong to the owned shell"
+  if (Test-RecoveryVisibility $wire $mark $graph $process.Id $wireId $markId) {
+    return [ordered]@{ root = $root; graph = $graph; wire = $wire; mark = $mark }
+  }
+  $fitRecovery = Find-FragmentByIdWithRetry $root "fit-canvas" $rawWalker
+  Require ($null -ne $fitRecovery -and $fitRecovery.Current.ProcessId -eq $process.Id -and
+    $fitRecovery.Current.AutomationId -ceq "fit-canvas" -and $fitRecovery.Current.Name -ceq "Fit canvas" -and
+    $fitRecovery.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and
+    $fitRecovery.Current.IsEnabled -and -not $fitRecovery.Current.IsOffscreen) `
+    "Unwired recovery could not acquire the owned visible Fit canvas action"
+  $fitRecovery.GetCurrentPattern(
+    [System.Windows.Automation.InvokePattern]::Pattern
+  ).Invoke()
+  for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    $root = Wait-ForRootReconnect $process @($rawWalker)
+    $graph = Find-FragmentById $root "graph" $rawWalker
+    $wire = Find-FragmentById $root $wireId $rawWalker
+    $mark = Find-FragmentById $root $markId $rawWalker
+    if (Test-RecoveryVisibility $wire $mark $graph $process.Id $wireId $markId) {
+      return [ordered]@{ root = $root; graph = $graph; wire = $wire; mark = $mark }
+    }
+    if ($attempt -lt 39) { Start-Sleep -Milliseconds 100 }
+  }
+  Require $false "Unwired recovery actions remained unavailable after Fit canvas"
+}
+
 function Test-MultiProjectOwnedSheetIdentity(
   $identity,
   [int] $expectedProcessId,
@@ -1575,6 +1733,156 @@ function Test-UpdateBannerClickTarget(
     $target.right -is [double] -and $target.bottom -is [double] -and
     $target.right -gt $target.left -and $target.bottom -gt $target.top -and
     $shellStatus -ceq "Update offer deferred"
+}
+
+function Get-DeleteTargetDiagnosticValue([hashtable] $budget, [scriptblock] $readValue) {
+  if ($budget.reads -ge 11 -or $budget.clock.ElapsedMilliseconds -ge 500) {
+    return [ordered]@{ state = "unavailable"; reason = "diagnostic-budget" }
+  }
+  $budget.reads++
+  try {
+    $value = & $readValue
+    if ($budget.clock.ElapsedMilliseconds -ge 500) {
+      return [ordered]@{ state = "unavailable"; reason = "diagnostic-budget" }
+    }
+    if ($null -eq $value) { return [ordered]@{ state = "unavailable" } }
+    return [ordered]@{ state = "available"; value = $value }
+  } catch {
+    return [ordered]@{ state = "unavailable"; hresult = $_.Exception.HResult }
+  }
+}
+
+function Get-DeleteTargetIdentityHash([string] $identity) {
+  if ([string]::IsNullOrEmpty($identity) -or $identity.Length -gt 4096) {
+    throw [ArgumentException]::new("Diagnostic identity is absent or exceeds its bound")
+  }
+  return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+    [Text.Encoding]::UTF8.GetBytes($identity)))
+}
+
+function Write-DeleteTargetSelectFailure(
+  $target, $selection, [string] $expectedIdentity, [int] $expectedProcessId,
+  [IntPtr] $expectedWindow, [Management.Automation.ErrorRecord] $failure,
+  [string] $receiptPath
+) {
+  $budget = @{ reads = 0; clock = [Diagnostics.Stopwatch]::StartNew() }
+  $untrusted = [ordered]@{ state = "unavailable"; reason = "untrusted-identity" }
+  $processId = Get-DeleteTargetDiagnosticValue $budget {
+    $value = $target.Current.ProcessId
+    if ($value -isnot [int]) { throw "Process identity is unavailable" }
+    $value
+  }
+  $owned = $processId.state -ceq "available" -and $expectedProcessId -gt 0 -and $processId.value -eq $expectedProcessId
+  $identity = if ($owned) {
+    Get-DeleteTargetDiagnosticValue $budget { Get-DeleteTargetIdentityHash $target.Current.AutomationId }
+  } else { $untrusted }
+  $expectedHash = try {
+    [ordered]@{ state = "available"; value = Get-DeleteTargetIdentityHash $expectedIdentity }
+  } catch { [ordered]@{ state = "unavailable" } }
+  $matches = $identity.state -ceq "available" -and $expectedHash.state -ceq "available" -and
+    $identity.value -ceq $expectedHash.value
+  $record = [ordered]@{
+    expectedProcessId = $expectedProcessId; expectedWindow = $expectedWindow.ToInt64()
+    automationIdHash = $identity; expectedAutomationIdHash = $expectedHash
+    identityMatches = if ($identity.state -ceq "available" -and $expectedHash.state -ceq "available") {
+      $identity.value -ceq $expectedHash.value
+    } else { $null }
+    processId = $processId
+    ownedProcess = if ($processId.state -ceq "available") { $processId.value -eq $expectedProcessId } else { $null }
+    runtimeIdHash = $untrusted; runtimeComparison = "unavailable-no-preselect-snapshot"
+    bounds = $untrusted; offscreen = $untrusted; enabled = $untrusted; selected = $untrusted
+    parent = $untrusted
+    retired = @{ state = "unavailable"; reason = "not-exposed" }
+    active = @{ state = "unavailable"; reason = "not-exposed" }
+    invokable = @{ state = "unavailable"; reason = "not-exposed" }
+    providerBranch = @{ state = "unavailable"; reason = "not-exposed" }
+    exceptionHResults = @(); exceptionChainTruncated = $false
+  }
+  if ($owned -and $matches) {
+    $record.runtimeIdHash = Get-DeleteTargetDiagnosticValue $budget {
+      $runtime = @($target.GetRuntimeId())
+      if ($runtime.Count -eq 0 -or $runtime.Count -gt 64) { throw "Runtime identity exceeds diagnostic bound" }
+      foreach ($part in $runtime) {
+        if ($part -isnot [int]) { throw "Runtime identity is not an integer vector" }
+      }
+      Get-DeleteTargetIdentityHash ($runtime -join ",")
+    }
+    $record.bounds = Get-DeleteTargetDiagnosticValue $budget {
+      $bounds = $target.Current.BoundingRectangle
+      $values = @($bounds.Left, $bounds.Top, $bounds.Width, $bounds.Height)
+      foreach ($value in $values) {
+        if ($value -isnot [double] -or [double]::IsNaN($value) -or [double]::IsInfinity($value)) {
+          throw "Bounds are unavailable or nonfinite"
+        }
+      }
+      [ordered]@{ left = [double]$values[0]; top = [double]$values[1]; width = [double]$values[2]; height = [double]$values[3] }
+    }
+    foreach ($field in @("offscreen", "enabled", "selected")) {
+      $record[$field] = Get-DeleteTargetDiagnosticValue $budget {
+        $value = switch ($field) {
+          "offscreen" { $target.Current.IsOffscreen }
+          "enabled" { $target.Current.IsEnabled }
+          "selected" { $selection.Current.IsSelected }
+        }
+        if ($value -isnot [bool]) { throw "Boolean property is unavailable" }
+        $value
+      }
+    }
+    # This provider returns row.parent through the held selection pattern.
+    $container = Get-DeleteTargetDiagnosticValue $budget { $selection.Current.SelectionContainer }
+    if ($container.state -ceq "available") {
+      $record.parent = [ordered]@{
+        state = "available"; classification = "selection-container"
+        processId = Get-DeleteTargetDiagnosticValue $budget {
+          $value = $container.value.Current.ProcessId
+          if ($value -isnot [int]) { throw "Parent process identity is unavailable" }
+          $value
+        }
+        controlTypeId = $untrusted; classNameHash = $untrusted
+      }
+      if ($record.parent.processId.state -ceq "available" -and
+          $record.parent.processId.value -eq $expectedProcessId) {
+        $record.parent.controlTypeId = Get-DeleteTargetDiagnosticValue $budget {
+          $value = $container.value.Current.ControlType.Id
+          if ($value -isnot [int]) { throw "Parent role is unavailable" }
+          $value
+        }
+        $record.parent.classNameHash = Get-DeleteTargetDiagnosticValue $budget {
+          Get-DeleteTargetIdentityHash $container.value.Current.ClassName
+        }
+      }
+    } else {
+      $record.parent = [ordered]@{ state = "unavailable"; reason = "selection-container-unavailable" }
+    }
+  }
+  $exception = $failure.Exception
+  for ($index = 0; $null -ne $exception -and $index -lt 4; $index++) {
+    $record.exceptionHResults += [int]$exception.HResult
+    $exception = $exception.InnerException
+  }
+  $record.exceptionChainTruncated = $null -ne $exception
+  $record.readCount = $budget.reads
+  $record.readLimit = 11
+  $record.budgetMilliseconds = 500
+  $record.elapsedMilliseconds = $budget.clock.ElapsedMilliseconds
+  $json = $record | ConvertTo-Json -Depth 6 -Compress
+  $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+  if ($bytes.Length -gt 8192) { throw "Delete Select receipt exceeds 8192 bytes" }
+  Write-Host ("UIA_DELETE_TARGET_SELECT_FAILURE=" + $json)
+  if ([string]::IsNullOrWhiteSpace($receiptPath)) {
+    Write-Host "UIA_DELETE_TARGET_SELECT_TELEMETRY_FAILURE=receipt-path-unconfigured"
+    return
+  }
+  $stream = $null
+  try {
+    $stream = [IO.FileStream]::new($receiptPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush($true)
+  } finally {
+    if ($null -ne $stream) { $stream.Dispose() }
+  }
+  Write-Host ("UIA_DELETE_TARGET_SELECT_RECEIPT=flushed bytes={0} sha256={1}" -f
+    $bytes.Length, [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)))
 }
 
 function Get-UiaOwnedSheetIdentity($element) {
@@ -1868,6 +2176,43 @@ function ConvertTo-PopupMenuEvidence($items) {
   })
 }
 
+function Open-CanvasCardContextMenu(
+  $process,
+  $root,
+  [IntPtr] $ownerWindow,
+  [string] $automationId,
+  $walker,
+  [string] $label
+) {
+  Require (Ensure-ShellForeground $ownerWindow "$label context menu") `
+    "GraphCode shell did not reacquire foreground before the $label context menu"
+  $card = Find-FragmentByIdWithRetry $root $automationId $walker
+  Require ($null -ne $card) "$label context menu lost its stable card"
+  Require ($card.Current.AutomationId -ceq $automationId -and
+    $card.Current.ProcessId -eq $process.Id -and -not $card.Current.IsOffscreen) `
+    "$label context menu card identity, process or visibility changed"
+  $canvas = Find-FragmentByIdWithRetry $root "graph" $walker
+  Require ($null -ne $canvas) "$label context menu lost its canvas"
+  $bounds = $card.Current.BoundingRectangle
+  $canvasBounds = $canvas.Current.BoundingRectangle
+  $cardRect = @($bounds.Left, $bounds.Top, $bounds.Right, $bounds.Bottom)
+  $canvasRect = @($canvasBounds.Left, $canvasBounds.Top, $canvasBounds.Right, $canvasBounds.Bottom)
+  Require (@(@($cardRect) + @($canvasRect) | Where-Object {
+    [double]::IsNaN($_) -or [double]::IsInfinity($_)
+  }).Count -eq 0) "$label context menu requires finite measured bounds"
+  $visible = Get-MultiProjectClippedRectangle $cardRect $canvasRect
+  $x = [int](($visible[0] + $visible[2]) / 2)
+  $y = [int](($visible[1] + $visible[3]) / 2)
+  Require ($x -ge $visible[0] -and $x -lt $visible[2] -and
+    $y -ge $visible[1] -and $y -lt $visible[3]) `
+    "$label context menu card has no interior screen point"
+  Require ([GraphCodeUiaGateState]::PostOwnedScreenPoint($ownerWindow, $x, $y, $true)) `
+    "$label context menu stable-card right-click was rejected"
+  $popup = Wait-ForPopupMenu $process $ownerWindow $label
+  Require ($popup -ne [IntPtr]::Zero) "$label context menu did not open"
+  return $popup
+}
+
 function Read-CanvasContextMenu(
   [System.Diagnostics.Process] $process,
   [IntPtr] $ownerWindow,
@@ -2024,25 +2369,6 @@ function Wait-ForDesktopElementGone(
   return $null -eq $element
 }
 
-function Hide-TestProviderZmxWindows {
-  if (-not $env:GRAPHCODE_ZMX) { return }
-  $providerZmx = [IO.Path]::GetFullPath($env:GRAPHCODE_ZMX)
-  foreach ($process in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-      Where-Object {
-        $_.Name -match "(?i)^zmx(?:\.exe)?$" -and
-        (([string]$_.ExecutablePath) -eq $providerZmx -or
-         ([string]$_.CommandLine) -like "*$providerZmx*")
-      })) {
-    [GraphCodeUiaGateState]::HideProcessWindows([uint32]$process.ProcessId)
-  }
-  $foreground = [GraphCodeUiaGateState]::CurrentForegroundWindow()
-  $foregroundTitle = [GraphCodeUiaGateState]::WindowTitle($foreground)
-  if ($foregroundTitle -eq $providerZmx -or
-      $foregroundTitle -like "*\zmx.exe") {
-    [GraphCodeUiaGateState]::HideWindow($foreground)
-  }
-}
-
 function Test-FocusedElementIdentity(
   [System.Windows.Automation.AutomationElement] $candidate,
   [System.Windows.Automation.AutomationElement] $expected,
@@ -2072,11 +2398,9 @@ function Retain-FocusWithRetry(
   [int] $Attempts = 600
 ) {
   $candidate = $null
-  Hide-TestProviderZmxWindows
   Start-Sleep -Milliseconds 250
   Write-Host "UIA_FOCUS_DIAGNOSTICS phase=$label $(Get-FocusDiagnostics $window)"
   for ($index = 0; $index -lt $Attempts; $index++) {
-    Hide-TestProviderZmxWindows
     $activated = [GraphCodeUiaGateState]::ActivateWindow($window)
     Start-Sleep -Milliseconds 50
     try {
@@ -2113,12 +2437,8 @@ function Ensure-ShellForeground(
   # command/UIA path that depends on the shell being foreground, retrying
   # within a bounded deadline instead of assuming a prior activation holds.
   #
-  # Only fall back to ActivateWindow's invasive Alt-tap foreground-lock
-  # bypass (keybd_event + SetForegroundWindow) when the shell does not
-  # already hold true foreground ownership: that trick injects a global
-  # synthetic Alt key press/release, and issuing it when it is not needed
-  # (the shell is already foreground) races the very next native window
-  # this gate creates and can desynchronize its subsequent close handling.
+  # Activation never injects keys or attaches another foreground input queue.
+  # A denied foreground request remains an explicit bounded failure.
   if ([GraphCodeUiaGateState]::IsForegroundWindow($window)) {
     return $true
   }
@@ -2126,7 +2446,6 @@ function Ensure-ShellForeground(
   $deadline = $startedUtc.AddMilliseconds($TimeoutMilliseconds)
   $acquired = $false
   do {
-    Hide-TestProviderZmxWindows
     $activated = [GraphCodeUiaGateState]::ActivateWindow($window)
     $acquired = $activated -and [GraphCodeUiaGateState]::IsForegroundWindow($window)
     if (-not $acquired) {
@@ -3265,67 +3584,66 @@ function Get-UiaOwnedProcessDescendants([int[]] $rootProcessIds) {
   return @($descendants | Sort-Object Depth -Descending)
 }
 
+function Invoke-UiaCleanupActions([scriptblock[]] $actions) {
+  $errors = [Collections.Generic.List[Exception]]::new()
+  foreach ($action in $actions) {
+    try { & $action }
+    catch { $errors.Add($_.Exception) }
+  }
+  if ($errors.Count) {
+    $failure = [AggregateException]::new("UIA cleanup actions failed", $errors.ToArray())
+    if (@($errors | Where-Object { $_.Data["GraphCodeValidationRootRetentionRequired"] -eq $true }).Count) {
+      $tag = New-UiaOwnershipFailure $failure.Message
+      foreach ($key in $tag.Data.Keys) { $failure.Data[$key] = $tag.Data[$key] }
+      $failure.Data["GraphCodeValidationRetainedRoots"] = @(
+        @($tag.Data["GraphCodeValidationRetainedRoots"]) +
+        @($errors | ForEach-Object { $_.Data["GraphCodeValidationRetainedRoots"] }) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique
+      )
+    }
+    throw $failure
+  }
+}
+
 function Stop-UiaOwnedProcessTrees([Diagnostics.Process[]] $rootProcesses) {
   $roots = @($rootProcesses | Where-Object { $null -ne $_ })
-  if ($roots.Count -eq 0) { return }
-  $rootIds = @($roots | ForEach-Object { $_.Id })
-  $descendants = @(Get-UiaOwnedProcessDescendants $rootIds)
-  Write-Host ("UIA_OWNED_PROCESS_TREE=" + (@($descendants | ForEach-Object {
-    [ordered]@{
-      processId = $_.ProcessId
-      parentProcessId = $_.ParentProcessId
-      name = $_.Name
-      executablePath = Protect-UiaStartupDiagnosticText $_.ExecutablePath
-      depth = $_.Depth
-    }
-  } | ConvertTo-Json -Compress -Depth 4)))
-  foreach ($descendant in $descendants) {
-    $current = Get-CimInstance Win32_Process -Filter `
-      "ProcessId = $($descendant.ProcessId)" -ErrorAction Stop
-    if ($null -eq $current) { continue }
-    if ([string]$current.Name -cne $descendant.Name -or
-        [string]$current.CreationDate -cne [string]$descendant.CreationDate) {
-      continue
-    }
-    $child = Get-Process -Id $descendant.ProcessId -ErrorAction SilentlyContinue
-    if ($child) {
-      try {
-        if (-not $child.HasExited) { $child.Kill() }
-      } catch [InvalidOperationException] {
-        if (-not $child.HasExited) { throw }
-      }
-      if (-not $child.WaitForExit(5000)) {
-        throw "Owned descendant process $($descendant.ProcessId) did not exit after termination"
-      }
-      $child.Dispose()
-    }
+  $captures = @($script:UiaGateOwnedCaptures | Where-Object { $null -ne $_ })
+  if ($roots.Count -eq 0 -and $captures.Count -eq 0) {
+    Write-Host "UIA_PROCESS_TREE_CLEANUP=not_needed no owned launch was registered"
+    return
   }
+  $errors = [Collections.Generic.List[Exception]]::new()
   foreach ($root in $roots) {
-    try {
-      if (-not $root.HasExited) { $root.Kill() }
-    } catch [InvalidOperationException] {
-      if (-not $root.HasExited) { throw }
-    }
-    if (-not $root.HasExited) {
-      if (-not $root.WaitForExit(5000)) {
-        throw "Owned UIA shell process $($root.Id) did not exit after termination"
-      }
+    $owned = @($captures | Where-Object { [Object]::ReferenceEquals($_.process, $root) })
+    if ($owned.Count -ne 1) {
+      $errors.Add((New-UiaOwnershipFailure (
+        "UIA root $($root.Id) has no unique pre-launch owned-job lease. " +
+        "No PID/CIM-discovered descendant was terminated; complete tree cleanup cannot be verified.")))
     }
   }
-  $remaining = @()
-  foreach ($descendant in $descendants) {
-    $current = Get-CimInstance Win32_Process -Filter `
-      "ProcessId = $($descendant.ProcessId)" -ErrorAction Stop
-    if ($null -ne $current -and
-        [string]$current.Name -ceq $descendant.Name -and
-        [string]$current.CreationDate -ceq [string]$descendant.CreationDate) {
-      $remaining += $descendant.ProcessId
+  foreach ($capture in $captures) {
+    if ($capture.cleaned) { continue }
+    try { $null = Complete-MultiProjectCapture $capture $capture.logDirectory }
+    catch { $errors.Add($_.Exception) }
+  }
+  if ($errors.Count) {
+    $failure = [AggregateException]::new("UIA owned-job cleanup failed", $errors.ToArray())
+    if (@($errors | Where-Object { $_.Data["GraphCodeValidationRootRetentionRequired"] -eq $true }).Count) {
+      $tag = New-UiaOwnershipFailure $failure.Message
+      foreach ($key in $tag.Data.Keys) { $failure.Data[$key] = $tag.Data[$key] }
     }
+    throw $failure
   }
-  if ($remaining.Count -gt 0) {
-    throw "Owned UIA descendants remained after teardown: $($remaining -join ',')"
-  }
-  Write-Host "UIA_PROCESS_TREE_CLEANUP=verified roots=$($rootIds -join ',') descendants=$($descendants.Count)"
+  Write-Host "UIA_PROCESS_TREE_CLEANUP=verified ownedJobs=$($captures.Count)"
+}
+
+function New-UiaOwnershipFailure([string] $message) {
+  $failure = [InvalidOperationException]::new($message)
+  $root = [Environment]::GetEnvironmentVariable("GRAPHCODE_VALIDATION_ROOT", "Process")
+  $roots = @(
+    if (-not [string]::IsNullOrWhiteSpace($root)) { $root }
+  )
+  return (ShellProcessOwnership\Set-ShellOwnershipUnproven -Exception $failure -RetainedRoots $roots)
 }
 
 function Stop-UiaOwnedProviderProcesses(
@@ -3337,7 +3655,7 @@ function Stop-UiaOwnedProviderProcesses(
     return
   }
   $expected = [IO.Path]::GetFullPath($providerPath)
-  $owned = @(
+  $observed = @(
     Get-CimInstance Win32_Process -Filter "Name = 'zmx.exe'" -ErrorAction Stop |
       Where-Object {
         $_.ExecutablePath -and
@@ -3345,36 +3663,12 @@ function Stop-UiaOwnedProviderProcesses(
         -not $baseline.Contains("$([int]$_.ProcessId)|$([string]$_.CreationDate)")
       }
   )
-  foreach ($candidate in $owned) {
-    $current = Get-CimInstance Win32_Process -Filter `
-      "ProcessId = $([int]$candidate.ProcessId)" -ErrorAction Stop
-    if ($null -eq $current -or
-        [string]$current.CreationDate -cne [string]$candidate.CreationDate -or
-        -not $current.ExecutablePath -or
-        [IO.Path]::GetFullPath([string]$current.ExecutablePath) -ine $expected) {
-      continue
-    }
-    $process = Get-Process -Id ([int]$candidate.ProcessId) -ErrorAction SilentlyContinue
-    if ($process) {
-      if (-not $process.HasExited) { $process.Kill() }
-      if (-not $process.WaitForExit(5000)) {
-        throw "Owned provider process $($candidate.ProcessId) did not exit after termination"
-      }
-      $process.Dispose()
-    }
+  if ($observed.Count -gt 0) {
+    throw (New-UiaOwnershipFailure (
+      "UIA provider ownership is unproven for observed PIDs $($observed.ProcessId -join ','); " +
+      "path, creation time, and baseline absence are advisory only. No discovered process was terminated."))
   }
-  $remaining = @(
-    Get-CimInstance Win32_Process -Filter "Name = 'zmx.exe'" -ErrorAction Stop |
-      Where-Object {
-        $_.ExecutablePath -and
-        [IO.Path]::GetFullPath([string]$_.ExecutablePath) -ieq $expected -and
-        -not $baseline.Contains("$([int]$_.ProcessId)|$([string]$_.CreationDate)")
-      }
-  )
-  if ($remaining.Count -gt 0) {
-    throw "Owned provider processes remained after teardown: $($remaining.ProcessId -join ',')"
-  }
-  Write-Host "UIA_PROVIDER_PROCESS_CLEANUP=verified terminated=$($owned.Count)"
+  Write-Host "UIA_PROVIDER_PROCESS_CLEANUP=no_candidates_observed terminated=0"
 }
 
 function Get-UiaStartupImageHash([string] $path, [scriptblock] $openRead) {
@@ -4469,13 +4763,10 @@ using System.Diagnostics;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 public static class GraphCodeMultiProjectEditNative {
-  [StructLayout(LayoutKind.Sequential)] private struct Key { public ushort Vk, Scan; public uint Flags, Time; public UIntPtr Extra; }
-  [StructLayout(LayoutKind.Sequential)] private struct Input { public uint Type; public Key Key; public uint Pad0, Pad1; }
   [StructLayout(LayoutKind.Sequential)] private struct Rect {public int Left,Top,Right,Bottom;}
   [StructLayout(LayoutKind.Sequential)] private struct GuiInfo {
     public int Size; public uint Flags; public IntPtr Active,Focus,Capture,MenuOwner,MoveSize,Caret; public Rect CaretRect;
   }
-  [DllImport("user32.dll", SetLastError=true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
   [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", SetLastError=true)]
   private static extern IntPtr Message(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
   [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", CharSet=CharSet.Unicode, SetLastError=true)]
@@ -4525,15 +4816,6 @@ public static class GraphCodeMultiProjectEditNative {
     var info=new GuiInfo{Size=Marshal.SizeOf(typeof(GuiInfo))};
     if(thread==0 || !GetGUIThreadInfo(thread,ref info)) throw new Win32Exception(Marshal.GetLastWin32Error(),"N3e GetGUIThreadInfo");
     return info.Focus;
-  }
-  public static int[] Unicode(string text) {
-    var inputs=new Input[text.Length*2]; int index=0;
-    foreach(char value in text){
-      inputs[index++]=new Input{Type=1,Key=new Key{Scan=value,Flags=4}};
-      inputs[index++]=new Input{Type=1,Key=new Key{Scan=value,Flags=6}};
-    }
-    uint sent=SendInput((uint)inputs.Length,inputs,Marshal.SizeOf(typeof(Input)));
-    return new[]{checked((int)sent),inputs.Length};
   }
 }
 '@
@@ -4597,8 +4879,14 @@ public static class GraphCodeMultiProjectEditNative {
   $api | Add-Member ScriptMethod Selection {param($edit,$remaining) [GraphCodeMultiProjectEditNative]::Selection($edit,$remaining)}
   $api | Add-Member ScriptMethod SelectAll {param($edit,$remaining) [GraphCodeMultiProjectEditNative]::SelectAll($edit,$remaining)}
   $api | Add-Member ScriptMethod SetText {param($edit,$text,$remaining) [GraphCodeMultiProjectEditNative]::SetText($edit,$text,$remaining)}
-  $api | Add-Member ScriptMethod Delete {return ,@(([GraphCodeUiaGateState]::SendKeyInput(0x2E,1)*2),2)}
-  $api | Add-Member ScriptMethod Unicode {param($text) return ,@([GraphCodeMultiProjectEditNative]::Unicode($text))}
+  $api | Add-Member ScriptMethod Delete {
+    param($modal,$edit,$expectedProcessId)
+    return ,@(([GraphCodeUiaGateState]::SendKeyInput($modal,$expectedProcessId,$edit,0x2E,1)*2),2)
+  }
+  $api | Add-Member ScriptMethod Unicode {
+    param($text,$modal,$edit,$expectedProcessId)
+    return ,@([GraphCodeUiaGateState]::SendUnicodeInput($modal,$expectedProcessId,$edit,$text))
+  }
   $api | Add-Member ScriptMethod Observe {param($remaining) Start-Sleep -Milliseconds ([Math]::Min(25,$remaining))}
   return $api
 }
@@ -4731,7 +5019,7 @@ function Invoke-MultiProjectSequencedEdit(
     $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
     $null=Get-MultiProjectEditRemaining $api $started
     $record.phase="clear";$record.clearBatches++
-    $record.clear=@($api.Delete())
+    $record.clear=@($api.Delete($modal,$edit,$processId))
     if($record.clear.Count -ne 2 -or $record.clear[0] -isnot [int] -or $record.clear[1] -isnot [int] -or
       $record.clear[0] -ne 2 -or $record.clear[1] -ne 2){throw "MULTIPROJECT_EDIT_COUNTS: clear insertion receipt not2/2"}
     if($null -ne $api.PSObject.Methods["SetText"]){
@@ -4765,7 +5053,7 @@ function Invoke-MultiProjectSequencedEdit(
     $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
     $null=Get-MultiProjectEditRemaining $api $started
     $record.phase="unicode";$record.unicodeBatches++
-    $record.typed=@($api.Unicode($text))
+    $record.typed=@($api.Unicode($text,$modal,$edit,$processId))
     if($record.typed.Count -ne 2 -or $record.typed[0] -isnot [int] -or $record.typed[1] -isnot [int] -or
       $record.typed[0] -ne 2*$text.Length -or $record.typed[1] -ne 2*$text.Length){
       throw "MULTIPROJECT_EDIT_COUNTS: single Unicode insertion receipt incomplete"
@@ -5463,46 +5751,56 @@ function Complete-MultiProjectCapture($capture, [string] $logDirectory, [int] $t
       [StandaloneProcessJob]::WaitForEmpty($capture.job, $remaining)
       $empty = [StandaloneProcessJob]::Active($capture.job) -eq 0
       if (-not $empty) { throw "owned job census is not empty" }
-    } elseif ($capture.rootProcess -and -not $capture.rootProcess.HasExited) {
-      if ($capture.rootProcess.StartTime.ToUniversalTime().Ticks -ne $capture.rootStartUtcTicks) {
-        throw "unassigned root identity changed"
-      }
-      Stop-Process -Id $capture.rootPID -Force
+    } else {
+      # The assignment barrier was never released; only the retained launcher exists.
+      if ($capture.rootProcess -and -not $capture.rootProcess.HasExited) { $capture.rootProcess.Kill() }
+      $empty = $true
     }
     $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
-    $exited = $capture.rootProcess.WaitForExit($remaining)
+    $exited = -not $capture.rootProcess -or $capture.rootProcess.WaitForExit($remaining)
     if (-not $exited) { throw "root did not exit within shared teardown deadline" }
     if ($capture.process -and $capture.process -ne $capture.rootProcess) {
       $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
-      if (-not $capture.process.WaitForExit($remaining)) { throw "retained target did not exit within shared teardown deadline" }
+      if (-not $capture.process.WaitForExit($remaining)) {
+        $exited = $false
+        throw "retained target did not exit within shared teardown deadline"
+      }
     }
   } catch { $errors.Add("owned exit/quiescence: $($_.Exception.Message)") }
   try {
-    if ($capture.stdout -and $capture.stderr) {
+    $readers = @(@($capture.stdout, $capture.stderr) | Where-Object { $null -ne $_ })
+    if ($readers.Count) {
       $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
-      $drained = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($capture.stdout, $capture.stderr), $remaining)
+      $drained = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]$readers, $remaining)
       if (-not $drained) { throw "stdout=$($capture.stdout.Status) stderr=$($capture.stderr.Status) shared pipe-drain deadline exceeded" }
       foreach ($stream in @("stdout", "stderr")) {
         $task = $capture[$stream]
+        if ($null -eq $task) { continue }
         if ($task.Status -ne [Threading.Tasks.TaskStatus]::RanToCompletion) { throw "$stream reader did not successfully complete" }
         try {
-          $task.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $logDirectory ($capture.stem + "-$stream.log"))
+          if (-not $capture.streamingLogs) {
+            $task.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $logDirectory ($capture.stem + "-$stream.log"))
+          }
         } catch { $errors.Add("$stream capture persistence: $($_.Exception.Message)") }
       }
-    }
+    } else { $drained = $true }
   } catch { $errors.Add("redirected pipe drain: $($_.Exception.Message)") }
-  foreach ($stream in @("StandardOutput", "StandardError")) {
-    try { if ($capture.rootProcess) { $capture.rootProcess.$stream.Dispose() } }
-    catch { $errors.Add("disposing $stream reader: $($_.Exception.Message)") }
+  $release = $exited -and $empty -and $drained
+  if ($release) {
+    foreach ($stream in @("StandardOutput", "StandardError")) {
+      try { if ($capture.rootProcess) { $capture.rootProcess.$stream.Dispose() } }
+      catch { $errors.Add("disposing $stream reader: $($_.Exception.Message)") }
+    }
+    try {
+      if ($capture.job -ne [IntPtr]::Zero) { [StandaloneProcessJob]::Close($capture.job) }
+    } catch { $errors.Add("closing owned job: $($_.Exception.Message)") }
+    try {
+      if ($capture.process -and $capture.process -ne $capture.rootProcess) { $capture.process.Dispose() }
+    } catch { $errors.Add("disposing retained target: $($_.Exception.Message)") }
+    try { if ($capture.rootProcess) { $capture.rootProcess.Dispose() } }
+    catch { $errors.Add("disposing retained root: $($_.Exception.Message)") }
+    $capture.cleaned = $true
   }
-  try {
-    if ($capture.job -ne [IntPtr]::Zero) { [StandaloneProcessJob]::Close($capture.job) }
-  } catch { $errors.Add("closing owned job: $($_.Exception.Message)") }
-  try {
-    if ($capture.process -and $capture.process -ne $capture.rootProcess) { $capture.process.Dispose() }
-  } catch { $errors.Add("disposing retained target: $($_.Exception.Message)") }
-  try { if ($capture.rootProcess) { $capture.rootProcess.Dispose() } }
-  catch { $errors.Add("disposing retained root: $($_.Exception.Message)") }
   $diagnostic = [ordered]@{
     identity = $identity; rootExited = $exited; ownedJobEmpty = $empty
     redirectedReadersDrained = $drained; deadlineMilliseconds = $timeoutMilliseconds
@@ -5514,23 +5812,86 @@ function Complete-MultiProjectCapture($capture, [string] $logDirectory, [int] $t
   Write-Host ("MULTIPROJECT_CAPTURE_TEARDOWN=" + ($diagnostic | ConvertTo-Json -Depth 8 -Compress))
   if ($errors.Count -gt 0) {
     $message = "MULTIPROJECT_TEARDOWN: $identity; $($errors -join '; ')"
+    $failure = if (-not $release) { New-UiaOwnershipFailure $message } else { [InvalidOperationException]::new($message) }
+    $failure.Data["UiaRetainedCapture"] = $capture
     if ($primaryError) {
+      foreach ($key in $failure.Data.Keys) { $primaryError.Exception.Data[$key] = $failure.Data[$key] }
       $primaryError.Exception.Data["MultiProjectTeardown:$($capture.stem)"] = $message
       Write-Warning $message -WarningAction Continue
-    } else { throw $message }
+    } else { throw $failure }
   }
   return $diagnostic
+}
+
+function Initialize-UiaOwnedStreamCapture {
+  if ("UiaOwnedStreamCapture" -as [type]) { return }
+  Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Text;
+using System.Threading.Tasks;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class UiaOwnedStreamCapture {
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool contained);
+  public static void RequireJobMember(IntPtr process, IntPtr job) {
+    bool contained;
+    if (!IsProcessInJob(process, job, out contained)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    if (!contained) throw new InvalidOperationException("Published UIA target is not a member of its owned launch job");
+  }
+  public static Task<string> Read(StreamReader reader, string path) {
+    var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite);
+    return Capture(reader, file);
+  }
+  private static async Task<string> Capture(StreamReader reader, FileStream file) {
+    using (var writer = new StreamWriter(file, new UTF8Encoding(false))) {
+      var text = new StringBuilder();
+      var buffer = new char[4096];
+      int count;
+      while ((count = await reader.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false)) > 0) {
+        text.Append(buffer, 0, count);
+        await writer.WriteAsync(buffer, 0, count).ConfigureAwait(false);
+        await writer.FlushAsync().ConfigureAwait(false);
+      }
+      return text.ToString();
+    }
+  }
+}
+'@
+}
+
+function Start-UiaOwnedProcess(
+  [string] $file, [string[]] $arguments, [string] $standardOutputPath,
+  [string] $standardErrorPath, [switch] $Hidden
+) {
+  $environment = @{}
+  foreach ($entry in [Environment]::GetEnvironmentVariables("Process").GetEnumerator()) {
+    $environment[$entry.Key] = $entry.Value
+  }
+  $directory = Split-Path -Parent $standardErrorPath
+  $stem = [IO.Path]::GetFileNameWithoutExtension($standardErrorPath) -replace "-stderr$", ""
+  if (-not $standardOutputPath) { $standardOutputPath = Join-Path $directory "$stem-stdout.log" }
+  $capture = Start-MultiProjectOwnedProcess -file $file -arguments $arguments -environment $environment `
+    -stem $stem -Visible:(-not $Hidden) -RegisterForUia -standardOutputPath $standardOutputPath `
+    -standardErrorPath $standardErrorPath -logDirectory $directory -targetWorkingDirectory (Get-Location).ProviderPath
+  return $capture.process
 }
 
 function Start-MultiProjectOwnedProcess(
   [string] $file, [string[]] $arguments, [hashtable] $environment, [string] $stem,
   [string] $jobSourcePath = (Join-Path $PSScriptRoot "Tests\Packaging.Standalone.Tests.ps1"),
-  [switch] $Visible
+  [switch] $Visible, [switch] $RegisterForUia,
+  [string] $standardOutputPath, [string] $standardErrorPath,
+  [string] $logDirectory = $environment.TEMP,
+  [string] $targetWorkingDirectory = $environment.TEMP
 ) {
   Initialize-MultiProjectProcessJob $jobSourcePath
   $gate = Join-Path $environment.TEMP ("mp-start-" + [guid]::NewGuid().ToString("N"))
   $identityPath = $gate + ".identity"
-  $launch = @{ gate = $gate; identity = $identityPath; file = $file; arguments = @($arguments); visible = [bool]$Visible } |
+  $launch = @{ gate = $gate; identity = $identityPath; file = $file; arguments = @($arguments)
+    visible = [bool]$Visible; workingDirectory = $targetWorkingDirectory
+    lifetimeMilliseconds = $(if ($RegisterForUia) { -1 } else { 600000 }) } |
     ConvertTo-Json -Depth 8 -Compress
   $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($launch))
   $command = @'
@@ -5544,6 +5905,7 @@ while (-not [IO.File]::Exists($launch.gate)) {
 $start = [Diagnostics.ProcessStartInfo]::new($launch.file)
 $start.UseShellExecute = $false
 $start.CreateNoWindow = -not $launch.visible
+$start.WorkingDirectory = $launch.workingDirectory
 foreach ($argument in $launch.arguments) { $start.ArgumentList.Add([string]$argument) }
 $target = [Diagnostics.Process]::Start($start)
 try {
@@ -5552,7 +5914,7 @@ try {
   @{ pid = $target.Id; startUtcTicks = $target.StartTime.ToUniversalTime().Ticks } |
     ConvertTo-Json -Compress | Set-Content -LiteralPath $temporaryIdentity
   [IO.File]::Move($temporaryIdentity, $launch.identity)
-  if (-not $target.WaitForExit(600000)) { throw "Owned target exceeded ten-minute launch lifetime" }
+  if (-not $target.WaitForExit($launch.lifetimeMilliseconds)) { throw "Owned target exceeded its launch lifetime" }
   exit $target.ExitCode
 } finally { $target.Dispose() }
 '@
@@ -5573,15 +5935,27 @@ try {
       [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command)))) { $start.ArgumentList.Add($argument) }
   $capture = [ordered]@{ process = $null; rootProcess = $null; rootPID = $null; rootStartUtcTicks = $null
     targetPID = $null; targetStartUtcTicks = $null; job = [StandaloneProcessJob]::Create()
-    assigned = $false; stdout = $null; stderr = $null; stem = $stem }
+    assigned = $false; stdout = $null; stderr = $null; stem = $stem
+    cleaned = $false; streamingLogs = [bool]$standardOutputPath; logDirectory = $logDirectory }
+  if ($RegisterForUia) {
+    if ($null -eq $script:UiaGateOwnedCaptures) { $script:UiaGateOwnedCaptures = [Collections.Generic.List[object]]::new() }
+    $script:UiaGateOwnedCaptures.Add($capture)
+  }
   try {
     $root = [Diagnostics.Process]::Start($start)
     $capture.rootProcess = $root
     $capture.rootPID = $root.Id
     $capture.rootStartUtcTicks = $root.StartTime.ToUniversalTime().Ticks
     $handle = $root.Handle
-    $capture.stdout = $root.StandardOutput.ReadToEndAsync()
-    $capture.stderr = $root.StandardError.ReadToEndAsync()
+    if ($standardOutputPath) {
+      Initialize-UiaOwnedStreamCapture
+      $capture.stdout = [UiaOwnedStreamCapture]::Read($root.StandardOutput, $standardOutputPath)
+      $capture.stderr = [UiaOwnedStreamCapture]::Read($root.StandardError, $standardErrorPath)
+      if ($capture.stdout.IsFaulted -or $capture.stderr.IsFaulted) { throw "UIA owned stream could not open its exact log paths" }
+    } else {
+      $capture.stdout = $root.StandardOutput.ReadToEndAsync()
+      $capture.stderr = $root.StandardError.ReadToEndAsync()
+    }
     [StandaloneProcessJob]::Assign($capture.job, $handle)
     $capture.assigned = $true
     [IO.File]::WriteAllText($gate, "assigned")
@@ -5602,10 +5976,13 @@ try {
     $capture.process = $target
     $capture.targetPID = $target.Id
     $capture.targetStartUtcTicks = $identity.startUtcTicks
+    Initialize-UiaOwnedStreamCapture
+    [UiaOwnedStreamCapture]::RequireJobMember($target.Handle, $capture.job)
+    if ("GraphCodeUiaGateState" -as [type]) { [GraphCodeUiaGateState]::RetainProcess($target) }
     return $capture
   } catch {
     $primary = $_
-    $null = Complete-MultiProjectCapture $capture $environment.TEMP 5000 $primary
+    $null = Complete-MultiProjectCapture $capture $logDirectory 5000 $primary
     throw
   }
 }
@@ -6064,7 +6441,7 @@ function Invoke-MultiProjectRenamePhase {
       $rename = @(Get-PopupMenuItems $popup | Where-Object { $_.Text -like "Rename...*" -and $_.Enabled })
     }
     Require ($rename.Count -eq 1) "multi-project node popup lacks one enabled Rename"
-    $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($popup, $multiWindow, [int]$rename[0].Position, $rename[0].Id)
+    $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($popup, $multiWindow, [int]$rename[0].Position, $rename[0].Id, [uint32]$multiProcess.Id)
     Require ($null -ne $click) "multi-project native Rename item was not hit"
     $renameProcess = $multiProcess
     $renameShellWindow = $multiWindow
@@ -6224,7 +6601,7 @@ function Invoke-MultiProjectRenamePhase {
     $primaryError = $_
     throw
   } finally {
-    $cleanupFailures = [Collections.Generic.List[string]]::new()
+    $cleanupFailures = [Collections.Generic.List[Exception]]::new()
     $failureChildren = [Collections.Generic.List[object]]::new()
     foreach ($child in @($peerChild, $shellChild)) {
       if ($null -ne $child) {
@@ -6245,7 +6622,7 @@ function Invoke-MultiProjectRenamePhase {
           $failureChildren.Add($observed)
         }
         try { $null = Complete-MultiProjectCapture $child $logDirectory 5000 $primaryError }
-        catch { $cleanupFailures.Add($_.Exception.Message) }
+        catch { $cleanupFailures.Add($_.Exception) }
       }
     }
     if ($primaryError) {
@@ -6253,11 +6630,20 @@ function Invoke-MultiProjectRenamePhase {
         $failureChildren.ToArray() $phaseStartedUtc $phaseClock.ElapsedMilliseconds
     }
     if ($cleanupFailures.Count -gt 0) {
-      $message = "MULTIPROJECT_PHASE_TEARDOWN: $($cleanupFailures -join '; ')"
-      if ($primaryError) {
-        $primaryError.Exception.Data["MultiProjectPhaseTeardown"] = $message
-        Write-Warning $message -WarningAction Continue
-      } else { throw $message }
+      $message = "MULTIPROJECT_PHASE_TEARDOWN: $($cleanupFailures.Message -join '; ')"
+      $actions = @($cleanupFailures | ForEach-Object {
+        $cleanupFailure = $_
+        { throw $cleanupFailure }.GetNewClosure()
+      })
+      try { Invoke-UiaCleanupActions $actions }
+      catch {
+        if ($primaryError) {
+          $primaryError.Exception.Data["MultiProjectPhaseTeardown"] = $message
+          $primaryError.Exception.Data["MultiProjectCleanupFailure"] = $_.Exception
+          foreach ($key in $_.Exception.Data.Keys) { $primaryError.Exception.Data[$key] = $_.Exception.Data[$key] }
+          Write-Warning $message -WarningAction Continue
+        } else { throw }
+      }
     }
   }
 }
@@ -6402,13 +6788,7 @@ try {
     [Text.UTF8Encoding]::new($false)
   )
   Write-Host ("UIA_PRELAUNCH_DIAGNOSTICS=" + $prelaunchJson)
-  if ($ArgumentList.Count -gt 0) {
-    $process = Start-Process -FilePath $Shell -ArgumentList $ArgumentList -PassThru -WindowStyle Normal `
-      -RedirectStandardOutput $shellOutputPath -RedirectStandardError $shellErrorPath
-  } else {
-    $process = Start-Process -FilePath $Shell -PassThru -WindowStyle Normal `
-      -RedirectStandardOutput $shellOutputPath -RedirectStandardError $shellErrorPath
-  }
+  $process = Start-UiaOwnedProcess $Shell $ArgumentList $shellOutputPath $shellErrorPath
 
   $root = $null
   for ($i = 0; $i -lt 160; $i++) {
@@ -9062,22 +9442,81 @@ try {
   Write-Host "UIA_RENAME_OUTCOME graph='$renameGraphTitle' sidebar='$renameSidebarTitle' expected='UIA renamed loop' reason=gate-forces-daemon-connection-failure"
 
   $deleteLoopTitle = 'Delete “UIA loop A”?'
+  $fitDeleteCanvas = Find-FragmentByIdWithRetry $root "fit-canvas" $rawWalker
+  Require (($null -ne $fitDeleteCanvas) -and
+           ($fitDeleteCanvas.Current.ProcessId -eq $process.Id) -and
+           ($fitDeleteCanvas.Current.Name -ceq "Fit canvas")) `
+    "Delete Loop visibility normalization omitted the exact owned Fit Canvas action"
+  $fitDeleteCanvas.GetCurrentPattern(
+    [System.Windows.Automation.InvokePattern]::Pattern
+  ).Invoke()
+  $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+  $deleteTargetVisible = $false
+  $deleteTargetBounds = $null
+  $deleteTargetOffscreen = $true
+  for ($deleteVisibilityAttempt = 0; $deleteVisibilityAttempt -lt 40; $deleteVisibilityAttempt++) {
+    $deleteTargetVisible = $false
+    $deleteCandidate = Find-FragmentById $root $renameGraphIdentity $rawWalker
+    $deleteGraph = Find-FragmentById $root "graph" $rawWalker
+    if (($null -ne $deleteCandidate) -and ($null -ne $deleteGraph) -and
+        ($deleteCandidate.Current.ProcessId -eq $process.Id) -and
+        ($deleteCandidate.Current.AutomationId -ceq $renameGraphIdentity) -and
+        ($deleteGraph.Current.ProcessId -eq $process.Id)) {
+      $deleteTargetOffscreen = $deleteCandidate.Current.IsOffscreen
+      if (-not $deleteTargetOffscreen) {
+        $deleteTargetBounds = $deleteCandidate.Current.BoundingRectangle
+        $deleteGraphBounds = $deleteGraph.Current.BoundingRectangle
+        $deleteTargetVisible = -not $deleteTargetOffscreen -and
+          -not $deleteTargetBounds.IsEmpty -and
+          $deleteTargetBounds.Width -gt 0 -and $deleteTargetBounds.Height -gt 0 -and
+          -not $deleteGraphBounds.IsEmpty -and
+          $deleteTargetBounds.Left -ge $deleteGraphBounds.Left -and
+          $deleteTargetBounds.Top -ge $deleteGraphBounds.Top -and
+          $deleteTargetBounds.Right -le $deleteGraphBounds.Right -and
+          $deleteTargetBounds.Bottom -le $deleteGraphBounds.Bottom
+        if ($deleteTargetVisible) { break }
+      }
+    }
+    Start-Sleep -Milliseconds 100
+    $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+  }
+  Require ($deleteTargetVisible) `
+    "Delete Loop same-identity target did not become visible with positive bounds inside the owned graph after 40 bounded Fit Canvas observations"
+  Write-Host ("UIA_DELETE_TARGET_VISIBLE=" + ([ordered]@{
+    attempts = $deleteVisibilityAttempt + 1
+    bounds = @(
+      [double]$deleteTargetBounds.Left,
+      [double]$deleteTargetBounds.Top,
+      [double]$deleteTargetBounds.Right,
+      [double]$deleteTargetBounds.Bottom
+    )
+    offscreen = $deleteTargetOffscreen
+  } | ConvertTo-Json -Compress))
   $deleteTarget = Find-FragmentByIdWithRetry $root $renameGraphIdentity $rawWalker
   Require ($null -ne $deleteTarget) "Delete Loop could not reacquire the renamed fixture loop identity"
   $deleteTargetSelection = $deleteTarget.GetCurrentPattern(
     [System.Windows.Automation.SelectionItemPattern]::Pattern
   )
-  $deleteTargetSelection.Select()
+  try {
+    $deleteTargetSelection.Select()
+  } catch {
+    try {
+      try {
+        Write-DeleteTargetSelectFailure $deleteTarget $deleteTargetSelection $renameGraphIdentity `
+          $process.Id $shellWindow $_ $DeleteSelectFailureReceipt
+      } catch {
+        Write-Host ("UIA_DELETE_TARGET_SELECT_TELEMETRY_FAILURE=hresult:{0}" -f $_.Exception.HResult)
+      }
+    } finally {
+      throw
+    }
+  }
   Require $deleteTargetSelection.Current.IsSelected `
     "Delete Loop could not select the fixture loop before invoking the selection-dependent command"
   Write-Host ("UIA_DELETE_LOOP_TARGET automationId='$($deleteTarget.Current.AutomationId)' " +
     "name='$($deleteTarget.Current.Name)' selected=$($deleteTargetSelection.Current.IsSelected)")
-  Require (Ensure-ShellForeground $shellWindow "Delete Loop context menu") `
-    "GraphCode shell did not reacquire foreground before the Delete Loop context menu"
-  Require ([GraphCodeUiaGateState]::PostContextMenu($shellWindow, 3)) `
-    "Delete Loop context menu request was rejected"
-  $deleteLoopPopup = Wait-ForPopupMenu $process $shellWindow "Delete Loop"
-  Require ($deleteLoopPopup -ne [IntPtr]::Zero) "Delete Loop context menu did not open"
+  $deleteLoopPopup = Open-CanvasCardContextMenu $process $root $shellWindow `
+    $renameGraphIdentity $rawWalker "Delete Loop"
   $deleteLoopItems = @(Get-PopupMenuItems $deleteLoopPopup)
   $deleteLoopItem = @($deleteLoopItems | Where-Object {
     $_.Id -eq 5103 -and $_.Enabled
@@ -9085,7 +9524,7 @@ try {
   Require ($null -ne $deleteLoopItem) `
     "Delete Loop context menu omitted its enabled Delete action: $(Format-PopupMenuItems $deleteLoopItems)"
   $deleteLoopClick = [GraphCodeUiaGateState]::ClickPopupMenuItem(
-    $deleteLoopPopup, $shellWindow, [int]$deleteLoopItem.Position, [int]$deleteLoopItem.Id
+    $deleteLoopPopup, $shellWindow, [int]$deleteLoopItem.Position, [int]$deleteLoopItem.Id, [uint32]$process.Id
   )
   Require ($null -ne $deleteLoopClick) "Delete Loop context-menu action could not be clicked"
   Write-Host ("UIA_DELETE_LOOP_MENU command=$($deleteLoopItem.Id) " +
@@ -9840,6 +10279,11 @@ try {
     "unwired canvas card did not expose exactly one stable Wire it up control"
   Require ($markEntryControls.Count -eq 1) `
     "unwired canvas card did not expose exactly one stable Mark as entry control"
+  $recoveryVisibility = Wait-UiaUnwiredRecoveryVisibility $root $rawWalker $process $wireControls[0] $markEntryControls[0]
+  $root = $recoveryVisibility.root
+  $graph = $recoveryVisibility.graph
+  $wireControls = @($recoveryVisibility.wire)
+  $markEntryControls = @($recoveryVisibility.mark)
   foreach ($control in @($wireControls[0], $markEntryControls[0])) {
     Require (($control.Current.BoundingRectangle.Width -gt 0) -and
              ($control.Current.BoundingRectangle.Height -gt 0)) `
@@ -10057,7 +10501,7 @@ try {
   Require ($null -ne $editEdgeMenuItem) `
     "canvas edge action menu omitted Edit Edge: $(Format-PopupMenuItems $edgeActionItems)"
   $editEdgeClick = [GraphCodeUiaGateState]::ClickPopupMenuItem(
-    $edgeActionPopup, $shellWindow, [int]$editEdgeMenuItem.Position, [int]$editEdgeMenuItem.Id
+    $edgeActionPopup, $shellWindow, [int]$editEdgeMenuItem.Position, [int]$editEdgeMenuItem.Id, [uint32]$process.Id
   )
   Require ($null -ne $editEdgeClick) "canvas edge Edit Edge item could not be clicked"
   $editEdgeClickEvidence = [ordered]@{
@@ -10454,13 +10898,7 @@ try {
   }
   Require $retainedProviderSafe "retained status provider was unsafe after teardown"
   $env:GRAPHCODE_UIA_RESET_SIDEBAR = "0"
-  if ($ArgumentList.Count -gt 0) {
-    $settingsProcess = Start-Process -FilePath $Shell -ArgumentList $ArgumentList -PassThru `
-      -WindowStyle Normal -RedirectStandardError $settingsErrorPath
-  } else {
-    $settingsProcess = Start-Process -FilePath $Shell -PassThru -WindowStyle Normal `
-      -RedirectStandardError $settingsErrorPath
-  }
+  $settingsProcess = Start-UiaOwnedProcess -file $Shell -arguments $ArgumentList -standardErrorPath $settingsErrorPath
   for ($index = 0; $index -lt 160 -and $settingsProcess.MainWindowHandle -eq 0; $index++) {
     Start-Sleep -Milliseconds 250
     $settingsProcess.Refresh()
@@ -10747,22 +11185,19 @@ try {
   $renameCommandLogPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "rename-daemon-command.json")
   $renameShellErrorPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "rename-shell-stderr.log")
   $renameShellOutputPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "rename-shell-stdout.log")
-  # Start-Process joins ArgumentList with spaces and quotes nothing, so any value
-  # that contains a space has to carry its own quotes or pwsh binds the remainder
-  # to the next positional parameter.
-  $renameStubProcess = Start-Process -FilePath "pwsh" -WindowStyle Hidden -PassThru `
-    -RedirectStandardError $renameStubErrorPath -ArgumentList @(
+  $renameStubProcess = Start-UiaOwnedProcess -file (Get-Command pwsh).Source -Hidden `
+    -standardErrorPath $renameStubErrorPath -arguments @(
       "-NoProfile",
       "-File",
-      ('"' + (Join-Path $PSScriptRoot "Stub-Daemon.ps1") + '"'),
+      (Join-Path $PSScriptRoot "Stub-Daemon.ps1"),
       "-PipeName",
-      ('"' + $renamePipeName + '"'),
+      $renamePipeName,
       "-ResultPath",
-      ('"' + $renameStubResultPath + '"'),
+      $renameStubResultPath,
       "-NodeAId",
-      ('"' + $renameNodeId + '"'),
+      $renameNodeId,
       "-NodeATitle",
-      ('"' + $renameInitialTitle + '"'),
+      $renameInitialTitle,
       "-ApplyGraphCommands",
       "-SeedSketches"
     )
@@ -10796,14 +11231,7 @@ try {
   Remove-Item Env:GRAPHCODE_UIA_FIXTURE_ROWS -ErrorAction SilentlyContinue
   Remove-Item Env:GRAPHCODE_UIA_UPDATE_AVAILABLE -ErrorAction SilentlyContinue
   Remove-Item Env:GRAPHCODE_UIA_SHOW_UPDATE -ErrorAction SilentlyContinue
-  if ($ArgumentList.Count -gt 0) {
-    $renameProcess = Start-Process -FilePath $Shell -ArgumentList $ArgumentList -PassThru `
-      -WindowStyle Normal -RedirectStandardOutput $renameShellOutputPath `
-      -RedirectStandardError $renameShellErrorPath
-  } else {
-    $renameProcess = Start-Process -FilePath $Shell -PassThru -WindowStyle Normal `
-      -RedirectStandardOutput $renameShellOutputPath -RedirectStandardError $renameShellErrorPath
-  }
+  $renameProcess = Start-UiaOwnedProcess $Shell $ArgumentList $renameShellOutputPath $renameShellErrorPath
   $renameRoot = $null
   for ($index = 0; $index -lt 160 -and $null -eq $renameRoot; $index++) {
     Start-Sleep -Milliseconds 250
@@ -11152,7 +11580,7 @@ try {
       Start-Sleep -Milliseconds 100
     }
     Require ($null -ne $item) "edge workflow menu lacks enabled $command after republish: $lastMenu; stub=$(Read-UiaTextFile $renameStubResultPath)"
-    $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($popup, $renameShellWindow, [int]$item.Position, $command)
+    $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($popup, $renameShellWindow, [int]$item.Position, $command, [uint32]$renameProcess.Id)
     if ($null -ne $click) {
       Write-Host "UIA_EDGE_MENU_CLICK command=$command hilite=$($click.Hilite) selectItemFallback=$($click.UsedSelectItemFallback) enterFallback=$($click.UsedKeyboardFallback) hiliteAtEnterFallback=$($click.HiliteAtEnterFallback) hiliteBeforeEnter=$($click.HiliteBeforeEnter) cursor=$($click.CursorAtX),$($click.CursorAtY) item=$($click.Left),$($click.Top),$($click.Right),$($click.Bottom)"
     }
@@ -11255,6 +11683,7 @@ try {
       $delta = $index - [int]($after.Split("|")[0])
       if ($delta -ne 0) {
         $keys = [GraphCodeUiaGateState]::SendKeyInput(
+          $edgeWorkflowWindow, [uint32]$renameProcess.Id, $control,
           [uint16]$(if ($delta -gt 0) { 0x28 } else { 0x26 }), [Math]::Abs($delta))
         Require ($keys -eq [Math]::Abs($delta)) "edge workflow combo $id keyboard injection failed"
       }
@@ -11405,7 +11834,7 @@ try {
       $edit = [GraphCodeUiaGateState]::ControlById($edgeWorkflowWindow, 9105)
       Require ($edit -ne [IntPtr]::Zero -and
         [GraphCodeUiaGateState]::FocusControl($edgeWorkflowWindow, $edit) -and
-        [GraphCodeUiaGateState]::SendKeyInput(0x0D, 1) -eq 1) `
+        [GraphCodeUiaGateState]::SendKeyInput($edgeWorkflowWindow, [uint32]$renameProcess.Id, $edit, 0x0D, 1) -eq 1) `
         "edge workflow $title measured-occluded keyboard submit failed"
       $method = "keyboardEnter"
     }
@@ -11764,7 +12193,7 @@ try {
       Require ($goalEdit -ne [IntPtr]::Zero -and
         [GraphCodeUiaGateState]::FocusControl($nodeSheetWindow, $goalEdit)) `
         "node creation sheet $label could not focus the Goal field before Enter"
-      Require ([GraphCodeUiaGateState]::SendKeyInput(0x0D, 1) -eq 1) `
+      Require ([GraphCodeUiaGateState]::SendKeyInput($nodeSheetWindow, [uint32]$renameProcess.Id, $goalEdit, 0x0D, 1) -eq 1) `
         "node creation sheet $label could not send a native Enter key"
       $method = "keyboardEnter"
       $mouseSubmitUnavailable = $true
@@ -11989,7 +12418,8 @@ try {
     $delta = $comboCase.Index - $currentIndex
     $keys = 0
     if ($delta -ne 0) {
-      $keys = [GraphCodeUiaGateState]::SendKeyInput([uint16]$(if ($delta -gt 0) { 0x28 } else { 0x26 }), [Math]::Abs($delta))
+      $keys = [GraphCodeUiaGateState]::SendKeyInput($nodeSheetWindow, [uint32]$renameProcess.Id, $combo,
+        [uint16]$(if ($delta -gt 0) { 0x28 } else { 0x26 }), [Math]::Abs($delta))
     }
     $after = $before
     for ($attempt = 0; $attempt -lt 40 -and $after -ne "$($comboCase.Index)|$($comboCase.Text)"; $attempt++) {
@@ -12319,7 +12749,7 @@ try {
       $focus = Assert-SketchControl $focusId
       Require ([GraphCodeUiaGateState]::WindowIsVisible($script:edgeWorkflowWindow) -and
         [GraphCodeUiaGateState]::FocusControl($script:edgeWorkflowWindow, $focus) -and
-        [GraphCodeUiaGateState]::SendKeyInput(0x0D, 1) -eq 1) `
+        [GraphCodeUiaGateState]::SendKeyInput($script:edgeWorkflowWindow, [uint32]$renameProcess.Id, $focus, 0x0D, 1) -eq 1) `
         "sketch/custody submit '$label' measured-occluded Enter injection failed"
       $method = "keyboardEnter"
     }
@@ -12347,7 +12777,7 @@ try {
   function Sketch-Cancel([string] $label) {
     Require (Ensure-ShellForeground $script:edgeWorkflowWindow "$label cancel") `
       "sketch/custody '$label' lost foreground before cancel"
-    Require ([GraphCodeUiaGateState]::SendKeyInput(0x1B, 1) -eq 1) `
+    Require ([GraphCodeUiaGateState]::SendKeyInput($script:edgeWorkflowWindow, [uint32]$renameProcess.Id, [IntPtr]::Zero, 0x1B, 1) -eq 1) `
       "sketch/custody '$label' native Escape injection failed"
     Start-Sleep -Milliseconds 200
     $keyboardFallback = $false
@@ -12602,7 +13032,7 @@ try {
     $item = @($menu.items | Where-Object { $_.Id -eq $id -and $_.Enabled })
     Require ($item.Count -eq 1) "sketch/custody popup missing enabled ${id}: $(Format-PopupMenuItems $menu.items)"
     $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($menu.popup, $renameShellWindow,
-      [int]$item[0].Position, $id)
+      [int]$item[0].Position, $id, [uint32]$renameProcess.Id)
     if ($null -ne $click) {
       Write-Host "UIA_SKETCH_MENU_CLICK command=$id hilite=$($click.Hilite) selectItemFallback=$($click.UsedSelectItemFallback) enterFallback=$($click.UsedKeyboardFallback) hiliteAtEnterFallback=$($click.HiliteAtEnterFallback) hiliteBeforeEnter=$($click.HiliteBeforeEnter)"
     }
@@ -13253,26 +13683,26 @@ try {
   throw
 } finally {
   try {
-  if ($stressJob) {
-    Remove-Job -Job $stressJob -Force -ErrorAction SilentlyContinue
-  }
-  if ($propertyEventRegistered) {
-    [System.Windows.Automation.Automation]::RemoveAutomationPropertyChangedEventHandler(
-      $status, $propertyHandler
-    )
-  }
-  if ($liveEventRegistered) {
-    [System.Windows.Automation.Automation]::RemoveAutomationEventHandler(
-      $liveRegionEvent, $status, $eventHandler
-    )
-  }
-  if ($focusEventRegistered) {
-    [System.Windows.Automation.Automation]::RemoveAutomationFocusChangedEventHandler($focusHandler)
-  }
-  Stop-UiaOwnedProcessTrees @($process, $settingsProcess, $renameProcess, $renameStubProcess)
-  Stop-UiaOwnedProviderProcesses $providerZmxPath $providerZmxBaseline
+  Invoke-UiaCleanupActions @(
+    { if ($stressJob) { Remove-Job -Job $stressJob -Force -ErrorAction Stop } },
+    { if ($propertyEventRegistered) {
+      [System.Windows.Automation.Automation]::RemoveAutomationPropertyChangedEventHandler($status, $propertyHandler)
+    } },
+    { if ($liveEventRegistered) {
+      [System.Windows.Automation.Automation]::RemoveAutomationEventHandler($liveRegionEvent, $status, $eventHandler)
+    } },
+    { if ($focusEventRegistered) {
+      [System.Windows.Automation.Automation]::RemoveAutomationFocusChangedEventHandler($focusHandler)
+    } },
+    { Stop-UiaOwnedProcessTrees @($process, $settingsProcess, $renameProcess, $renameStubProcess) },
+    { Stop-UiaOwnedProviderProcesses $providerZmxPath $providerZmxBaseline }
+  )
   } catch {
     $sandboxCleanupError = $_
+    if ($gateFailure) {
+      $gateFailure.Exception.Data["UiaCleanupFailure"] = $_.Exception
+      foreach ($key in $_.Exception.Data.Keys) { $gateFailure.Exception.Data[$key] = $_.Exception.Data[$key] }
+    }
     if ($sandboxCreated) { Write-Host "UIA_FAILED_SANDBOX_RETAINED=$sandboxPath" }
     Write-Host "UIA_CLEANUP_ERROR=$($_.Exception.Message)"
   } finally {
