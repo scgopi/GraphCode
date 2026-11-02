@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "baselineManifestSha256": "CC8ED5141AE38CB425F4E41AB7F2E4EF1F07F5AE4CAD7FA969A68645B07A0A2F",
+  "baselineSource": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+  "unit": "host.root-source-scope-mock-environment-error-streams",
+  "expectedExpandedCount": 16,
+  "originalPredicates": 7,
+  "newNegativeControls": 9,
+  "inventoryIsExecutionEvidence": false,
+  "production": "Tools/windows/validate.ps1: actual packaging switch clause, part guards and invoked commands",
+  "cases": [
+    { "originalLines": "5322-5324", "ids": ["source.packaging.signing", "control.packaging.signing.missing-call"] },
+    { "originalLines": "5325-5327", "ids": ["source.packaging.rollback", "control.packaging.rollback.missing-call"] },
+    { "originalLines": "5328-5330", "ids": ["source.packaging.standalone", "control.packaging.standalone.missing-call"] },
+    { "originalLines": "5331-5335", "expandedValue": "Packaging.ScriptSigning.Tests.ps1", "ids": ["source.packaging.script_signing", "control.packaging.script_signing.missing-call"] },
+    { "originalLines": "5331-5335", "expandedValue": "Packaging.Scheduler.Tests.ps1", "ids": ["source.packaging.scheduler", "control.packaging.scheduler.missing-call"] },
+    { "originalLines": "5331-5335", "expandedValue": "Packaging.Uninstall.Tests.ps1", "ids": ["source.packaging.uninstall", "control.packaging.uninstall.missing-call"] },
+    { "originalLines": "5336-5338", "ids": ["source.packaging.real-input-order", "control.packaging.real-missing-initialization"] },
+    { "originalLines": null, "purpose": "New controls prove an inverted part guard and a commented-out command are not accepted as actual packaging wiring", "ids": ["control.packaging.wrong-part-guard", "control.packaging.comment-is-not-invocation"] }
+  ],
+  "foreignCoverageNotExecutedOrCountedByThisUnit": [
+    { "originalLines": "5031-5033", "owner": "Host", "coverage": "ps.pester-version, ps.isolated-process-environment, ps.fixture-directory" },
+    { "originalLines": "5035-5137", "owner": "Host", "coverage": "task inventory/dry-run, provider task boundary, unknown task, real formatter, foreign fixture" },
+    { "originalLines": "5143-5222", "owner": "RootContracts", "coverage": "host.hardening-source-and-diagnostics" },
+    { "originalLines": "5223-5307", "owner": "RootContracts and Host", "coverage": "host.ci-topology plus Host provider cache/build suites" },
+    { "originalLines": "5308-5321", "owner": "RootContracts and Host/Ownership", "coverage": "host.zig-resolver, host.shell-prerequisite and pre-UIA isolation adapters" },
+    { "originalLines": "5339-5341", "owner": "RootContracts", "coverage": "host.ci-partition, host.shell-section-gate, host.ci-aggregate" },
+    { "originalLines": "5342-5344", "owner": "Ui", "coverage": "ui.root.source.line-5342", "predicate": "ProviderPins.Tests.ps1 precedes TerminalGate.Tests.ps1" },
+    { "originalLines": "5345-5349", "owner": "Host", "coverage": "ui.root.source.line-5346", "expandedChecks": 2, "predicate": "150ms delayed stub wiring in validate.ps1 and Hardening.Tests.ps1" },
+    { "originalLines": "5350-5352", "owner": "Ui", "coverage": "ui.root.source.line-5350", "predicate": "Shell build/smoke precedes native UIA live gate" }
+  ]
+}
