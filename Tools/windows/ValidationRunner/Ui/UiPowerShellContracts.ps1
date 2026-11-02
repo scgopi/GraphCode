@@ -4,9 +4,31 @@ param(
   [Parameter(Mandatory)][string] $AssemblyPath
 )
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Text.UTF8Encoding]::new($false)
 $null = [IO.Directory]::CreateDirectory($ArtifactRoot)
 & (Join-Path $RepositoryRoot 'Tools\windows\Import-CompiledValidationAssembly.ps1') `
   -AssemblyPath $AssemblyPath -RequiredType 'GraphCodeUiaGateState' | Out-Null
+$frameworkAssemblies = @{}
+foreach ($name in @('WindowsBase', 'UIAutomationTypes', 'UIAutomationClient')) {
+  $path = Join-Path $PSHOME "$name.dll"
+  $identity = [Reflection.AssemblyName]::GetAssemblyName($path)
+  if ($identity.Version.Major -ne [Environment]::Version.Major) {
+    throw "UIA runtime dependency $path does not match PowerShell CLR $([Environment]::Version); reference-pack assemblies are not supported"
+  }
+  $assembly = [Reflection.Assembly]::LoadFrom($path)
+  if ($assembly.GetName().Version.Major -ne [Environment]::Version.Major -or
+      @($assembly.GetCustomAttributesData() | Where-Object {
+        $_.AttributeType.FullName -ceq 'System.Runtime.CompilerServices.ReferenceAssemblyAttribute'
+      }).Count -ne 0) {
+    throw "UIA dependency is not a compatible runtime assembly: $path"
+  }
+  $frameworkAssemblies[$name] = $assembly
+}
+if ([System.Windows.Automation.ControlType].Assembly -ne $frameworkAssemblies.UIAutomationTypes -or
+    [System.Windows.Automation.InvokePattern].Assembly -ne $frameworkAssemblies.UIAutomationClient) {
+  throw 'UIA fixture types do not belong to the explicitly selected PowerShell runtime assemblies'
+}
 $source = [IO.File]::ReadAllText((Join-Path $RepositoryRoot 'Tools\windows\uia-live-gate.ps1'))
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$null, [ref]$errors)
@@ -209,11 +231,26 @@ function Confirm-RecoveryCase($Case, [string] $Definition) {
     else { 'Unwired recovery actions remained unavailable after Fit canvas' }
     $passed = $passed -and $failure -and $failure.Exception.Message -ceq $expectedDiagnostic
   }
-  return [bool]$passed
+  return [pscustomobject]@{
+    passed = [bool]$passed
+    name = $Case.name
+    expectedAccepted = $Case.expected
+    actualAccepted = ($null -eq $failure)
+    expectedFits = $Case.fits
+    expectedReconnects = $Case.reconnects
+    actual = [ordered]@{
+      fits = $state.fits; reconnects = $state.reconnects; targetLookups = $state.targetLookups
+      patternReads = $state.patternReads; boundsReads = $state.boundsReads
+      offscreenBoundsReads = $state.offscreenBoundsReads; recoveryInvokes = $state.recoveryInvokes; sleeps = $state.sleeps
+    }
+    failure = $(if ($failure) { $failure.Exception.ToString() } else { $null })
+  }
 }
 foreach ($case in $recoveryCases) {
   Invoke-UiCase "ui.recovery.visibility.$($case.name)" {
-    Assert-UiContract (Confirm-RecoveryCase $case $recoveryDefinition) "Recovery visibility behavior differs: $($case.name)"
+    $observation = Confirm-RecoveryCase $case $recoveryDefinition
+    Assert-UiContract $observation.passed ("Recovery visibility behavior differs: " +
+      ($observation | ConvertTo-Json -Compress -Depth 6 -EscapeHandling EscapeNonAscii))
   }
 }
 foreach ($mutant in @(
@@ -223,17 +260,22 @@ foreach ($mutant in @(
   @{ name = 'outside-bounds-accepted'; case = 'outside-after-fit'; old = '$bounds.Left -lt $graphBounds.Left -or'; replacement = '$false -or' }
 )) {
   Invoke-UiCase "ui.recovery.visibility.mutant-$($mutant.name)" {
+    $case = $recoveryCases | Where-Object name -CEQ $mutant.case
+    $baseline = Confirm-RecoveryCase $case $recoveryDefinition
+    Assert-UiContract $baseline.passed ("Recovery mutant requires a valid unmodified baseline: " +
+      ($baseline | ConvertTo-Json -Compress -Depth 6 -EscapeHandling EscapeNonAscii))
     Assert-UiContract ([regex]::Matches($recoveryDefinition, [regex]::Escape($mutant.old)).Count -eq 1) 'Recovery mutation anchor is not unique'
     $definition = $recoveryDefinition.Replace($mutant.old, $mutant.replacement)
     $parseErrors = $null
     $null = [Management.Automation.Language.Parser]::ParseInput($definition, [ref]$null, [ref]$parseErrors)
     Assert-UiContract ($parseErrors.Count -eq 0) 'Recovery mutant parser failure'
-    Assert-UiContract (-not (Confirm-RecoveryCase ($recoveryCases | Where-Object name -CEQ $mutant.case) $definition)) `
-      "Recovery mutant unexpectedly preserved visibility contract: $($mutant.name)"
+    $observation = Confirm-RecoveryCase $case $definition
+    Assert-UiContract (-not $observation.passed) ("Recovery mutant unexpectedly preserved visibility contract: " +
+      ($observation | ConvertTo-Json -Compress -Depth 6 -EscapeHandling EscapeNonAscii))
   }
 }
 Assert-UiContract ($results.Count -eq 25) 'PowerShell UI fixture requires five isolation and twenty recovery cases'
 [IO.File]::WriteAllText((Join-Path $ArtifactRoot 'ui-powershell-results.json'),
   ($results | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
-foreach ($result in $results) { Write-Output ('UI_CASE_RESULT=' + ($result | ConvertTo-Json -Compress -Depth 8)) }
+foreach ($result in $results) { Write-Output ('UI_CASE_RESULT=' + ($result | ConvertTo-Json -Compress -Depth 8 -EscapeHandling EscapeNonAscii)) }
 if (@($results | Where-Object status -cne 'Passed').Count -ne 0) { exit 1 }
