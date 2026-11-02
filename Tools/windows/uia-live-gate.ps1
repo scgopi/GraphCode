@@ -3296,6 +3296,7 @@ function New-MultiProjectEditNativeApi([string] $expectedTitle = "") {
   $api | Add-Member ScriptMethod Clock {return $this.Watch.ElapsedMilliseconds}
   $api | Add-Member ScriptMethod Title {param($modal,$remaining) [GraphCodeMultiProjectEditNative]::Buffer($modal,$remaining)} -Force
   $api | Add-Member ScriptMethod FocusHandle {param($modal) [GraphCodeMultiProjectEditNative]::FocusOf($modal)}
+  $api | Add-Member ScriptMethod FocusControl {param($modal,$edit) [GraphCodeUiaGateState]::FocusControl($modal,$edit)}
   $api | Add-Member ScriptMethod FocusInsertion {
     param($modal,$point)
     $receipt = @([GraphCodeUiaGateState]::ClickOwnedScreenRectangle(
@@ -3336,11 +3337,9 @@ function New-MultiProjectEditNativeApi([string] $expectedTitle = "") {
     }
     $null=Get-MultiProjectEditRemaining $this $started
     $receipt = @($this.FocusInsertion($modal,$point))
-    if ("GraphCodeUiaGateState" -as [type]) {
-      $this.LastFocusControlFallback = [GraphCodeUiaGateState]::FocusControl($modal,$edit)
-      if (-not $this.LastFocusControlFallback) {
-        throw "MULTIPROJECT_EDIT_FOCUS: direct control focus fallback failed"
-      }
+    $this.LastFocusControlFallback = $this.FocusControl($modal,$edit)
+    if (-not $this.LastFocusControlFallback) {
+      throw "MULTIPROJECT_EDIT_FOCUS: direct control focus fallback failed"
     }
     return ,$receipt
   }
