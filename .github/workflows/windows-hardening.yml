@@ -58,7 +58,7 @@ jobs:
     env:
       HARDENING_REQUIRED: ${{ github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.windows == 'true' }}
     runs-on: ${{ (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.windows == 'true') && matrix.os || 'ubuntu-latest' }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - name: No Windows-relevant changes
         if: env.HARDENING_REQUIRED != 'true'
@@ -121,7 +121,8 @@ jobs:
       - name: Verify complete compiled validation runner contract
         if: env.HARDENING_REQUIRED == 'true' && github.event_name != 'pull_request' && matrix.os == 'windows-2022'
         shell: pwsh
-        timeout-minutes: 15
+        # Normal full run measured 16m14s; allow 25m execution headroom.
+        timeout-minutes: 25
         run: |
           $ErrorActionPreference = 'Stop'
           if (Test-Path -LiteralPath .ci-validation-runner\coverage.json) {
