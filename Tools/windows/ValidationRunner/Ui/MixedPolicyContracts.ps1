@@ -463,4 +463,4 @@ $expected=[ordered]@{
   3392=1;3423=1;3443=1;3458=1;3469=1;3482=1;3487=1;3497=17;3524=1;3530=1;3535=1;3540=1;3545=1;3550=1;3555=1;3560=1;3565=1;3570=1;3575=1
   3596=1;3601=1;3608=1;3625=1;3635=1;3732=8;3755=1;3763=1;3771=9;3792=1;3816=1;3846=11
 }
-Complete-Mixed $expected @('mixed-ui','geometry-selection-roster','source-correspondence')
+Complete-Mixed $expected @('mixed-ui','mixed-ui-policy','geometry-selection-roster','source-correspondence')

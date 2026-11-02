@@ -482,7 +482,7 @@ $expected=[ordered]@{
   2706=3;2724=1;2732=2;2742=1;2751=10;2785=8;2808=22;2845=1;2850=1;2857=1;2871=2;2897=1;2906=1;2924=59;3013=2;3024=3;3040=1;3057=1
   3129=1;3138=1;3154=29;3202=1;3214=1;3224=1;3237=3;3268=1;3278=1;3283=1;3291=1;3296=1;3314=8;3331=7;3341=1
 }
-Complete-Mixed $expected @('mixed-ui','native-phase-refusal','fresh-metadata','powershell-errorrecord')
+Complete-Mixed $expected @('mixed-ui','mixed-ui-policy','native-phase-refusal','fresh-metadata','powershell-errorrecord')
 $controlFailed=$false
 foreach($control in @('false','throw')){
   $failure=$null
@@ -505,7 +505,7 @@ foreach($control in @('false','throw')){
   $row=[ordered]@{
     id="ownership.mixed-ui.focus-control-$control";status=$(if($failure){'Failed'}else{'Passed'});executedCount=1
     evidence=$(if($failure){$failure.ToString()}else{'Actual production FocusMouse primitive false/throw refusal; no clear/Unicode; test-only operation transport'})
-    groups=@('mixed-ui','focus-control-boundary','powershell-errorrecord')
+    groups=@('mixed-ui','mixed-ui-policy','focus-control-boundary','powershell-errorrecord')
   }
   $json=$row|ConvertTo-Json -Compress -Depth 8 -EscapeHandling EscapeNonAscii
   $document=[System.Text.Json.JsonDocument]::Parse([string]$json);$document.Dispose()
