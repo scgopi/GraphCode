@@ -3,7 +3,7 @@
     { "id": "host.hardening-source-and-diagnostics", "owner": "Host", "minimumCount": 22, "exactCount": 22 },
     { "id": "host.ci-partition", "owner": "Host", "minimumCount": 17, "exactCount": 17 },
     { "id": "host.ci-aggregate", "owner": "Host", "minimumCount": 17, "exactCount": 17 },
-    { "id": "host.ci-topology", "owner": "Host", "minimumCount": 35, "exactCount": 35 },
+    { "id": "host.ci-topology", "owner": "Host", "minimumCount": 36, "exactCount": 36 },
     { "id": "host.shell-section-gate", "owner": "Host", "minimumCount": 15, "exactCount": 15 },
     { "id": "host.zig-resolver", "owner": "Host", "minimumCount": 21, "exactCount": 21 }
   ]

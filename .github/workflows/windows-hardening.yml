@@ -98,6 +98,26 @@ jobs:
           }
           dotnet build -c Release
           if ($LASTEXITCODE -ne 0) { throw "Compiled validation build failed: exit=$LASTEXITCODE" }
+      - name: Prepare owned Pester 5 prerequisite
+        if: env.HARDENING_REQUIRED == 'true' && github.event_name != 'pull_request' && matrix.os == 'windows-2022'
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pester5 = @(Get-Module -Name Pester | Where-Object { $_.Version.Major -eq 5 })
+          if ($pester5.Count -eq 0) {
+            $pester5 = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version.Major -eq 5 })
+          }
+          if ($pester5.Count -eq 0) {
+            $moduleRoot = Join-Path $PWD '.ci-modules'
+            $null = New-Item -ItemType Directory -Force -Path $moduleRoot
+            Save-Module -Name Pester -RequiredVersion 5.7.1 -Path $moduleRoot -ErrorAction Stop
+            $env:PSModulePath = $moduleRoot + [IO.Path]::PathSeparator + $env:PSModulePath
+            [IO.File]::AppendAllText($env:GITHUB_ENV, "PSModulePath=$env:PSModulePath`n", [Text.UTF8Encoding]::new($false))
+          }
+          . .\Tools\windows\Import-PinnedPester.ps1
+          $loaded = @(Get-Module -Name Pester | Where-Object { $_.Version.Major -eq 5 })
+          if ($loaded.Count -ne 1) { throw 'Compiled validation requires exactly one loaded Pester 5 module.' }
       - name: Verify complete compiled validation runner contract
         if: env.HARDENING_REQUIRED == 'true' && github.event_name != 'pull_request' && matrix.os == 'windows-2022'
         shell: pwsh

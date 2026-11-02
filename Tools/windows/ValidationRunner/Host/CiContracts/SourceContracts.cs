@@ -270,7 +270,34 @@ internal static class SourceContracts
         SourceCases.Require(ExeInvocations(job) == 1 &&
             !SourceCases.Match(job, @"--suite\b|--self-test\b|--fixture\b|ValidationRunner\.Tests\.ps1|Invoke-ValidationRunnerContract\.ps1"),
             "CI must execute exactly one normal full compiled host, not a filtered/self-test/legacy entry");
+        AssertPesterPrerequisite(job);
         AssertProof(job);
+    }
+
+    private static void AssertPesterPrerequisite(string job)
+    {
+        var steps = WorkflowText.Steps(job);
+        var preparation = steps.Where(step => step.Contains(
+            @". .\Tools\windows\Import-PinnedPester.ps1", StringComparison.Ordinal)).ToArray();
+        SourceCases.Require(preparation.Length == 1, "The canonical host requires one explicit pinned Pester prerequisite");
+        var prerequisite = preparation[0];
+        var execution = steps.Single(step => ExeInvocations(step) == 1);
+        SourceCases.Require(job.IndexOf(prerequisite, StringComparison.Ordinal) < job.IndexOf(execution, StringComparison.Ordinal) &&
+            Regex.Match(prerequisite, @"(?m)^        if: (.+)$").Value ==
+                Regex.Match(execution, @"(?m)^        if: (.+)$").Value,
+            "Pester preparation must precede and share the canonical execution gate");
+        SourceCases.Require(prerequisite.Contains("Get-Module -Name Pester", StringComparison.Ordinal) &&
+            prerequisite.Contains("Get-Module -ListAvailable -Name Pester", StringComparison.Ordinal) &&
+            prerequisite.Contains("$_.Version.Major -eq 5", StringComparison.Ordinal) &&
+            SourceCases.Match(prerequisite,
+                @"(?s)if \(\$pester5\.Count -eq 0\) \{.*?Save-Module -Name Pester -RequiredVersion 5\.7\.1 -Path \$moduleRoot") &&
+            prerequisite.Contains("Join-Path $PWD '.ci-modules'", StringComparison.Ordinal) &&
+            prerequisite.Contains("$env:PSModulePath = $moduleRoot + [IO.Path]::PathSeparator + $env:PSModulePath", StringComparison.Ordinal) &&
+            prerequisite.Contains("AppendAllText($env:GITHUB_ENV", StringComparison.Ordinal) &&
+            prerequisite.Contains("PSModulePath=$env:PSModulePath", StringComparison.Ordinal) &&
+            prerequisite.Contains("$loaded.Count -ne 1", StringComparison.Ordinal) &&
+            !prerequisite.Contains("Install-Module", StringComparison.OrdinalIgnoreCase),
+            "Pester preparation must reuse major 5, conditionally save 5.7.1 only to an owned path, propagate its process path and verify the pinned loader");
     }
 
     private static void AssertProof(string text)
@@ -311,11 +338,32 @@ internal static class SourceContracts
                       $executedMarkers = @($output | Where-Object { $_ -ceq 'VALIDATION_RUNNER_EXECUTED=1' }).Count
                       if ($passMarkers -ne 1 -or $executedMarkers -ne 1) { throw 'markers' }
             """.Replace("\r\n", "\n", StringComparison.Ordinal);
+        const string prerequisite = """
+                  - name: Prepare owned Pester 5 prerequisite
+                    run: |
+                      $pester5 = @(Get-Module -Name Pester | Where-Object { $_.Version.Major -eq 5 })
+                      if ($pester5.Count -eq 0) {
+                        $pester5 = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version.Major -eq 5 })
+                      }
+                      if ($pester5.Count -eq 0) {
+                        $moduleRoot = Join-Path $PWD '.ci-modules'
+                        Save-Module -Name Pester -RequiredVersion 5.7.1 -Path $moduleRoot
+                        $env:PSModulePath = $moduleRoot + [IO.Path]::PathSeparator + $env:PSModulePath
+                        [IO.File]::AppendAllText($env:GITHUB_ENV, "PSModulePath=$env:PSModulePath`n")
+                      }
+                      . .\Tools\windows\Import-PinnedPester.ps1
+                      $loaded = @(Get-Module -Name Pester | Where-Object { $_.Version.Major -eq 5 })
+                      if ($loaded.Count -ne 1) { throw 'Pester' }
+
+            """;
+        fixture = fixture.Replace("      - name: Run compiled host",
+            prerequisite.Replace("\r\n", "\n", StringComparison.Ordinal) + "      - name: Run compiled host", StringComparison.Ordinal);
         cases.Check("control.canonical.valid", () => AssertCanonicalJob(fixture));
         foreach (var (id, before, after) in new[]
         {
             ("wrong-sdk", "dotnet-version: 10.0.403", "dotnet-version: 10.0.x"),
             ("wrong-build-cwd", "working-directory: Tools/windows/ValidationRunner", "working-directory: ."),
+            ("missing-pester-prerequisite", @". .\Tools\windows\Import-PinnedPester.ps1", "Write-Output 'missing Pester prerequisite'"),
             ("filtered-run", "--artifact-root .ci-validation-runner", "--artifact-root .ci-validation-runner --suite ui.activation"),
             ("missing-run", @".\Tools\windows\ValidationRunner\bin\Release\net10.0-windows\ValidationRunner.exe", "Write-Output"),
             ("missing-complete", "$report.complete", "$report.unused"),

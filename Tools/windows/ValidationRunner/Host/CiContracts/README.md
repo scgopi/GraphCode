@@ -82,3 +82,13 @@ mixed roots, original failure identity, output/error streams, native exit state
 and unchanged normal arguments. The standalone topology driver runs these
 controls too. They are reported separately from the seven mandatory root units
 and do not claim an actual private SDK installation or full-host execution.
+
+Both canonical CI jobs now prepare Pester through the existing pinned loader.
+They reuse loaded or available major 5 first; only its absence saves version
+5.7.1 under the workspace's `.ci-modules` and propagates that process-only module
+path through `GITHUB_ENV`. No global installation or user environment setting
+is used. The compiled topology family is now **36 cases**, including a new
+missing-prerequisite control, making the seven-family focused total **144**.
+Local verification reused real Pester 5.7.1 in both actual step bodies without
+downloading anything. Eight separate workflow-body mocks covered loaded,
+available, missing and save-failure branches; they are not full-host cases.

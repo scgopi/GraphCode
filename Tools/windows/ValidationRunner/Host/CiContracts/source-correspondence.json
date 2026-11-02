@@ -44,7 +44,7 @@
     },
     {
       "unit": "host.ci-topology",
-      "expectedExpandedCount": 35,
+      "expectedExpandedCount": 36,
       "production": ".github/workflows/windows-*.yml and Tools/windows/Invoke-ValidationRunnerContract.ps1",
       "cases": [
         { "originalLines": "5233-5257", "ids": ["source.cold-cache.spikes-swift", "source.cold-cache.spikes-other", "source.cold-cache.packaging-real", "source.runner-topology-timeout"] },
@@ -53,7 +53,7 @@
         { "originalLines": "5283-5291", "ids": ["source.pinned-swift.shell", "source.pinned-swift.port", "source.pinned-swift.hardening"] },
         { "originalLines": "5292-5307", "ids": ["source.shell-bootstrap", "source.hosted-explicit-skip-limits", "source.shell-live-task"] },
         { "originalSource": "Tools/windows/Tests/WindowsCiTopology.Tests.ps1:39-115", "purpose": "Preserve scheduling and required names; replace old monolithic execution assertions with the compiled host contract", "ids": ["source.runner-single-win2022-fail-closed", "source.runner-no-providers-or-hidden-failure", "source.runner-new-sdk-build-execution", "source.runner-port-exactly-once", "source.runner-aggregate-required", "source.runner-hardening-single-fallback", "source.runner-compatibility-no-monolith"] },
-        { "originalLines": null, "purpose": "New SDK/CWD/full-execution/coverage/exit/marker positive and negative controls; not executions of GitHub Actions", "ids": ["control.canonical.valid", "control.canonical.wrong-sdk", "control.canonical.wrong-build-cwd", "control.canonical.filtered-run", "control.canonical.missing-run", "control.canonical.missing-complete", "control.canonical.missing-positive-count", "control.canonical.missing-full-count-equality", "control.canonical.inverted-complete", "control.canonical.missing-pass-count", "control.canonical.missing-executed-count", "control.canonical.ignored-exit", "control.canonical.duplicate-run"] }
+        { "originalLines": null, "purpose": "New SDK/CWD/Pester-prerequisite/full-execution/coverage/exit/marker positive and negative controls; not executions of GitHub Actions", "ids": ["control.canonical.valid", "control.canonical.wrong-sdk", "control.canonical.wrong-build-cwd", "control.canonical.missing-pester-prerequisite", "control.canonical.filtered-run", "control.canonical.missing-run", "control.canonical.missing-complete", "control.canonical.missing-positive-count", "control.canonical.missing-full-count-equality", "control.canonical.inverted-complete", "control.canonical.missing-pass-count", "control.canonical.missing-executed-count", "control.canonical.ignored-exit", "control.canonical.duplicate-run"] }
       ]
     },
     {
