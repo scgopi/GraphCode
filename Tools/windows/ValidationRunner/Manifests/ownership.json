@@ -87,6 +87,14 @@
     { "id": "ownership.legacy.rename-submit", "owner": "Ownership", "minimumCount": 1 },
     { "id": "ownership.legacy.fresh-capture", "owner": "Ownership", "minimumCount": 1 },
     { "id": "ownership.legacy.packaging-shared-linkage", "owner": "Ownership", "minimumCount": 1 },
-    { "id": "ownership.legacy.uia-shared-linkage", "owner": "Ownership", "minimumCount": 1 }
+    { "id": "ownership.legacy.uia-shared-linkage", "owner": "Ownership", "minimumCount": 1 },
+    { "id": "ownership.ui-startup.helpers", "owner": "Ownership", "minimumCount": 13, "exactCount": 13 },
+    { "id": "ownership.ui-startup.redacted-log", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
+    { "id": "ownership.ui-startup.truncated-log", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
+    { "id": "ownership.ui-startup.missing-log", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
+    { "id": "ownership.ui-startup.retained-report", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
+    { "id": "ownership.ui-process-tree.controlled-child", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
+    { "id": "ownership.ui-process-tree.cleanup-complete", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
+    { "id": "ownership.ui-process-tree.pid-reuse", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 }
   ]
 }

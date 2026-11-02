@@ -20,6 +20,9 @@ membership, accounting, bounded census and packaging diagnostics.
 the host-owned packaging and UIA adapters; merely compiling these files does
 not establish that integration. Streaming uses `AutoFlush`, which flushes bytes
 without prematurely flushing an encoder containing half a surrogate pair.
+The host must await `HoldRetainedResourcesAsync()` in its outermost `finally`.
+Retained references alone do not suffice: process exit closes a kill-on-close
+job even if the garbage collector never finalized anything.
 
 `OwnedFixture.TryRunAsync(args)` must run before ordinary host argument parsing.
 It recognizes only `--ownership-fixture`. The compiled fixture tests native
@@ -41,11 +44,19 @@ request/response/publication/control core from `Stub-Daemon.ps1:29-294`; it is
 the implementation used by the compiled real-pipe fixture, not a passing fake.
 Its presence does not claim that the old PowerShell stub has been rewired.
 
-Twelve separate mandatory units retain the original seven ownership/mixed root
-families, three mixed source-boundary assertions, and two shared-production
-linkage obligations. Until explicit host-owned PowerShell integration adapters
-preserve the actual scope, ScriptMethod, ErrorRecord identity, streams and
-mocking assertions, those units report `Incomplete`, never a synthetic pass.
-The six-case retention boundary and mixed eight-mode capture/cleanup negative
-controls remain mandatory. Source occurrences of `Assert-MultiCase` and
-`Invoke-MultiCase` are not runtime counts.
+Six focused protected PowerShell families now preserve 45 actual assertions:
+receipt producer seven, capture ownership fourteen, tree four, provider four,
+pre-UIA isolation ten, and end-to-end retention six. They use actual production
+functions from the integrated repository, not the exported runner. The adapter
+transport is the host's authoritative held-job supervisor. Scope, ScriptMethod,
+ErrorRecord identity, information streams and missing-versus-empty environment
+membership remain PowerShell assertions.
+
+The full mixed family, three mixed source-boundary assertions, two production
+linkage obligations and eight newly reconciled startup/tree root obligations
+remain separately mandatory. Their `Incomplete` results cannot be replaced by
+the compiled helper tests. `source-correspondence.json` records every one of
+the immutable mixed source's 126 invocation templates and 192 assertion
+commands, with stable source IDs and zero claimed execution. Those source
+occurrences are not runtime counts. The mixed eight-mode capture/cleanup
+negative controls remain required.

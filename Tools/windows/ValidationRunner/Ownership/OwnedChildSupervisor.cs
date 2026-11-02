@@ -69,6 +69,7 @@ public sealed class OwnedChildSupervisor
 
     // Unknown leases stay reachable: a finalizer must not close a kill-on-close job.
     private static readonly ConcurrentBag<OwnedChildSupervisor> retained = new();
+    private static readonly Task lifetimeHold = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously).Task;
     private readonly Deadline deadline;
     private readonly string artifactRoot;
     private IntPtr root, thread, job;
@@ -81,6 +82,11 @@ public sealed class OwnedChildSupervisor
     public Task<string> StandardOutput => stdout ?? throw new InvalidOperationException("stdout capture unavailable.");
     public Task<string> StandardError => stderr ?? throw new InvalidOperationException("stderr capture unavailable.");
     public static int RetainedLeaseCount => retained.Count;
+    public static bool RequiresLifetimeHold => RetainedLeaseCount != 0;
+
+    // The host must await this in its outermost finally, including reporting failures.
+    // Returning from Main would close kill-on-close jobs despite the retained references.
+    public static Task HoldRetainedResourcesAsync() => RequiresLifetimeHold ? lifetimeHold : Task.CompletedTask;
 
     public OwnedChildObservation Observe() => new(RootExited(), StandaloneProcessJob.Active(job),
         StandardOutput.IsCompleted, StandardError.IsCompleted);

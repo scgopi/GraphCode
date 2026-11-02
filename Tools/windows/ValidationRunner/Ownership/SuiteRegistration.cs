@@ -14,7 +14,20 @@ namespace GraphCode.Validation.Ownership;
 
 public static class SuiteRegistration
 {
-    public static IReadOnlyList<IValidationSuite> CreateSuites() => [new OwnershipSuite()];
+    public static IReadOnlyList<IValidationSuite> CreateSuites() =>
+    [
+        new OwnershipSuite(),
+        new Adapters.StandaloneSuites.CaseScriptSuite("ownership.receipts", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\Receipt.Contracts.ps1",
+            "OWNERSHIP_CASE_RESULT=", ["ownership.legacy.ownership-receipts"]),
+        new Adapters.StandaloneSuites.CaseScriptSuite("ownership.tree-provider", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\TreeProvider.Contracts.ps1",
+            "OWNERSHIP_CASE_RESULT=", ["ownership.legacy.tree-ownership", "ownership.legacy.provider-ownership"]),
+        new Adapters.StandaloneSuites.CaseScriptSuite("ownership.capture", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\Capture.Contracts.ps1",
+            "OWNERSHIP_CASE_RESULT=", ["ownership.legacy.capture-ownership"]),
+        new Adapters.StandaloneSuites.CaseScriptSuite("ownership.pre-uia", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\PreUiaIsolation.Contracts.ps1",
+            "OWNERSHIP_CASE_RESULT=", ["ownership.legacy.pre-uia-isolation"]),
+        new Adapters.StandaloneSuites.CaseScriptSuite("ownership.retention", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\RetentionBoundary.Contracts.ps1",
+            "OWNERSHIP_CASE_RESULT=", ["ownership.legacy.retention-boundary"])
+    ];
 }
 
 public sealed class OwnershipSuite : IValidationSuite
@@ -43,18 +56,20 @@ public sealed class OwnershipSuite : IValidationSuite
     private static readonly string[] nativeIds = ["normal", "abrupt", "timeout", "inherited", "inherited-timeout", "arguments-environment", "real-pipe"];
     private static readonly (string Id, string Evidence)[] unported =
     [
-        ("legacy.ownership-receipts", "Actual PS producer/stream/scope assertions: Test-UiaOwnershipReceiptContracts, source 90-168; exactly seven cases."),
-        ("legacy.retention-boundary", "Actual PS producer/Invoke-Native/isolation boundary: Test-UiaRetentionBoundaryContracts, source 292-429; exactly six cases including receipt-only and sentinel-only exit0/17 obligations."),
-        ("legacy.capture-ownership", "Actual ScriptMethod/mock/ErrorRecord assertions: Test-UiaCaptureOwnershipContracts, source 430-596; exactly fourteen cases; native helper linkage requires host adapters."),
-        ("legacy.tree-ownership", "Actual PS lease registry and continuation assertions: Test-UiaTreeOwnershipContracts, source 597-673; exactly four cases."),
-        ("legacy.provider-ownership", "Actual PS advisory-CIM refusal/removed hiding assertions: Test-UiaProviderOwnershipContracts, source 674-757; exactly four cases."),
-        ("legacy.pre-uia-isolation", "Actual runner PS region and environment/scope assertions: Test-PreUiaProcessIsolationContracts, source 892-988; exactly ten cases."),
         ("legacy.mixed-multiproject", "Complete mixed source 1672-4245 remains mandatory: UI predicates, native/fresh snapshot policies, receipts, strict protocol, owned real pipes, eight bounded-capture and primary/cleanup negative controls. Source invocation inventories are not executed counts."),
         ("legacy.peer-emission", "Assert-MultiProjectPeerEmissionContract source 4247-4265 requires actual PS AST source correspondence."),
         ("legacy.rename-submit", "Assert-MultiProjectRenameSubmitContract source 4266-4289 requires actual caller/production Zig route correspondence."),
         ("legacy.fresh-capture", "Assert-MultiProjectFreshCaptureContract source 4290-4315 requires actual ownership/cache/observer correspondence."),
         ("legacy.packaging-shared-linkage", "Packaging.Standalone.Tests.ps1 must load this complete StandaloneProcessJob implementation, not its embedded duplicate."),
-        ("legacy.uia-shared-linkage", "uia-live-gate.ps1 must load these complete UiaOwnedStreamCapture/StandaloneProcessJob implementations, including actual native membership.")
+        ("legacy.uia-shared-linkage", "uia-live-gate.ps1 must load these complete UiaOwnedStreamCapture/StandaloneProcessJob implementations, including actual native membership."),
+        ("ui-startup.helpers", "Source 5838 requires thirteen complete actual production startup helpers; helper presence is not runtime behavior."),
+        ("ui-startup.redacted-log", "Source 5845: bounded actual startup file diagnostic must preserve loader output and redact the canary."),
+        ("ui-startup.truncated-log", "Source 5853: actual startup diagnostic must read exactly eight bytes and mark truncation."),
+        ("ui-startup.missing-log", "Source 5859: actual startup diagnostic must distinguish missing from empty output."),
+        ("ui-startup.retained-report", "Source 5882: actual retained startup JSON must preserve independent stdout/stderr/app logs and redact canaries."),
+        ("ui-process-tree.controlled-child", "Source 5945: actual gate registered held process/job must expose its controlled descendant."),
+        ("ui-process-tree.cleanup-complete", "Source 5947: actual gate Stop-UiaOwnedProcessTrees must finish retained root/job/readers before cleanup succeeds."),
+        ("ui-process-tree.pid-reuse", "Source 5970: actual advisory descendant traversal must reject older generations and never supply termination authority.")
     ];
 
     public string Id => "ownership";
