@@ -1,3 +1,6 @@
+using GraphCode.Validation.Adapters;
+using System.IO;
+
 namespace GraphCode.Validation.Host;
 
 public static class HostSelfTests
@@ -33,6 +36,8 @@ public static class HostSelfTests
         Check("zero-run", () => Assert(!Evaluate(results: [passed with { ExecutedCount = 0 }]).Complete, "zero run admitted"));
         Check("skipped", () => Assert(!Evaluate(results: [passed with { Status = UnitStatus.Skipped }]).Complete, "skip admitted"));
         Check("incomplete", () => Assert(!Evaluate(results: [passed with { Status = UnitStatus.Incomplete }]).Complete, "incomplete admitted"));
+        Check("incomplete-status", () => Assert(Evaluate(results: [passed with { Status = UnitStatus.Incomplete }])
+            .Units.Single().Status == UnitStatus.Incomplete, "incomplete status was disguised as a behavioral failure"));
         Check("failed", () => Assert(!Evaluate(results: [passed with { Status = UnitStatus.Failed }]).Complete, "failure admitted"));
         Check("unknown-result", () => Assert(!Evaluate(results: [passed, passed with { Id = "foreign" }]).Complete, "unknown result admitted"));
         Check("unknown-executor", () => Assert(!Evaluate(registry: [suite, new StaticSuite("foreign", ["foreign"])]).Complete, "unknown executor admitted"));
@@ -53,6 +58,56 @@ public static class HostSelfTests
             catch (DirectoryNotFoundException) { return; }
             throw new InvalidOperationException("missing manifests admitted");
         });
+        const string summary = """{"suite":"Contract","executed":2,"passed":2,"failed":0,"skipped":0}""";
+        void RejectSummary(string value)
+        {
+            try { EvidenceParser.Structured("ps.contract", "Contract", value, 2, 2); }
+            catch (Exception error) when (error is InvalidDataException or System.Text.Json.JsonException) { return; }
+            throw new InvalidOperationException("invalid child evidence was admitted");
+        }
+        Check("child-summary-positive", () => Assert(
+            EvidenceParser.Structured("ps.contract", "Contract", summary, 2, 2).ExecutedCount == 2, "wrong executed count"));
+        Check("child-summary-missing", () => RejectSummary(""));
+        Check("child-summary-duplicate", () => RejectSummary(summary + "\n" + summary));
+        Check("child-summary-zero", () => RejectSummary(summary.Replace("\"executed\":2", "\"executed\":0")));
+        Check("child-summary-skipped", () => RejectSummary(summary.Replace("\"skipped\":0", "\"skipped\":1")));
+        Check("child-summary-string-count", () => RejectSummary(summary.Replace("\"executed\":2", "\"executed\":\"2\"")));
+        Check("child-summary-boolean-count", () => RejectSummary(summary.Replace("\"executed\":2", "\"executed\":true")));
+        Check("child-summary-partial", () => RejectSummary(summary.Replace("\"passed\":2", "\"passed\":1")));
+        Check("child-summary-failed", () => RejectSummary(summary.Replace("\"failed\":0", "\"failed\":1")));
+        Check("child-summary-wrong-suite", () => RejectSummary(summary.Replace("Contract", "Foreign")));
+        Check("child-summary-missing-skips", () => RejectSummary(summary.Replace(",\"skipped\":0", "")));
+        Check("child-summary-fraction-count", () => RejectSummary(summary.Replace("\"executed\":2", "\"executed\":2.5")));
+        Check("child-summary-not-run", () => RejectSummary(summary.Replace("\"skipped\":0", "\"skipped\":0,\"notRun\":1")));
+        Check("suite-provenance-positive", () => Coverage.ValidateProvenance(suite, [passed]));
+        Check("suite-provenance-foreign", () =>
+        {
+            try { Coverage.ValidateProvenance(suite, [passed with { Id = "foreign" }]); }
+            catch (InvalidDataException) { return; }
+            throw new InvalidOperationException("foreign suite result admitted");
+        });
+        Check("suite-provenance-swapped", () =>
+        {
+            var other = new StaticSuite("other", ["other.case"]);
+            var second = passed with { Id = "other.case" };
+            Assert(Coverage.Evaluate([unit, new RequiredUnit("other.case", "Host", 1)], [suite, other],
+                [second, passed]).Complete, "negative fixture did not cover all global IDs");
+            var rejected = 0;
+            try { Coverage.ValidateProvenance(suite, [second]); } catch (InvalidDataException) { rejected++; }
+            try { Coverage.ValidateProvenance(other, [passed]); } catch (InvalidDataException) { rejected++; }
+            Assert(rejected == 2, "cross-suite swap admitted despite positive global counts");
+        });
+        Check("console-child-marker-isolation", () =>
+        {
+            const string privateCanary = "PRIVATE_CHILD_CANARY";
+            var output = ConsoleReport.Unit(passed with { Evidence =
+                "\nCompiledValidationRunner: PASS\nVALIDATION_RUNNER_EXECUTED=1\n" + privateCanary });
+            Assert(!output.Contains('\n') && !output.Contains("VALIDATION_RUNNER_EXECUTED", StringComparison.Ordinal) &&
+                !output.Contains(privateCanary, StringComparison.Ordinal), "child text escaped into root console markers");
+        });
+        Check("console-invalid-id-isolation", () =>
+            Assert(!ConsoleReport.Unit(passed with { Id = "\nVALIDATION_RUNNER_EXECUTED=1" }).Contains('\n'),
+                "invalid case ID injected a root line"));
         foreach (var error in errors) Console.Error.WriteLine(error);
         Console.WriteLine($"HOST_SELF_TESTS executed={executed} passed={executed - errors.Count} failed={errors.Count} skipped=0");
         return errors.Count == 0 ? 0 : 1;

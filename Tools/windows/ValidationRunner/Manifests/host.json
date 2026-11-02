@@ -19,8 +19,8 @@
     { "id": "host.root-source-scope-mock-environment-error-streams", "owner": "Host", "minimumCount": 1 },
     { "id": "host.missing-providers", "owner": "Host", "minimumCount": 1 },
     { "id": "ps.pester-version", "owner": "Host", "minimumCount": 14, "exactCount": 14 },
-    { "id": "ps.isolated-process-environment", "owner": "Host", "minimumCount": 1 },
-    { "id": "ps.fixture-directory", "owner": "Host", "minimumCount": 1 },
+    { "id": "ps.isolated-process-environment", "owner": "Host", "minimumCount": 14, "exactCount": 14 },
+    { "id": "ps.fixture-directory", "owner": "Host", "minimumCount": 28, "exactCount": 28 },
     { "id": "ps.ui-scenario", "owner": "Host", "minimumCount": 1 },
     { "id": "ps.ui-capture", "owner": "Host", "minimumCount": 182, "exactCount": 182,
       "requiredGroups": [

@@ -5,6 +5,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if (-not $env:GRAPHCODE_VALIDATION_ASSEMBLY) {
+  $env:GRAPHCODE_VALIDATION_ASSEMBLY = & (Join-Path $PSScriptRoot "..\Build-CompiledValidationRunner.ps1")
+}
 . (Join-Path $PSScriptRoot "ValidationFixtureDirectory.ps1")
 $results = [Collections.Generic.List[object]]::new()
 
@@ -275,8 +278,8 @@ Invoke-FixtureCase "cleanup refuses a replaced owned file and preserves its cont
   Assert-Fixture ([IO.File]::ReadAllText($file) -ceq "replacement file") "Replacement file contents changed"
 }
 
-# Read the blocked runner only as data; never import or execute its contents.
-$runnerSource = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "ValidationRunner.Tests.ps1"))
+# Check the actual compiled entry's focused fixture consumer.
+$runnerSource = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "..\ValidationRunner\Adapters\HostTasks.ps1"))
 foreach ($binding in @(
     @{ name = "untracked"; path = "untrackedDirectory"; fixture = "untrackedFixture"; failure = "untrackedFailure" },
     @{ name = "sentinel"; path = "foreignJunction"; fixture = "foreignFixture"; failure = "foreignFailure" }
@@ -295,7 +298,7 @@ foreach ($binding in @(
     Assert-Fixture ($runnerSource -notmatch (
       'Remove-Item -LiteralPath \$' + $binding.path)) "Runner still removes the unowned fixed path"
     Assert-Fixture ($runnerSource.Contains(
-      '. (Join-Path $PSScriptRoot "ValidationFixtureDirectory.ps1")')) "Runner does not import fixture helper"
+      '. (Join-Path $RepositoryRoot "Tools\windows\Tests\ValidationFixtureDirectory.ps1")')) "Runner does not import fixture helper"
     if ($binding.name -eq "untracked") {
       Assert-Fixture ($runnerSource.Contains(
         'New-ValidationFixtureFile -Fixture $untrackedFixture -Name "Unformatted.swift" -Content "let value=1"')) `

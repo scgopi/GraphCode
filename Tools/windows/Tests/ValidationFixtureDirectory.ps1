@@ -2,27 +2,12 @@ function Invoke-ValidationFixtureDirectoryCreate {
   [CmdletBinding()]
   param([Parameter(Mandatory)][string] $Path)
 
-  if (-not ("GraphCode.ValidationFixtureDirectoryNative" -as [type])) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-namespace GraphCode {
-  public static class ValidationFixtureDirectoryNative {
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CreateDirectoryW(string path, IntPtr securityAttributes);
-    public static void Create(string path) {
-      if (!CreateDirectoryW(path, IntPtr.Zero)) {
-        int error = Marshal.GetLastWin32Error();
-        throw new Win32Exception(error,
-          "Exclusive validation fixture create failed (Win32 " + error + "): " + path);
-      }
-    }
+  if (-not $env:GRAPHCODE_VALIDATION_ASSEMBLY) {
+    throw "Build with Tools\windows\Build-CompiledValidationRunner.ps1 and set GRAPHCODE_VALIDATION_ASSEMBLY to its output"
   }
-}
-'@
-  }
+  & (Join-Path $PSScriptRoot "..\Import-CompiledValidationAssembly.ps1") `
+    -AssemblyPath (Join-Path ([IO.Path]::GetDirectoryName($env:GRAPHCODE_VALIDATION_ASSEMBLY)) "ValidationFixtureBindings.dll") `
+    -RequiredType "GraphCode.ValidationFixtureDirectoryNative" | Out-Null
   [GraphCode.ValidationFixtureDirectoryNative]::Create($Path)
 }
 

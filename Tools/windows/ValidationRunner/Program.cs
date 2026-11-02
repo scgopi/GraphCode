@@ -1,8 +1,12 @@
 using System.Reflection;
+using System.IO;
 using System.Text.Json;
 using GraphCode.Validation;
 using GraphCode.Validation.Host;
+using GraphCode.Validation.Ownership;
+using GraphCode.Validation.Adapters;
 
+if (await OwnedFixture.TryRunAsync(args) is int fixtureExit) return fixtureExit;
 if (args.SequenceEqual(new[] { "--self-test" })) return HostSelfTests.Run();
 
 string? repositoryRoot = null;
@@ -32,6 +36,7 @@ IReadOnlyList<RequiredUnit> required = [];
 try
 {
     required = Coverage.Load(Path.Combine(AppContext.BaseDirectory, "Manifests"));
+    suites.AddRange(StandaloneSuites.Create(required));
     foreach (var name in new[] { "GraphCode.Validation.Ui.SuiteRegistration", "GraphCode.Validation.Ownership.SuiteRegistration" })
     {
         var type = Assembly.GetExecutingAssembly().GetType(name);
@@ -47,7 +52,17 @@ try
     var context = new ValidationContext(repositoryRoot, artifactRoot);
     foreach (var suite in suites.Where(suite => selectedSuite is null || suite.Id == selectedSuite))
     {
-        try { results.AddRange(await suite.RunAsync(context, CancellationToken.None)); }
+        try
+        {
+            var observations = await suite.RunAsync(context, CancellationToken.None);
+            Coverage.ValidateProvenance(suite, observations);
+            results.AddRange(observations);
+            if (observations.Any(result => result.Status == UnitStatus.Failed))
+            {
+                errors.Add($"{suite.Id}: a contract failed; subsequent suites were not executed");
+                break;
+            }
+        }
         catch (Exception error)
         {
             errors.Add($"{suite.Id}: {error}");
@@ -60,9 +75,9 @@ var report = Coverage.Evaluate(required, suites, results, errors);
 var reportPath = Path.Combine(artifactRoot, "coverage.json");
 await File.WriteAllTextAsync(reportPath, JsonSerializer.Serialize(report, Coverage.JsonOptions));
 foreach (var unit in report.Units)
-    Console.WriteLine($"{unit.Status}: {unit.Id} executed={unit.ExecutedCount} {unit.Evidence}");
-foreach (var error in report.Errors) Console.Error.WriteLine(error);
-Console.WriteLine($"COVERAGE required={report.RequiredCount} passed={report.PassedCount} complete={report.Complete} report={reportPath}");
+    Console.WriteLine(ConsoleReport.Unit(unit));
+for (var index = 0; index < report.Errors.Count; index++) Console.Error.WriteLine(ConsoleReport.Error(index + 1));
+Console.WriteLine($"COVERAGE required={report.RequiredCount} passed={report.PassedCount} complete={report.Complete} report={JsonSerializer.Serialize(reportPath)}");
 if (!report.Complete) return 1;
 Console.WriteLine("CompiledValidationRunner: PASS");
 Console.WriteLine("VALIDATION_RUNNER_EXECUTED=1");

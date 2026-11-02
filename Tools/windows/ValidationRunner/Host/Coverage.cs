@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.IO;
 using System.Text.Json.Serialization;
 
 namespace GraphCode.Validation.Host;
@@ -55,7 +56,7 @@ public static class Coverage
         if (required.Count == 0) errors.Add("Required-unit manifest is empty");
         foreach (var unit in required)
         {
-            if (string.IsNullOrWhiteSpace(unit.Id) || string.IsNullOrWhiteSpace(unit.Owner) ||
+            if (!ConsoleReport.ValidId(unit.Id) || string.IsNullOrWhiteSpace(unit.Owner) ||
                 unit.MinimumCount <= 0 || (unit.ExactCount is not null && unit.ExactCount < unit.MinimumCount))
                 errors.Add($"Invalid required unit: {unit.Id}");
             if (!requirements.TryAdd(unit.Id, unit)) errors.Add($"Duplicate required unit: {unit.Id}");
@@ -118,12 +119,22 @@ public static class Coverage
             if (problems.Count != 0)
             {
                 errors.Add($"{id}: {string.Join("; ", problems)}");
-                ledger.Add(result with { Status = UnitStatus.Failed, Evidence = $"{result.Evidence}; {string.Join("; ", problems)}" });
+                ledger.Add(result with
+                {
+                    Status = result.Status is UnitStatus.Incomplete or UnitStatus.Skipped ? result.Status : UnitStatus.Failed,
+                    Evidence = $"{result.Evidence}; {string.Join("; ", problems)}"
+                });
             }
             else ledger.Add(result);
         }
         var passed = ledger.Count(result => result.Status == UnitStatus.Passed);
         return new CoverageReport("CompiledValidationRunner", errors.Count == 0 && passed > 0 &&
             passed == required.Count, required.Count, passed, ledger, errors);
+    }
+
+    public static void ValidateProvenance(IValidationSuite suite, IReadOnlyList<UnitResult> results)
+    {
+        if (results.Any(result => !suite.UnitIds.Contains(result.Id, StringComparer.Ordinal)))
+            throw new InvalidDataException("A suite returned evidence for a unit it does not own");
     }
 }
