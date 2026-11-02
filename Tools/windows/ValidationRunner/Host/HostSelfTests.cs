@@ -1,5 +1,6 @@
 using GraphCode.Validation.Adapters;
 using System.IO;
+using System.Text.Json;
 
 namespace GraphCode.Validation.Host;
 
@@ -125,6 +126,56 @@ public static class HostSelfTests
             catch (IOException) { }
             Assert(barrier is not null && !barrier.IsCompleted, "reporting exception bypassed terminal hold");
         });
+        Check("capture-expected-negative-diagnostics", () =>
+        {
+            const string root = "D:\\owned\\suite";
+            const string selector = "CAP_TRACE_FAILURE command=CapSelectorRefusal: Cannot find an overload for \"ToInt64\" and the argument count: \"0\".";
+            var journal = "JournalObservationFailure while reporting JournalUnavailable: JournalObservationFailure: " +
+                "Exception calling \"Open\" with \"4\" argument(s): \"Access to the path 'D:\\owned\\suite\\manifest-creation-budget\\snapshots' is denied.\"";
+            var text = selector + "\n" + selector + "\n" + journal + "\n";
+            Assert(EvidenceParser.CaptureDiagnostics(text, root), "known controlled refusals were rejected");
+            Assert(!EvidenceParser.CaptureDiagnostics(text + "unexpected error\n", root), "unexpected diagnostic was admitted");
+            Assert(!EvidenceParser.CaptureDiagnostics(text.Replace("D:\\owned", "D:\\foreign"), root), "foreign-path diagnostic was admitted");
+        });
+        Check("registry-positive", () => Assert(Coverage.RegistryErrors([unit], [suite]).Count == 0,
+            "valid registry rejected before execution"));
+        Check("registry-duplicate-preflight", () => Assert(Coverage.RegistryErrors([unit], [suite, suite]).Count > 0,
+            "duplicate executors not rejected before execution"));
+        var compositeDirectory = Path.Combine(Path.GetTempPath(), "gc-composite-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(compositeDirectory);
+        var mapPath = Path.Combine(compositeDirectory, "map.json");
+        try
+        {
+            var aggregate = new RequiredUnit("test.aggregate", "Host", 1, ["group"], 1,
+                ["test.case"], 1, "map.json");
+            var template = new CompositeTemplate("source-1", ["test.case"], 1);
+            CoverageReport Composite(IReadOnlyList<UnitResult>? observations = null, RequiredUnit? declaration = null,
+                IReadOnlyList<CompositeTemplate>? templates = null, IReadOnlyList<IValidationSuite>? registry = null)
+            {
+                File.WriteAllText(mapPath, JsonSerializer.Serialize(new CompositeSourceMap(templates ?? [template]), Coverage.JsonOptions));
+                return Coverage.Evaluate([unit, declaration ?? aggregate], registry ?? [suite],
+                    observations ?? [passed with { Groups = ["group"] }], sourceDirectory: compositeDirectory);
+            }
+            Check("composite-positive", () => Assert(Composite().Complete, "complete independently mapped proof rejected"));
+            Check("composite-missing", () => Assert(!Composite(observations: []).Complete, "missing dependency admitted"));
+            Check("composite-duplicate", () => Assert(!Composite(observations: [passed, passed]).Complete, "duplicate dependency admitted"));
+            Check("composite-skipped", () => Assert(!Composite(observations: [passed with { Status = UnitStatus.Skipped }]).Complete, "skipped dependency admitted"));
+            Check("composite-zero", () => Assert(!Composite(observations: [passed with { ExecutedCount = 0 }]).Complete, "zero dependency admitted"));
+            Check("composite-unimplemented", () => Assert(!Composite(registry: []).Complete, "unimplemented dependency admitted"));
+            Check("composite-source-count", () => Assert(!Composite(declaration: aggregate with { SourceTemplateCount = 2 }).Complete, "missing original source template admitted"));
+            Check("composite-map-duplicate", () => Assert(!Composite(declaration: aggregate with { SourceTemplateCount = 2 },
+                templates: [template, template]).Complete, "duplicate source mapping admitted"));
+            Check("composite-expanded-count", () => Assert(!Composite(templates: [template with { ExpectedCount = 2 }]).Complete, "wrong expanded original count admitted"));
+            Check("composite-unknown-dependency", () => Assert(!Composite(declaration: aggregate with { CompositeOf = ["missing"] }).Complete, "unknown dependency admitted"));
+            Check("composite-submitted-proof", () => Assert(!Composite(observations: [passed, passed with { Id = "test.aggregate" }]).Complete, "caller-submitted composite admitted"));
+            Check("composite-groups", () => Assert(!Composite(observations: [passed]).Complete, "missing measured group admitted"));
+            Check("composite-map-escape", () => Assert(!Composite(declaration: aggregate with { SourceMap = "..\\outside.json" }).Complete, "escaped source map admitted"));
+        }
+        finally
+        {
+            File.Delete(mapPath);
+            Directory.Delete(compositeDirectory, false);
+        }
         foreach (var error in errors) Console.Error.WriteLine(error);
         Console.WriteLine($"HOST_SELF_TESTS executed={executed} passed={executed - errors.Count} failed={errors.Count} skipped=0");
         return errors.Count == 0 ? 0 : 1;

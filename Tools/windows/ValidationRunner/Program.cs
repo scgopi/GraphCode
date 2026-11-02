@@ -11,6 +11,7 @@ finally { await TerminalSafety.PreserveRetainedAuthorityAsync(OwnedChildSupervis
 
 static async Task<int> RunAsync(string[] args)
 {
+if (HostFixture.TryRun(args) is int hostFixtureExit) return hostFixtureExit;
 if (await OwnedFixture.TryRunAsync(args) is int fixtureExit) return fixtureExit;
 if (args.SequenceEqual(new[] { "--self-test" })) return HostSelfTests.Run();
 
@@ -40,8 +41,10 @@ var errors = new List<string>();
 IReadOnlyList<RequiredUnit> required = [];
 try
 {
-    required = Coverage.Load(Path.Combine(AppContext.BaseDirectory, "Manifests"));
+    var sourceDirectory = Path.Combine(repositoryRoot, "Tools", "windows", "ValidationRunner");
+    required = Coverage.Load(Path.Combine(sourceDirectory, "Manifests"));
     suites.AddRange(StandaloneSuites.Create(required));
+    suites.Add(new ProviderCacheSuite());
     foreach (var name in new[] { "GraphCode.Validation.Ui.SuiteRegistration", "GraphCode.Validation.Ownership.SuiteRegistration" })
     {
         var type = Assembly.GetExecutingAssembly().GetType(name);
@@ -54,6 +57,9 @@ try
     }
     if (selectedSuite is not null && suites.All(suite => suite.Id != selectedSuite))
         throw new ArgumentException($"No registered suite: {selectedSuite}");
+    var registryErrors = Coverage.RegistryErrors(required, suites);
+    if (registryErrors.Count != 0)
+        throw new InvalidDataException("Registry admission failed: " + string.Join("; ", registryErrors));
     var context = new ValidationContext(repositoryRoot, artifactRoot);
     foreach (var suite in suites.Where(suite => selectedSuite is null || suite.Id == selectedSuite))
     {
@@ -76,7 +82,8 @@ try
     }
 }
 catch (Exception error) { errors.Add(error.ToString()); }
-var report = Coverage.Evaluate(required, suites, results, errors);
+var report = Coverage.Evaluate(required, suites, results, errors,
+    Path.Combine(repositoryRoot, "Tools", "windows", "ValidationRunner"));
 var reportPath = Path.Combine(artifactRoot, "coverage.json");
 await File.WriteAllTextAsync(reportPath, JsonSerializer.Serialize(report, Coverage.JsonOptions));
 foreach (var unit in report.Units)

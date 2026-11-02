@@ -1,4 +1,5 @@
 Set-StrictMode -Version Latest
+$script:CompiledOwnershipAssemblyPath = $null
 # Targets start suspended, join a private non-breakaway job, then resume. CIM
 # observations are never admitted into this scope; disposed managed objects do
 # not release the native launch handles retained until verified job teardown.
@@ -17,34 +18,29 @@ Set-StrictMode -Version Latest
 # only. Actual suspended launch/job containment still requires native validation.
 
 function Initialize-ShellProcessOwnership {
-  if ("ShellOwnedLaunch" -as [type]) { return }
-  $path = Join-Path $PSScriptRoot "UiCaptureDriver.psm1"
-  $errors = $null
-  $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errors)
-  if ($errors.Count) { throw "Owned shell job source does not parse" }
-  $definitions = @($ast.FindAll({
-    param($node)
-    $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
-      $node.Value.Contains("public static class CapProcessJob")
-  }, $true))
-  if ($definitions.Count -ne 1) { throw "Owned shell requires exactly one existing CapProcessJob definition" }
-  if (-not ("CapProcessJob" -as [type])) { Add-Type -TypeDefinition $definitions[0].Value }
-  $source = "using System; using System.ComponentModel; using System.Diagnostics; using System.Runtime.InteropServices;`n" +
-    "using System.IO; using System.Text; using System.Threading.Tasks; using System.Linq;`n" +
-    (Get-Content -LiteralPath (Join-Path $PSScriptRoot "ShellOwnedProcess.cs") -Raw)
-  Add-Type -TypeDefinition $source
+  $assemblyPath = $env:GRAPHCODE_VALIDATION_ASSEMBLY
+  if (-not $assemblyPath) {
+    if (-not $script:CompiledOwnershipAssemblyPath) {
+      $script:CompiledOwnershipAssemblyPath = & (Join-Path $PSScriptRoot "Build-CompiledValidationRunner.ps1")
+    }
+    $assemblyPath = $script:CompiledOwnershipAssemblyPath
+  }
+  foreach ($requiredType in @("ShellOwnedLaunch", "GraphCode.Validation.Ownership.StandaloneProcessJob")) {
+    & (Join-Path $PSScriptRoot "Import-CompiledValidationAssembly.ps1") `
+      -AssemblyPath $assemblyPath -RequiredType $requiredType | Out-Null
+  }
 }
 
 function Invoke-ShellJob([string] $Operation, [IntPtr] $Job = [IntPtr]::Zero,
     [IntPtr] $Handle = [IntPtr]::Zero) {
   switch ($Operation) {
-    "Create" { [CapProcessJob]::Create() }
-    "Assign" { [CapProcessJob]::Assign($Job, $Handle) }
-    "Contains" { [CapProcessJob]::Contains($Job, $Handle) }
-    "Terminate" { [CapProcessJob]::Terminate($Job) }
-    "Wait" { [CapProcessJob]::WaitForEmpty($Job, 5000) }
-    "Active" { [CapProcessJob]::Active($Job) }
-    "Close" { [CapProcessJob]::Close($Job) }
+    "Create" { [GraphCode.Validation.Ownership.StandaloneProcessJob]::Create() }
+    "Assign" { [GraphCode.Validation.Ownership.StandaloneProcessJob]::Assign($Job, $Handle) }
+    "Contains" { [GraphCode.Validation.Ownership.StandaloneProcessJob]::Contains($Job, $Handle) }
+    "Terminate" { [GraphCode.Validation.Ownership.StandaloneProcessJob]::Terminate($Job) }
+    "Wait" { [GraphCode.Validation.Ownership.StandaloneProcessJob]::WaitForEmpty($Job, 5000) }
+    "Active" { [GraphCode.Validation.Ownership.StandaloneProcessJob]::Active($Job) }
+    "Close" { [GraphCode.Validation.Ownership.StandaloneProcessJob]::Close($Job) }
     default { throw "Unknown owned-job operation: $Operation" }
   }
 }

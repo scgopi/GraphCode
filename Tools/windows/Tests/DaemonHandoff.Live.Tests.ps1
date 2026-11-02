@@ -5,6 +5,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Import-Module (Join-Path $PSScriptRoot "..\ShellProcessOwnership.psm1")
+$processScope = $null
 $script:WM_QUIT = 0x0012
 $daemonExecutable = Join-Path (Split-Path -Parent $Executable) "graphcoded.exe"
 $cliExecutable = Join-Path (Split-Path -Parent $Executable) "graphcode.exe"
@@ -57,13 +59,7 @@ function Start-HandoffShell(
   $startInfo.Environment["GRAPHCODE_DAEMON_HANDOFF_TEST_STATE"] = $daemonStatePath
   $startInfo.Environment["GRAPHCODE_DAEMON_SUPERVISOR_TEST_HOOK"] = "1"
   $startInfo.Environment["GRAPHCODE_DAEMON_HANDOFF_TEST_USER"] = $userName
-  $process = [Diagnostics.Process]::new()
-  $process.StartInfo = $startInfo
-  if (-not $process.Start()) {
-    throw "could not start shell $userName"
-  }
-  [void] $process.Handle
-  return $process
+  Start-ShellOwnedProcess $processScope $startInfo
 }
 
 function Get-DaemonChildren([int[]] $parentIds) {
@@ -125,6 +121,7 @@ function Stop-ShellNormally([Diagnostics.Process] $process, [string] $role) {
       if (-not $process.WaitForExit(7000)) {
         throw "$role shell did not exit normally"
       }
+      Complete-ShellOwnedProcess $processScope $process
       return
     }
     Start-Sleep -Milliseconds 100
@@ -143,16 +140,19 @@ function Assert-EndpointReachable {
   $startInfo.Environment["GRAPHCODE_SUPPORT_DIR"] = $supportDirectory
   $startInfo.Environment["GRAPHCODE_DAEMON_PIPE"] = $daemonPipe
   [void] $startInfo.ArgumentList.Add("projects")
-  $process = [Diagnostics.Process]::new()
-  $process.StartInfo = $startInfo
-  if (-not $process.Start() -or -not $process.WaitForExit(7000)) {
-    throw "daemon endpoint was not reachable through graphcode.exe"
+  $process = Start-ShellOwnedProcess $processScope $startInfo
+  try {
+    if (-not $process.WaitForExit(7000)) {
+      throw "daemon endpoint was not reachable through graphcode.exe"
+    }
+    $stderr = Read-ShellOwnedOutput $processScope $process -StandardError
+    if ($process.ExitCode -ne 0) {
+      throw "daemon endpoint rejected graphcode.exe: $stderr"
+    }
+  } finally {
+    if (-not $process.HasExited) { Stop-ShellOwnedProcess $processScope $process }
+    $process.Dispose()
   }
-  $stderr = $process.StandardError.ReadToEnd()
-  if ($process.ExitCode -ne 0) {
-    throw "daemon endpoint rejected graphcode.exe: $stderr"
-  }
-  $process.Dispose()
 }
 
 function Get-HandoffElapsed([Diagnostics.Stopwatch] $clock) {
@@ -226,8 +226,13 @@ $shellA = $null
 $shellB = $null
 $daemonProcess = $null
 $handoffClock = [Diagnostics.Stopwatch]::StartNew()
+$primaryFailure = $null
+$supportCreated = $false
 try {
-  New-Item -ItemType Directory -Force -Path $supportDirectory | Out-Null
+  if (Test-Path -LiteralPath $supportDirectory) { throw "Handoff support directory already exists: $supportDirectory" }
+  New-Item -ItemType Directory -Path $supportDirectory | Out-Null
+  $supportCreated = $true
+  $processScope = New-ShellProcessScope
   $daemonStateA = Join-Path $supportDirectory "daemon-a.state"
   $daemonStateB = Join-Path $supportDirectory "daemon-b.state"
   $shellA = Start-HandoffShell `
@@ -244,7 +249,8 @@ try {
     )
     $children = @(Get-DaemonChildren $parents)
     if ($children.Count -eq 1) {
-      $candidate = Get-Process -Id $children[0].ProcessId -ErrorAction SilentlyContinue
+      # CIM supplies a candidate only; membership of the retained job is authority.
+      $candidate = Get-ShellOwnedMember $processScope $children[0].ProcessId
       if ($candidate) {
         $daemonProcess = $candidate
         $selectedChild = $children[0]
@@ -306,23 +312,38 @@ try {
   if (-not $daemonProcess.WaitForExit(7000)) {
     throw "owning shell exit did not stop its graphcoded child"
   }
-  Write-Output "Concurrent two-shell daemon handoff: PASS"
+} catch {
+  $primaryFailure = $_
+  throw
 } finally {
-  foreach ($process in @($shellA, $shellB)) {
-    if ($process -and -not $process.HasExited) {
-      Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+  try {
+    if ($processScope) { Close-ShellProcessScope $processScope }
+    $expectedDaemonPath = [IO.Path]::GetFullPath($daemonExecutable)
+    $survivors = @(Get-CimInstance Win32_Process -ErrorAction Stop |
+      Where-Object {
+        $_.Name -ieq "graphcoded.exe" -and $_.ExecutablePath -and
+        [IO.Path]::GetFullPath($_.ExecutablePath) -ieq $expectedDaemonPath
+      })
+    if ($survivors.Count) {
+      throw "UNATTESTED_SURVIVORS: handoff daemon image matches after owned-job cleanup; no termination attempted: $($survivors.ProcessId -join ',')"
     }
-    if ($process) { $process.Dispose() }
+    if ($primaryFailure -and (Test-ShellOwnershipUnproven $primaryFailure)) {
+      throw "Earlier ownership refusal requires retained handoff support files"
+    }
+    if ($supportCreated) {
+      Remove-Item -LiteralPath $supportDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  } catch {
+    Write-Host "HANDOFF_CLEANUP_UNPROVEN=$($_.Exception.Message); retained=$supportDirectory"
+    $cleanupFailure = Set-ShellOwnershipUnproven $_.Exception @($supportDirectory)
+    if ($primaryFailure) {
+      $failure = [InvalidOperationException]::new(
+        "Handoff failed: $($primaryFailure.Exception.Message); cleanup unproved: $($cleanupFailure.Message)", $primaryFailure.Exception)
+      $failure.Data["GraphCodeValidationRootRetentionRequired"] = $true
+      $failure.Data["GraphCodeValidationRetainedRoots"] = $cleanupFailure.Data["GraphCodeValidationRetainedRoots"]
+      throw $failure
+    }
+    throw $cleanupFailure
   }
-  if ($daemonProcess -and -not $daemonProcess.HasExited) {
-    Stop-Process -Id $daemonProcess.Id -Force -ErrorAction SilentlyContinue
-  }
-  $expectedDaemonPath = [IO.Path]::GetFullPath($daemonExecutable)
-  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-    Where-Object {
-      $_.Name -ieq "graphcoded.exe" -and $_.ExecutablePath -and
-      [IO.Path]::GetFullPath($_.ExecutablePath) -ieq $expectedDaemonPath
-    } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-  Remove-Item -LiteralPath $supportDirectory -Recurse -Force -ErrorAction SilentlyContinue
 }
+Write-Output "Concurrent two-shell daemon handoff: PASS"

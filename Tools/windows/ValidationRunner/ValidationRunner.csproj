@@ -11,10 +11,11 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="Bindings\**\*.cs" />
-    <Compile Remove="Ui\Production\**\*.cs;Host\Production\**\*.cs;Ownership\*.cs" />
+    <Compile Remove="Ui\Production\**\*.cs;Host\Production\**\*.cs;Host\Fixtures\**\*.cs;Ownership\*.cs" />
     <Compile Include="Ownership\OwnedFixture.cs;Ownership\SuiteRegistration.cs" />
     <AssemblyMetadata Include="GraphCode.Validation.SourceRoot" Value="$(MSBuildProjectDirectory)" />
     <ProjectReference Include="Bindings\ValidationFixtureBindings.csproj" />
+    <ProjectReference Include="Bindings\Fixtures\ValidationTestFixtures.csproj" />
     <ProjectReference Include="Bindings\Windows\WindowsValidationBindings.csproj" />
     <None Update="Manifests\*.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

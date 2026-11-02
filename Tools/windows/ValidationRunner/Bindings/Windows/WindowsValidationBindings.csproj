@@ -10,11 +10,13 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\..\..\UiaWindowActivation.cs" Link="UiaWindowActivation.cs" />
+    <Compile Include="..\..\..\ShellOwnedProcess.cs" Link="ShellOwnedProcess.cs" />
     <Compile Include="..\..\Ui\Production\*.cs" Link="Ui\%(Filename)%(Extension)" />
     <Compile Include="..\..\Host\Production\*.cs" Link="Host\%(Filename)%(Extension)" />
     <Compile Include="..\..\Ownership\*.cs"
-             Exclude="..\..\Ownership\OwnedFixture.cs;..\..\Ownership\SuiteRegistration.cs"
+             Exclude="..\..\Ownership\*Fixture.cs;..\..\Ownership\SuiteRegistration.cs"
              Link="Ownership\%(Filename)%(Extension)" />
     <AssemblyMetadata Include="GraphCode.Validation.SourceRoot" Value="$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..'))" />
   </ItemGroup>
+  <Import Project="..\..\BuildProvenance.targets" />
 </Project>

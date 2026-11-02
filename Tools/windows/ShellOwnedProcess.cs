@@ -1,4 +1,17 @@
+#nullable disable
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading.Tasks;
+
 public sealed class ShellOwnedLaunch {
+  public static string SelectWorkingDirectory(ProcessStartInfo info) {
+    return String.IsNullOrEmpty(info.WorkingDirectory) ? null : info.WorkingDirectory;
+  }
   [StructLayout(LayoutKind.Sequential)]
   struct Security { public int Length; public IntPtr Descriptor; public int Inherit; }
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -171,7 +184,7 @@ public sealed class ShellOwnedLaunch {
       uint flags = 0x4 | 0x400 | 0x80000; // suspended, Unicode environment, explicit handle list
       if (info.CreateNoWindow) flags |= 0x08000000;
       if (!CreateProcessW(info.FileName, command, IntPtr.Zero, IntPtr.Zero, true, flags,
-          environment, String.IsNullOrEmpty(info.WorkingDirectory) ? null : info.WorkingDirectory, ref startup, out created)) throw new Win32Exception();
+          environment, SelectWorkingDirectory(info), ref startup, out created)) throw new Win32Exception();
       run.Handle = created.Process;
       run.thread = created.Thread;
       run.Process = Process.GetProcessById(created.Pid);

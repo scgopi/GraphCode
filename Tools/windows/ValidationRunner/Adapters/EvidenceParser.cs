@@ -75,6 +75,17 @@ public static class EvidenceParser
         return required.ToArray();
     }
 
+    public static bool CaptureDiagnostics(string text, string suiteRoot)
+    {
+        var lines = Lines(text);
+        if (lines.Count == 0) return true;
+        const string selector = "CAP_TRACE_FAILURE command=CapSelectorRefusal: Cannot find an overload for \"ToInt64\" and the argument count: \"0\".";
+        var denied = Path.Combine(suiteRoot, "manifest-creation-budget", "snapshots");
+        var journal = "JournalObservationFailure while reporting JournalUnavailable: JournalObservationFailure: " +
+            $"Exception calling \"Open\" with \"4\" argument(s): \"Access to the path '{denied}' is denied.\"";
+        return lines.Count == 3 && lines[0] == selector && lines[1] == selector && lines[2] == journal;
+    }
+
     private static int Integer(JsonElement element, string property)
     {
         if (!element.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.Number ||

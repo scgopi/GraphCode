@@ -10,4 +10,5 @@
     <Compile Include="..\..\ValidationFixtureDirectoryNative.cs" Link="ValidationFixtureDirectoryNative.cs" />
     <AssemblyMetadata Include="GraphCode.Validation.SourceRoot" Value="$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..'))" />
   </ItemGroup>
+  <Import Project="..\BuildProvenance.targets" />
 </Project>

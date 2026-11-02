@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Text;
+using System.Security.Cryptography;
 using GraphCode.Validation.Ownership;
 using GraphCode.Validation.Host;
 
@@ -9,9 +10,21 @@ namespace GraphCode.Validation.Adapters;
 
 public static class PowerShellPayload
 {
-    public static async Task<string> RunAsync(
+    public sealed record Receipt(string Output, string ArtifactRoot, string StdoutTextSha256);
+
+    public static string CreateScratchRoot(string repositoryRoot)
+    {
+        var parent = Path.Combine(Path.GetPathRoot(repositoryRoot) ??
+            throw new InvalidDataException("Repository has no volume root"), "gc-v");
+        Directory.CreateDirectory(parent);
+        var path = Path.Combine(parent, Guid.NewGuid().ToString("N")[..16]);
+        GraphCode.ValidationFixtureDirectoryNative.Create(path);
+        return path;
+    }
+
+    public static async Task<Receipt> RunAsync(
         ValidationContext context, string id, string relativeScript, IReadOnlyList<string> arguments,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, Func<string, bool>? expectedDiagnostics = null)
     {
         var executable = Environment.GetEnvironmentVariable("GRAPHCODE_VALIDATION_PWSH") ??
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "PowerShell", "7", "pwsh.exe");
@@ -25,11 +38,7 @@ public static class PowerShellPayload
             throw new InvalidOperationException("The legacy monolithic runner is not an allowed payload");
         var artifacts = Path.Combine(context.ArtifactRoot, id + "-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(artifacts);
-        var tempParent = Path.Combine(Path.GetPathRoot(context.RepositoryRoot) ??
-            throw new InvalidDataException("Repository has no volume root"), "gc-validation");
-        Directory.CreateDirectory(tempParent);
-        var temp = Path.Combine(tempParent, Guid.NewGuid().ToString("N"));
-        GraphCode.ValidationFixtureDirectoryNative.Create(temp);
+        var temp = CreateScratchRoot(context.RepositoryRoot);
         await File.WriteAllTextAsync(Path.Combine(artifacts, "scratch-root.txt"), temp, cancellationToken);
         var start = new ProcessStartInfo(executable)
         {
@@ -47,16 +56,22 @@ public static class PowerShellPayload
         var result = await OwnedChildSupervisor.RunAsync(start, TimeSpan.FromMinutes(12), artifacts, cancellationToken);
         if (!result.Cleanup.CanRelease || !result.Cleanup.ResourcesClosed)
             throw new InvalidOperationException($"{id}: owned child cleanup is UNKNOWN; artifacts retained: {artifacts}");
-        if (result.StandardOutput.Contains("GRAPHCODE_VALIDATION_ROOT_RETENTION_REQUIRED=ownership_unproven", StringComparison.Ordinal))
+        var unknown = false;
+        var observer = new RetentionSignalObserver(() => unknown = true);
+        observer.OnText(result.StandardOutput);
+        observer.OnEof();
+        if (unknown)
         {
             TerminalSafety.MarkUnknown();
             var failure = new InvalidOperationException($"{id}: descendant reported UNKNOWN ownership; artifacts retained: {artifacts}");
             failure.Data["GraphCodeValidationRootRetentionRequired"] = true;
             throw failure;
         }
-        if (result.ExitCode != 0 || !string.IsNullOrWhiteSpace(result.StandardError))
+        if (result.ExitCode != 0 || (!string.IsNullOrWhiteSpace(result.StandardError) &&
+            (expectedDiagnostics is null || !expectedDiagnostics(result.StandardError))))
             throw new InvalidOperationException($"{id}: protected payload failed (exit={result.ExitCode}); " +
                 $"stdout/stderr and scratch receipt retained: {artifacts}");
-        return result.StandardOutput;
+        return new Receipt(result.StandardOutput, artifacts,
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(result.StandardOutput))));
     }
 }

@@ -31,6 +31,19 @@ public static class StandaloneSuites
         new HostTaskSuite("host.unknown-task", "unknown", 1),
         new HostTaskSuite("host.foreign-fixture", "foreign-fixture", 1),
         new HostTaskSuite("host.untracked-format", "untracked-format", 1),
+        new HostSourceSuite("host.shell-prerequisite", "host-prerequisite", 4),
+        new HostSourceSuite("host.provider-task-boundary", "provider-boundary", 5),
+        new HostSourceSuite("ui.root.source.line-5346", "delayed-responses", 2),
+        new CaseScriptSuite("host.provenance", "Tools\\windows\\ValidationRunner\\Adapters\\Provenance.Contracts.ps1",
+            "HOST_CASE_RESULT=", ["host.provenance.current-source", "host.provenance.source-changed", "host.provenance.source-restored"]),
+        new CaseScriptSuite("host.provider-build", "Tools\\windows\\ValidationRunner\\Adapters\\ProviderBuild.Contracts.ps1",
+            "HOST_CASE_RESULT=", ["host.provider-build"]),
+        new CaseScriptSuite("host.legacy-ownership.shell-scope", "Tools\\windows\\ValidationRunner\\Adapters\\LegacyOwnership.Contracts.ps1",
+            "HOST_CASE_RESULT=", ["host.legacy-ownership.shell-scope"], ["-Contract", "shell-scope"]),
+        new CaseScriptSuite("host.legacy-ownership.live-adapter", "Tools\\windows\\ValidationRunner\\Adapters\\LegacyOwnership.Contracts.ps1",
+            "HOST_CASE_RESULT=", ["host.legacy-ownership.live-adapter"], ["-Contract", "live-adapter"]),
+        new CaseScriptSuite("host.legacy-ownership.live-cleanup", "Tools\\windows\\ValidationRunner\\Adapters\\LegacyOwnership.Contracts.ps1",
+            "HOST_CASE_RESULT=", ["host.legacy-ownership.live-cleanup"], ["-Contract", "live-cleanup"]),
         new CaseScriptSuite("ui.source-contracts", "Tools\\windows\\ValidationRunner\\Ui\\UiSourceContracts.ps1",
             "UI_CASE_RESULT=", required.Where(unit => unit.Id.StartsWith("ui.activation.source.", StringComparison.Ordinal) ||
                 unit.Id.StartsWith("ui.popup.source.", StringComparison.Ordinal)).Select(unit => unit.Id).ToArray())
@@ -43,7 +56,8 @@ public static class StandaloneSuites
         public async Task<IReadOnlyList<UnitResult>> RunAsync(ValidationContext context, CancellationToken cancellationToken)
         {
             var output = await PowerShellPayload.RunAsync(context, id, "Tools\\windows\\Tests\\" + script, [], cancellationToken);
-            return [parse(output)];
+            var result = parse(output.Output);
+            return [WithReceipt(result, output)];
         }
     }
 
@@ -56,7 +70,21 @@ public static class StandaloneSuites
             var output = await PowerShellPayload.RunAsync(context, id,
                 "Tools\\windows\\ValidationRunner\\Adapters\\HostTasks.ps1",
                 ["-RepositoryRoot", context.RepositoryRoot, "-Contract", contract], cancellationToken);
-            return [EvidenceParser.Structured(id, "HostTasks." + contract, output, count, count)];
+            return [WithReceipt(EvidenceParser.Structured(id, "HostTasks." + contract, output.Output, count, count), output)];
+        }
+
+    }
+
+    private sealed class HostSourceSuite(string id, string contract, int count) : IValidationSuite
+    {
+        public string Id => id;
+        public IReadOnlyList<string> UnitIds => [id];
+        public async Task<IReadOnlyList<UnitResult>> RunAsync(ValidationContext context, CancellationToken cancellationToken)
+        {
+            var output = await PowerShellPayload.RunAsync(context, id,
+                "Tools\\windows\\ValidationRunner\\Adapters\\HostSourceContracts.ps1",
+                ["-RepositoryRoot", context.RepositoryRoot, "-Contract", contract], cancellationToken);
+            return [WithReceipt(EvidenceParser.Structured(id, "HostSource." + contract, output.Output, count, count), output)];
         }
     }
 
@@ -67,8 +95,8 @@ public static class StandaloneSuites
         public async Task<IReadOnlyList<UnitResult>> RunAsync(ValidationContext context, CancellationToken cancellationToken)
         {
             const string script = "Tools\\windows\\Tests\\UiCaptureDriver.Tests.ps1";
-            var captureRoot = Path.Combine(context.ArtifactRoot, "capture-" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(captureRoot);
+            var captureRoot = PowerShellPayload.CreateScratchRoot(context.RepositoryRoot);
+            await File.WriteAllTextAsync(Path.Combine(context.ArtifactRoot, "capture-root.txt"), captureRoot, cancellationToken);
             var prebuilt = Path.Combine(captureRoot, "prebuilt");
             await PowerShellPayload.RunAsync(context, Id + ".prepare", script,
                 ["-PrepareFixturesOnly", "-ScratchRoot", prebuilt], cancellationToken);
@@ -77,14 +105,15 @@ public static class StandaloneSuites
             var suiteRoot = Path.Combine(captureRoot, "suite");
             var output = await PowerShellPayload.RunAsync(context, Id, script,
                 ["-ScratchRoot", suiteRoot, "-PrebuiltFixtureManifest", manifest, "-PrebuiltFixtureManifestSha256", hash],
-                cancellationToken);
-            var result = EvidenceParser.Structured(Id, "UiCaptureDriver", output, 182, 182);
+                cancellationToken, value => EvidenceParser.CaptureDiagnostics(value, suiteRoot));
+            var result = WithReceipt(EvidenceParser.Structured(Id, "UiCaptureDriver", output.Output, 182, 182), output);
             return [result with { Groups = EvidenceParser.CaptureGroups(Path.Combine(suiteRoot, "report.json"),
                 required.RequiredGroups ?? []) }];
         }
     }
 
-    public sealed class CaseScriptSuite(string id, string script, string prefix, IReadOnlyList<string> unitIds) : IValidationSuite
+    public sealed class CaseScriptSuite(string id, string script, string prefix, IReadOnlyList<string> unitIds,
+        IReadOnlyList<string>? additionalArguments = null) : IValidationSuite
     {
         public string Id => id;
         public IReadOnlyList<string> UnitIds => unitIds;
@@ -92,13 +121,23 @@ public static class StandaloneSuites
         {
             var output = await PowerShellPayload.RunAsync(context, id, script,
                 ["-RepositoryRoot", context.RepositoryRoot, "-ArtifactRoot", context.ArtifactRoot,
-                 "-AssemblyPath", Assembly.GetExecutingAssembly().Location], cancellationToken);
-            var rows = output.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries)
+                 "-AssemblyPath", Assembly.GetExecutingAssembly().Location, .. additionalArguments ?? []], cancellationToken);
+            var rows = output.Output.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries)
                 .Where(line => line.StartsWith(prefix, StringComparison.Ordinal)).Select(line =>
                     JsonSerializer.Deserialize<UnitResult>(line[prefix.Length..], Coverage.JsonOptions) ??
                     throw new InvalidDataException($"{id}: null case evidence")).ToArray();
             if (rows.Length == 0) throw new InvalidDataException($"{id}: no case evidence");
-            return rows;
+            return rows.Select(result => result with
+            {
+                Evidence = $"Case evidence retained in payload logs; evidence-text-sha256=" +
+                    Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(result.Evidence))) +
+                    $"; stdout-text-sha256={output.StdoutTextSha256}; artifacts={output.ArtifactRoot}"
+            }).ToArray();
         }
     }
+
+    private static UnitResult WithReceipt(UnitResult result, PowerShellPayload.Receipt receipt) => result with
+    {
+        Evidence = $"{result.Evidence}; stdout-text-sha256={receipt.StdoutTextSha256}; artifacts={receipt.ArtifactRoot}"
+    };
 }

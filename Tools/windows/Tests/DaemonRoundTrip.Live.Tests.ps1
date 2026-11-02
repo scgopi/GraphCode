@@ -11,6 +11,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "..\OwnedLiveProcess.ps1")
+. (Join-Path $PSScriptRoot "ValidationFixtureDirectory.ps1")
+Import-Module (Join-Path $PSScriptRoot "..\ShellProcessOwnership.psm1") -Force
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 $shellRoot = Join-Path $repoRoot "graphcode-windows"
 $DaemonExecutable = (Resolve-Path -LiteralPath $DaemonExecutable).Path
@@ -52,6 +55,7 @@ $defaultSupportDirectory = Join-Path ([Environment]::GetFolderPath("UserProfile"
 $successful = $false
 $shutdownEvent = $null
 $daemonProcess = $null
+$processScope = $null
 $runLog = [Collections.Generic.List[string]]::new()
 
 function Get-DefaultSupportSignature {
@@ -107,40 +111,66 @@ function Start-OwnedDaemon {
   $startInfo.Environment["GRAPHCODE_DAEMON_PIPE"] = $daemonPipe
   $startInfo.Environment["GRAPHCODE_DAEMON_SHUTDOWN_EVENT"] = $shutdownEventName
 
-  $process = [Diagnostics.Process]::new()
-  $process.StartInfo = $startInfo
-  if (-not $process.Start()) {
-    throw "could not start graphcoded.exe"
-  }
-  [void] $process.Handle
-  $stdout = $process.StandardOutput.ReadToEndAsync()
-  $stderr = $process.StandardError.ReadToEndAsync()
-  $deadline = [DateTime]::UtcNow.AddSeconds(15)
-  while ([DateTime]::UtcNow -lt $deadline) {
-    $process.Refresh()
-    if ($process.HasExited) {
-      throw "graphcoded.exe exited during startup: $($stderr.Result)"
-    }
-    if (@(Get-OwnedDaemon $process.Id).Count -eq 1) {
-      $script:daemonStdout = $stdout
-      $script:daemonStderr = $stderr
-      # A PID exists before the lifetime mutex and listener are initialized. This is
-      # especially observable on restart, when the Zig test executable is already built.
-      $readyPipe = [IO.Pipes.NamedPipeClientStream]::new(".", $daemonPipe.Substring(9),
-        [IO.Pipes.PipeDirection]::InOut)
-      try {
-        $readyPipe.Connect(15000)
-      } catch {
-        if (-not $process.HasExited) { $process.Kill(); [void]$process.WaitForExit(5000) }
-        throw "Owned daemon did not publish its listener before the round-trip test: $($_.Exception.Message)"
-      } finally {
-        $readyPipe.Dispose()
+  $process = $null
+  $started = $false
+  $handleHeld = $false
+  try {
+    $process = Start-ShellOwnedProcess $processScope $startInfo
+    $started = $true
+    [void] $process.Handle
+    $handleHeld = $true
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    while ([DateTime]::UtcNow -lt $deadline) {
+      $process.Refresh()
+      if ($process.HasExited) {
+        Complete-ShellOwnedProcess $processScope $process
+        $stderr = Read-ShellOwnedOutput $processScope $process -StandardError
+        throw "graphcoded.exe exited during startup: $stderr"
       }
-      return $process
+      if (@(Get-OwnedDaemon $process.Id).Count -eq 1) {
+        # A PID exists before the lifetime mutex and listener are initialized. This is
+        # especially observable on restart, when the Zig test executable is already built.
+        $readyPipe = [IO.Pipes.NamedPipeClientStream]::new(".", $daemonPipe.Substring(9),
+          [IO.Pipes.PipeDirection]::InOut)
+        try {
+          $readyPipe.Connect(15000)
+        } catch {
+          throw [InvalidOperationException]::new(
+            "Owned daemon did not publish its listener before the round-trip test.", $_.Exception)
+        } finally {
+          $readyPipe.Dispose()
+        }
+        return $process
+      }
+      Start-Sleep -Milliseconds 100
     }
-    Start-Sleep -Milliseconds 100
+    throw "graphcoded.exe did not appear as a child at its exact executable path"
+  } catch {
+    $startupError = $_
+    $cleanupErrors = [Collections.Generic.List[Exception]]::new()
+    try {
+      if ($started) {
+        if (-not $handleHeld) {
+          throw "The started daemon's original process handle was not acquired; no termination attempted."
+        }
+        Stop-OwnedLiveProcess -Process $process -Name "round-trip daemon startup" `
+          -TimeoutMilliseconds 5000
+      }
+    } catch {
+      $cleanupErrors.Add($_.Exception)
+    } finally {
+      if ($process) {
+        try { $process.Dispose() } catch { $cleanupErrors.Add($_.Exception) }
+      }
+    }
+    if ($cleanupErrors.Count -gt 0) {
+      $cleanupErrors.Insert(0, $startupError.Exception)
+      throw (New-OwnedLiveProcessCleanupError `
+        -Message "Round-trip daemon startup cleanup could not be verified; fixture root: $runRoot" `
+        -Errors ([Exception[]]$cleanupErrors.ToArray()) -RetainedRoots @($runRoot))
+    }
+    throw $startupError
   }
-  throw "graphcoded.exe did not appear as a child at its exact executable path"
 }
 
 function Stop-OwnedDaemon([Diagnostics.Process] $process) {
@@ -156,9 +186,12 @@ function Stop-OwnedDaemon([Diagnostics.Process] $process) {
   if (-not $process.HasExited) {
     throw "graphcoded.exe is still running after shutdown"
   }
+  Complete-ShellOwnedProcess $processScope $process
   $script:runLog.Add("daemon-exit pid=$($process.Id) code=$($process.ExitCode)")
-  $script:runLog.Add("daemon-stdout=$($script:daemonStdout.Result.Trim())")
-  $script:runLog.Add("daemon-stderr=$($script:daemonStderr.Result.Trim())")
+  $stdout = Read-ShellOwnedOutput $processScope $process
+  $stderr = Read-ShellOwnedOutput $processScope $process -StandardError
+  $script:runLog.Add("daemon-stdout=$($stdout.Trim())")
+  $script:runLog.Add("daemon-stderr=$($stderr.Trim())")
 }
 
 function Invoke-ZigTest([string] $label, [string] $filter) {
@@ -167,19 +200,21 @@ function Invoke-ZigTest([string] $label, [string] $filter) {
   $env:GRAPHCODE_LOCAL_TEST_SUPPORT = $supportDirectory
   $env:ZIG_LOCAL_CACHE_DIR = $zigLocalCache
   $env:ZIG_GLOBAL_CACHE_DIR = $zigGlobalCache
-  $output = @()
-  $exitCode = 0
-  Push-Location $shellRoot
-  try {
-    $output = @(& $ZigExecutable test src\DaemonRoundTripTests.zig `
-      -target x86_64-windows-msvc -lc -ladvapi32 "-I$WinghosttyInclude" `
-      --cache-dir $zigLocalCache --global-cache-dir $zigGlobalCache `
-      --test-filter $filter 2>&1)
-    $exitCode = $LASTEXITCODE
-  } finally {
-    Pop-Location
+  $testInfo = [Diagnostics.ProcessStartInfo]::new()
+  $testInfo.FileName = $ZigExecutable
+  $testInfo.WorkingDirectory = $shellRoot
+  $testInfo.UseShellExecute = $false
+  foreach ($argument in @(
+      "test", "src\DaemonRoundTripTests.zig",
+      "-target", "x86_64-windows-msvc", "-lc", "-ladvapi32", "-I$WinghosttyInclude",
+      "--cache-dir", $zigLocalCache, "--global-cache-dir", $zigGlobalCache,
+      "--test-filter", $filter)) {
+    [void]$testInfo.ArgumentList.Add($argument)
   }
-  $text = $output -join "`n"
+  $result = Invoke-OwnedLiveCommand -Scope $processScope -StartInfo $testInfo
+  $exitCode = $result.ExitCode
+  $global:LASTEXITCODE = $exitCode
+  $text = @($result.Output, $result.Error) -join "`n"
   [Console]::WriteLine($text)
   $logPath = Join-Path $evidenceDirectory "daemon-roundtrip-$nonce-$label.log"
   [IO.File]::WriteAllText($logPath, "$text`n", [Text.UTF8Encoding]::new($false))
@@ -259,8 +294,25 @@ function Assert-MutatedGraph([object] $graph, [int] $fireCount) {
 }
 
 $defaultSignatureBefore = Get-DefaultSupportSignature
+if (Test-Path -LiteralPath $runRoot) {
+  throw (New-OwnedLiveProcessCleanupError `
+    -Message "Round-trip scratch already exists; ownership is unproven: $runRoot" `
+    -Errors @([InvalidOperationException]::new("Existing scratch was not reused.")) `
+    -RetainedRoots @($runRoot))
+}
+try {
+  $null = New-ValidationFixtureDirectory -Path $runRoot
+} catch {
+  $creationError = $_.Exception
+  if (Test-Path -LiteralPath $runRoot) {
+    throw (New-OwnedLiveProcessCleanupError `
+      -Message "Round-trip scratch appeared during admission; ownership is unproven: $runRoot" `
+      -Errors @($creationError) -RetainedRoots @($runRoot))
+  }
+  throw
+}
 New-Item -ItemType Directory -Force -Path @(
-    $runRoot, $supportDirectory, $sessionDirectory, $projectPath, $spawnProjectPath,
+    $supportDirectory, $sessionDirectory, $projectPath, $spawnProjectPath,
     $evidenceDirectory, $tempDirectory, $zigLocalCache, $zigGlobalCache
   ) | Out-Null
 [IO.File]::WriteAllText($sessionMarkerPath, $sessionMarker, [Text.UTF8Encoding]::new($false))
@@ -277,7 +329,9 @@ $shutdownEvent = [Threading.EventWaitHandle]::new(
   $shutdownEventName
 )
 
+$roundtripError = $null
 try {
+  $processScope = New-ShellProcessScope
   $homePrefix = $defaultSupportDirectory.TrimEnd('\') + '\'
   if ($runRoot.StartsWith($homePrefix, [StringComparison]::OrdinalIgnoreCase)) {
     throw "disposable daemon state unexpectedly resolves under the default support directory"
@@ -354,36 +408,129 @@ try {
     throw "the user's default ~/.graphcode tree changed during the isolated daemon test"
   }
   $runLog.Add("default-support=unchanged")
-  $successful = $true
   $resultPath = Join-Path $evidenceDirectory "daemon-roundtrip-$nonce-summary.txt"
   [IO.File]::WriteAllLines($resultPath, $runLog, [Text.UTF8Encoding]::new($false))
-  Write-Output "REAL_DAEMON_ROUNDTRIP: PASS"
-  Write-Output "Accepted mutations: create node, update and rename node, create edge, edit edge, promote sketch"
-  Write-Output "Restart readback: node identities/configuration and edge id/endpoints/fireCount/transform/spawn/cycle guard"
-  Write-Output "Mutex: present in each live process and absent after each clean shutdown, using production-derived name"
-  Write-Output "State: disposable support directory; default ~/.graphcode tree unchanged"
-  Write-Output "Evidence: $resultPath"
+  $successful = $true
+} catch {
+  $roundtripError = $_.Exception
+  throw
 } finally {
-  if ($daemonProcess -and -not $daemonProcess.HasExited) {
+  $shutdownError = $null
+  $cleanupError = $null
+  $retentionError = $null
+  if ($daemonProcess) {
     try { Stop-OwnedDaemon $daemonProcess } catch {
-      Stop-Process -Id $daemonProcess.Id -Force -ErrorAction SilentlyContinue
+      $shutdownError = $_.Exception
+      try {
+        Stop-OwnedLiveProcess -Process $daemonProcess -Name "round-trip daemon"
+      } catch {
+        $cleanupError = $_.Exception
+        $errors = @()
+        if ($roundtripError) { $errors += $roundtripError }
+        $errors += $shutdownError
+        $errors += $cleanupError
+        $retentionError = New-OwnedLiveProcessCleanupError `
+          -Message "Round-trip daemon cleanup could not be verified; fixture root: $runRoot" `
+          -Errors $errors -RetainedRoots @($runRoot)
+      }
+    }
+    try { $daemonProcess.Dispose() } catch {
+      $disposeError = $_.Exception
+      $errors = @()
+      if ($roundtripError) { $errors += $roundtripError }
+      if ($shutdownError) { $errors += $shutdownError }
+      if ($cleanupError) { $errors += $cleanupError }
+      $errors += $disposeError
+      $retentionError = New-OwnedLiveProcessCleanupError `
+        -Message "Round-trip daemon handle cleanup could not be verified; fixture root: $runRoot" `
+        -Errors $errors -RetainedRoots @($runRoot)
     }
   }
-  if ($daemonProcess) { $daemonProcess.Dispose() }
-  if ($shutdownEvent) { $shutdownEvent.Dispose() }
+  if ($processScope) {
+    try { Close-ShellProcessScope $processScope } catch {
+      $jobError = $_.Exception
+      $errors = @()
+      if ($retentionError) {
+        $errors += $retentionError
+      } elseif ($roundtripError) {
+        $errors += $roundtripError
+      }
+      if ($shutdownError -and -not $retentionError) { $errors += $shutdownError }
+      $errors += $jobError
+      $retentionError = New-OwnedLiveProcessCleanupError `
+        -Message "Round-trip job cleanup could not be verified; fixture root: $runRoot" `
+        -Errors $errors -RetainedRoots @($runRoot)
+    }
+  }
+  $auxiliaryErrors = [Collections.Generic.List[Exception]]::new()
+  if ($shutdownEvent) {
+    try { $shutdownEvent.Dispose() } catch { $auxiliaryErrors.Add($_.Exception) }
+  }
   foreach ($name in @(
       "GRAPHCODE_DAEMON_ROUNDTRIP_PHASE",
       "GRAPHCODE_DAEMON_ROUNDTRIP_PROJECT",
       "GRAPHCODE_DAEMON_ROUNDTRIP_SPAWN_PROJECT",
       "GRAPHCODE_DAEMON_ROUNDTRIP_EDGE_ID",
       "GRAPHCODE_LOCAL_TEST_SUPPORT")) {
-    Remove-Item -LiteralPath "env:$name" -ErrorAction SilentlyContinue
+    $environment = [Environment]::GetEnvironmentVariables(
+      [EnvironmentVariableTarget]::Process)
+    if ($environment.Contains($name)) {
+      try { Remove-Item -LiteralPath "env:$name" -ErrorAction Stop } catch {
+        $auxiliaryErrors.Add($_.Exception)
+      }
+    }
   }
-  if ($successful) {
-    Remove-Item -LiteralPath $runRoot -Recurse -Force
-  } else {
-    $failurePath = Join-Path $evidenceDirectory "daemon-roundtrip-$nonce-failure.txt"
-    [IO.File]::WriteAllLines($failurePath, $runLog, [Text.UTF8Encoding]::new($false))
-    Write-Output "Failure artifacts retained at $runRoot and $failurePath"
+  $artifactError = $null
+  try {
+    if ($successful -and -not $roundtripError -and -not $shutdownError -and -not $retentionError -and
+        $auxiliaryErrors.Count -eq 0) {
+      Remove-Item -LiteralPath $runRoot -Recurse -Force
+    } else {
+      $failurePath = Join-Path $evidenceDirectory "daemon-roundtrip-$nonce-failure.txt"
+      [IO.File]::WriteAllLines($failurePath, $runLog, [Text.UTF8Encoding]::new($false))
+      Write-Output "Failure artifacts written at $runRoot and $failurePath; enclosing isolation may remove them"
+    }
+  } catch {
+    $artifactError = $_.Exception
+  }
+  if ($artifactError -or $auxiliaryErrors.Count -gt 0) {
+    $errors = @()
+    if ($retentionError) {
+      $errors += $retentionError
+    } elseif ($roundtripError) {
+      $errors += $roundtripError
+    }
+    if ($shutdownError -and -not $retentionError) { $errors += $shutdownError }
+    foreach ($error in $auxiliaryErrors) { $errors += $error }
+    if ($artifactError) { $errors += $artifactError }
+    $combined = [AggregateException]::new(
+      "Round-trip failure reporting or fixture cleanup failed.", [Exception[]]$errors)
+    if (Test-OwnedLiveProcessRetentionRequired $combined) {
+      $combined.Data["GraphCodeValidationRootRetentionRequired"] = $true
+      $combined.Data["GraphCodeValidationRetainedRoots"] = [string[]]@(
+        Get-OwnedLiveProcessRetainedRoots -Errors $errors -RetainedRoots @($runRoot))
+    }
+    throw $combined
+  }
+  if ($retentionError) { throw $retentionError }
+  if ($shutdownError) {
+    $errors = @()
+    if ($roundtripError) { $errors += $roundtripError }
+    $errors += $shutdownError
+    $combined = [AggregateException]::new(
+      "Round-trip daemon required forced cleanup after shutdown failed.",
+      [Exception[]]$errors)
+    if (Test-OwnedLiveProcessRetentionRequired $combined) {
+      $combined.Data["GraphCodeValidationRootRetentionRequired"] = $true
+      $combined.Data["GraphCodeValidationRetainedRoots"] = [string[]]@(
+        Get-OwnedLiveProcessRetainedRoots -Errors $errors -RetainedRoots @($runRoot))
+    }
+    throw $combined
   }
 }
+Write-Output "REAL_DAEMON_ROUNDTRIP: PASS"
+Write-Output "Accepted mutations: create node, update and rename node, create edge, edit edge, promote sketch"
+Write-Output "Restart readback: node identities/configuration and edge id/endpoints/fireCount/transform/spawn/cycle guard"
+Write-Output "Mutex: present in each live process and absent after each clean shutdown, using production-derived name"
+Write-Output "State: disposable support directory; default ~/.graphcode tree unchanged"
+Write-Output "Evidence: $resultPath"
