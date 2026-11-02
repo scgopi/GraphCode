@@ -26,7 +26,12 @@ public static class SuiteRegistration
         new Adapters.StandaloneSuites.CaseScriptSuite("ownership.pre-uia", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\PreUiaIsolation.Contracts.ps1",
             "OWNERSHIP_CASE_RESULT=", ["ownership.legacy.pre-uia-isolation"]),
         new Adapters.StandaloneSuites.CaseScriptSuite("ownership.retention", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\RetentionBoundary.Contracts.ps1",
-            "OWNERSHIP_CASE_RESULT=", ["ownership.legacy.retention-boundary"])
+            "OWNERSHIP_CASE_RESULT=", ["ownership.legacy.retention-boundary"]),
+        new Adapters.StandaloneSuites.CaseScriptSuite("ownership.startup", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\StartupDiagnostics.Contracts.ps1",
+            "OWNERSHIP_CASE_RESULT=", ["ownership.ui-startup.helpers", "ownership.ui-startup.redacted-log", "ownership.ui-startup.truncated-log",
+                "ownership.ui-startup.missing-log", "ownership.ui-startup.retained-report", "ownership.ui-process-tree.pid-reuse"]),
+        new Adapters.StandaloneSuites.CaseScriptSuite("ownership.mixed-source", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\MixedSource.Contracts.ps1",
+            "OWNERSHIP_CASE_RESULT=", ["ownership.legacy.peer-emission", "ownership.legacy.rename-submit", "ownership.legacy.fresh-capture"])
     ];
 }
 
@@ -44,6 +49,7 @@ public sealed class OwnershipSuite : IValidationSuite
         "proof-success", "proof-root-survivor", "proof-job-survivor", "proof-stdout-fault", "proof-stderr-fault",
         "cleanup-success", "cleanup-root-survivor", "cleanup-job-survivor", "cleanup-stdout-fault",
         "cleanup-both-stream-faults", "cleanup-primary-error", "cleanup-only-error", "cleanup-original-deadline", "cleanup-later-actions",
+        "cleanup-descendant-unknown", "signal-fragmented", "signal-crlf", "signal-eof", "signal-exact-only", "signal-overlong",
         "json-malformed", "json-duplicate", "json-nested-duplicate", "json-array", "json-case-sensitive",
         "frame-fragmented-unicode", "frame-clean-eof", "frame-short-header", "frame-short-body", "frame-zero", "frame-over-limit", "frame-invalid-utf8",
         "peer-positive-rename", "peer-resume-unchanged", "peer-foreign-owner", "peer-foreign-node",
@@ -57,19 +63,10 @@ public sealed class OwnershipSuite : IValidationSuite
     private static readonly (string Id, string Evidence)[] unported =
     [
         ("legacy.mixed-multiproject", "Complete mixed source 1672-4245 remains mandatory: UI predicates, native/fresh snapshot policies, receipts, strict protocol, owned real pipes, eight bounded-capture and primary/cleanup negative controls. Source invocation inventories are not executed counts."),
-        ("legacy.peer-emission", "Assert-MultiProjectPeerEmissionContract source 4247-4265 requires actual PS AST source correspondence."),
-        ("legacy.rename-submit", "Assert-MultiProjectRenameSubmitContract source 4266-4289 requires actual caller/production Zig route correspondence."),
-        ("legacy.fresh-capture", "Assert-MultiProjectFreshCaptureContract source 4290-4315 requires actual ownership/cache/observer correspondence."),
         ("legacy.packaging-shared-linkage", "Packaging.Standalone.Tests.ps1 must load this complete StandaloneProcessJob implementation, not its embedded duplicate."),
         ("legacy.uia-shared-linkage", "uia-live-gate.ps1 must load these complete UiaOwnedStreamCapture/StandaloneProcessJob implementations, including actual native membership."),
-        ("ui-startup.helpers", "Source 5838 requires thirteen complete actual production startup helpers; helper presence is not runtime behavior."),
-        ("ui-startup.redacted-log", "Source 5845: bounded actual startup file diagnostic must preserve loader output and redact the canary."),
-        ("ui-startup.truncated-log", "Source 5853: actual startup diagnostic must read exactly eight bytes and mark truncation."),
-        ("ui-startup.missing-log", "Source 5859: actual startup diagnostic must distinguish missing from empty output."),
-        ("ui-startup.retained-report", "Source 5882: actual retained startup JSON must preserve independent stdout/stderr/app logs and redact canaries."),
         ("ui-process-tree.controlled-child", "Source 5945: actual gate registered held process/job must expose its controlled descendant."),
-        ("ui-process-tree.cleanup-complete", "Source 5947: actual gate Stop-UiaOwnedProcessTrees must finish retained root/job/readers before cleanup succeeds."),
-        ("ui-process-tree.pid-reuse", "Source 5970: actual advisory descendant traversal must reject older generations and never supply termination authority.")
+        ("ui-process-tree.cleanup-complete", "Source 5947: actual gate Stop-UiaOwnedProcessTrees must finish retained root/job/readers before cleanup succeeds.")
     ];
 
     public string Id => "ownership";
@@ -258,6 +255,7 @@ public sealed class OwnershipSuite : IValidationSuite
                 CloseFails = id is "cleanup-only-error" or "cleanup-later-actions",
                 ConsumeDeadline = id == "cleanup-original-deadline"
             };
+            authority.OwnershipUnproven = id == "cleanup-descendant-unknown";
             if (id is "cleanup-stdout-fault" or "cleanup-both-stream-faults")
                 authority.StandardOutput = Task.FromException<string>(new IOException("original stdout"));
             if (id == "cleanup-both-stream-faults")
@@ -284,7 +282,8 @@ public sealed class OwnershipSuite : IValidationSuite
                     Require(failure.InnerExceptions.Count == 2 && failure.InnerExceptions.All(e => e.InnerException is IOException),
                         "A failed stdout hid the independent stderr failure.");
             }
-            Require(authority.Terminations == 1 && authority.JobWaits == 1 && authority.RootWaits == 1 &&
+            int expectedProofCalls = id == "cleanup-descendant-unknown" ? 0 : 1;
+            Require(authority.Terminations == expectedProofCalls && authority.JobWaits == expectedProofCalls && authority.RootWaits == expectedProofCalls &&
                 ReferenceEquals(authority.JobDeadline, authority.RootDeadline), "Cleanup skipped a proof or refreshed its deadline.");
             bool closable = id is "cleanup-success" or "cleanup-only-error" or "cleanup-later-actions";
             Require(authority.Closes == (closable ? 2 : 0), "UNKNOWN allowed close or a close error skipped a later action.");
@@ -292,6 +291,26 @@ public sealed class OwnershipSuite : IValidationSuite
                 authority.Retained == (id != "cleanup-success"), "Cleanup resource/retention disposition changed.");
             if (id == "cleanup-original-deadline")
                 Require(authority.RootRemainingMilliseconds < 50, "Root wait received a refreshed deadline after job wait.");
+            return;
+        }
+        if (id.StartsWith("signal-", StringComparison.Ordinal))
+        {
+            int observations = 0;
+            var observer = new RetentionSignalObserver(() => observations++);
+            string marker = OwnershipRetention.Sentinel;
+            switch (id)
+            {
+                case "signal-fragmented":
+                    foreach (char character in marker + "\n") observer.OnText(character.ToString());
+                    observer.OnText(marker + "\n");
+                    break;
+                case "signal-crlf": observer.OnText(marker + "\r\n"); break;
+                case "signal-eof": observer.OnText(marker); observer.OnEof(); break;
+                case "signal-exact-only": observer.OnText("prefix " + marker + "\n" + marker + " suffix\n"); break;
+                case "signal-overlong": observer.OnText(new string('x', 100000) + marker + "\n"); break;
+            }
+            Require(observations == (id is "signal-exact-only" or "signal-overlong" ? 0 : 1),
+                "Live UNKNOWN observer missed split/EOF signal or treated substring/overlong output as authority.");
             return;
         }
         if (id.StartsWith("json-", StringComparison.Ordinal))
@@ -580,6 +599,7 @@ public sealed class OwnershipSuite : IValidationSuite
     private sealed class FakeCleanupAuthority : IOwnedCleanupAuthority
     {
         public string Identity => "controlled-fake-held-authority; nativeCalls=0";
+        public bool OwnershipUnproven { get; set; }
         public Task<string>? StandardOutput { get; set; } = Task.FromResult("stdout");
         public Task<string>? StandardError { get; set; } = Task.FromResult("stderr");
         public bool RootExited = true, JobEmpty = true, CloseFails, ConsumeDeadline, Retained;

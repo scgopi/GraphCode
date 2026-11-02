@@ -72,6 +72,9 @@ public sealed class OwnedChildSupervisor
     private static readonly Task lifetimeHold = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously).Task;
     private readonly Deadline deadline;
     private readonly string artifactRoot;
+    private readonly object retentionGate = new();
+    private readonly CancellationTokenSource retentionCancellation = new();
+    private bool descendantUnknown, retentionRegistered;
     private IntPtr root, thread, job;
     private bool assigned, resumed, completed;
     private StreamReader? stdoutReader, stderrReader;
@@ -87,6 +90,27 @@ public sealed class OwnedChildSupervisor
     // The host must await this in its outermost finally, including reporting failures.
     // Returning from Main would close kill-on-close jobs despite the retained references.
     public static Task HoldRetainedResourcesAsync() => RequiresLifetimeHold ? lifetimeHold : Task.CompletedTask;
+
+    private void ObserveDescendantUnknown()
+    {
+        lock (retentionGate)
+        {
+            if (descendantUnknown) return;
+            descendantUnknown = true;
+            RegisterRetention();
+            retentionCancellation.Cancel();
+        }
+    }
+
+    private void RegisterRetention()
+    {
+        lock (retentionGate)
+        {
+            if (retentionRegistered) return;
+            retained.Add(this);
+            retentionRegistered = true;
+        }
+    }
 
     public OwnedChildObservation Observe() => new(RootExited(), StandaloneProcessJob.Active(job),
         StandardOutput.IsCompleted, StandardError.IsCompleted);
@@ -185,8 +209,10 @@ public sealed class OwnedChildSupervisor
             stdoutReader = MakeReader(ref outRead, info.StandardOutputEncoding);
             stderrReader = MakeReader(ref errRead, info.StandardErrorEncoding);
             string stem = $"owned-{ProcessId}-{creationFileTime}";
-            stdout = UiaOwnedStreamCapture.Read(stdoutReader, Path.Combine(artifactRoot, stem + "-stdout.log"));
-            stderr = UiaOwnedStreamCapture.Read(stderrReader, Path.Combine(artifactRoot, stem + "-stderr.log"));
+            stdout = UiaOwnedStreamCapture.Read(stdoutReader, Path.Combine(artifactRoot, stem + "-stdout.log"),
+                new RetentionSignalObserver(ObserveDescendantUnknown));
+            stderr = UiaOwnedStreamCapture.Read(stderrReader, Path.Combine(artifactRoot, stem + "-stderr.log"),
+                new RetentionSignalObserver(ObserveDescendantUnknown));
             if (deadline.Expired) throw new TimeoutException("Owned launch original deadline exceeded before resume.");
             uint previous = ResumeThread(thread);
             if (previous == uint.MaxValue) throw new Win32Exception();
@@ -263,15 +289,17 @@ public sealed class OwnedChildSupervisor
         Exception? primary = null;
         int exitCode = -1;
         string output = "", error = "";
+        using var waiting = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, retentionCancellation.Token);
         try
         {
             while (!RootExited())
             {
-                cancellationToken.ThrowIfCancellationRequested();
+                waiting.Token.ThrowIfCancellationRequested();
                 if (deadline.Expired) throw new TimeoutException("OWNED_CAPTURE_EXIT: original deadline exceeded.");
-                await Task.Delay(Math.Min(10, deadline.RemainingMilliseconds), cancellationToken).ConfigureAwait(false);
+                await Task.Delay(Math.Min(10, deadline.RemainingMilliseconds), waiting.Token).ConfigureAwait(false);
             }
-            await RequireDrainAsync([StandardOutput, StandardError], deadline, cancellationToken).ConfigureAwait(false);
+            await RequireDrainAsync([StandardOutput, StandardError], deadline, waiting.Token).ConfigureAwait(false);
+            waiting.Token.ThrowIfCancellationRequested();
             if (!GetExitCodeProcess(root, out uint code)) throw new Win32Exception();
             exitCode = unchecked((int)code);
             output = await StandardOutput.ConfigureAwait(false);
@@ -312,38 +340,58 @@ public sealed class OwnedChildSupervisor
     private sealed class NativeCleanupAuthority(OwnedChildSupervisor owner) : IOwnedCleanupAuthority
     {
         public string Identity => $"pid={owner.ProcessId}; creation={owner.creationFileTime}; job={owner.job}";
+        public bool OwnershipUnproven { get { lock (owner.retentionGate) return owner.descendantUnknown; } }
         public Task<string>? StandardOutput => owner.stdout;
         public Task<string>? StandardError => owner.stderr;
         public IReadOnlyList<Action> CloseActions =>
         [
-            () => owner.stdoutReader?.Dispose(), () => owner.stderrReader?.Dispose(),
-            () => Close(ref owner.thread),
-            () => { if (owner.job != IntPtr.Zero) { StandaloneProcessJob.Close(owner.job); owner.job = IntPtr.Zero; } },
-            () => Close(ref owner.root)
+            () => CloseOwned(() => owner.stdoutReader?.Dispose()), () => CloseOwned(() => owner.stderrReader?.Dispose()),
+            () => CloseOwned(() => Close(ref owner.thread)),
+            () => CloseOwned(() => { if (owner.job != IntPtr.Zero) { StandaloneProcessJob.Close(owner.job); owner.job = IntPtr.Zero; } }),
+            () => CloseOwned(() => Close(ref owner.root)), () => CloseOwned(owner.retentionCancellation.Dispose)
         ];
 
         public void Terminate()
         {
-            if (owner.assigned) StandaloneProcessJob.Terminate(owner.job);
-            else if (owner.root != IntPtr.Zero)
+            lock (owner.retentionGate)
             {
-                if (owner.resumed) throw new InvalidOperationException("Unassigned root was unexpectedly resumed.");
-                if (WaitForSingleObject(owner.root, 0) != 0 && !TerminateProcess(owner.root, 124))
-                    throw new Win32Exception();
+                if (owner.descendantUnknown) throw new InvalidOperationException("UNKNOWN descendant ownership; termination withheld.");
+                if (owner.assigned) StandaloneProcessJob.Terminate(owner.job);
+                else if (owner.root != IntPtr.Zero)
+                {
+                    if (owner.resumed) throw new InvalidOperationException("Unassigned root was unexpectedly resumed.");
+                    if (WaitForSingleObject(owner.root, 0) != 0 && !TerminateProcess(owner.root, 124))
+                        throw new Win32Exception();
+                }
             }
         }
 
-        public Task<bool> WaitForJobEmptyAsync(Deadline deadline)
+        private void CloseOwned(Action action)
         {
-            if (owner.job == IntPtr.Zero) return Task.FromResult(true);
-            StandaloneProcessJob.WaitForEmpty(owner.job, deadline);
-            return Task.FromResult(StandaloneProcessJob.Active(owner.job) == 0);
+            lock (owner.retentionGate)
+            {
+                if (owner.descendantUnknown) throw new InvalidOperationException("UNKNOWN descendant ownership; close withheld.");
+                action();
+            }
+        }
+
+        public async Task<bool> WaitForJobEmptyAsync(Deadline deadline)
+        {
+            if (owner.job == IntPtr.Zero) return true;
+            while (StandaloneProcessJob.Active(owner.job) != 0)
+            {
+                if (OwnershipUnproven) throw new InvalidOperationException("UNKNOWN descendant ownership; job wait withheld.");
+                if (deadline.Expired) throw new TimeoutException("Owned job still has active processes.");
+                await Task.Delay(Math.Min(10, deadline.RemainingMilliseconds)).ConfigureAwait(false);
+            }
+            return true;
         }
 
         public async Task<bool> WaitForRootExitAsync(Deadline deadline)
         {
             while (owner.root != IntPtr.Zero && !owner.RootExited())
             {
+                if (OwnershipUnproven) throw new InvalidOperationException("UNKNOWN descendant ownership; root wait withheld.");
                 if (deadline.Expired) throw new TimeoutException("Held root exit unproved.");
                 await Task.Delay(Math.Min(10, deadline.RemainingMilliseconds)).ConfigureAwait(false);
             }
@@ -352,7 +400,7 @@ public sealed class OwnedChildSupervisor
 
         public void Retain(Exception failure)
         {
-            retained.Add(owner);
+            owner.RegisterRetention();
             OwnershipRetention.Tag(failure, owner.artifactRoot);
             failure.Data["OwnedRetainedLease"] = owner;
         }

@@ -6,7 +6,8 @@ param(
 )
 
 . (Join-Path $PSScriptRoot 'AdapterSupport.ps1')
-[Reflection.Assembly]::LoadFrom($AssemblyPath) | Out-Null
+$script:OwnershipMockSignals = $true
+Import-OwnershipBindings $RepositoryRoot $AssemblyPath
 $consumer = Read-OwnershipProductionAst (Join-Path $RepositoryRoot 'Tools\windows\validate.ps1')
 . Import-OwnershipProductionFunctions $consumer @('Invoke-Native', 'Get-WindowsShellProfileSnapshot',
     'Assert-WindowsShellProfileUnchanged', 'Invoke-WindowsShellValidationIsolation')

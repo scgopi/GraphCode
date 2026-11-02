@@ -6,7 +6,8 @@ param(
 )
 
 . (Join-Path $PSScriptRoot 'AdapterSupport.ps1')
-[Reflection.Assembly]::LoadFrom($AssemblyPath) | Out-Null
+$script:OwnershipMockSignals = $true
+Import-OwnershipBindings $RepositoryRoot $AssemblyPath
 $source = [IO.File]::ReadAllText((Join-Path $RepositoryRoot 'Tools\windows\validate.ps1'))
 $region = [regex]::Match($source,
     '(?s)      \$preUiaProcesses =.*?(?=      Invoke-Native "Native UI Automation live gate")')

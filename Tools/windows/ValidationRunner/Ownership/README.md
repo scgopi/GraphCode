@@ -23,6 +23,13 @@ without prematurely flushing an encoder containing half a surrogate pair.
 The host must await `HoldRetainedResourcesAsync()` in its outermost `finally`.
 Retained references alone do not suffice: process exit closes a kill-on-close
 job even if the garbage collector never finalized anything.
+Both independent readers watch the exact retention sentinel incrementally,
+including split chunks, CRLF and terminal EOF. A live signal immediately roots
+the original lease and cancels only the controller's wait, never the readers.
+The cleanup coordinator refuses termination, proof waits and close on that
+latch; native kill/close boundaries also recheck it under the same lock.
+The host can therefore enter its terminal retention hold without waiting for
+the workload timeout to kill the very resources it is required to preserve.
 
 `OwnedFixture.TryRunAsync(args)` must run before ordinary host argument parsing.
 It recognizes only `--ownership-fixture`. The compiled fixture tests native
@@ -38,7 +45,7 @@ and root-runner SHA-256
 `202D260A846670E314163F9D2565D07B1E0AD27A4D61F41EA99D67624FF6C869`.
 The old runner is never executed, embedded or extracted for execution.
 
-The 68 managed and seven controlled-native cases are individually registered
+The 74 managed and seven controlled-native cases are individually registered
 with exact-count manifest guards. The typed peer implements the complete
 request/response/publication/control core from `Stub-Daemon.ps1:29-294`; it is
 the implementation used by the compiled real-pipe fixture, not a passing fake.
@@ -52,11 +59,19 @@ transport is the host's authoritative held-job supervisor. Scope, ScriptMethod,
 ErrorRecord identity, information streams and missing-versus-empty environment
 membership remain PowerShell assertions.
 
-The full mixed family, three mixed source-boundary assertions, two production
-linkage obligations and eight newly reconciled startup/tree root obligations
-remain separately mandatory. Their `Incomplete` results cannot be replaced by
-the compiled helper tests. `source-correspondence.json` records every one of
+The full mixed family, two production linkage obligations and two actual
+gate-owned controlled-tree obligations remain separately mandatory and
+`Incomplete`; they cannot be replaced by compiled helper tests.
+`source-correspondence.json` records every one of
 the immutable mixed source's 126 invocation templates and 192 assertion
 commands, with stable source IDs and zero claimed execution. Those source
 occurrences are not runtime counts. The mixed eight-mode capture/cleanup
 negative controls remain required.
+
+The three mixed source-boundary assertions now have actual protected
+PowerShell source checks. Six newly reconciled startup/tree units also run:
+thirteen complete helper-presence checks (source evidence), three bounded file
+diagnostic cases, one retained report case, and the advisory PID-reuse
+negative control. These eighteen checks are not a native product startup
+walkthrough. The two actual gate-owned controlled-tree obligations remain
+mandatory until their linked-production integration runs.

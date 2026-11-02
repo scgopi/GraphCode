@@ -1,6 +1,12 @@
 $ErrorActionPreference = 'Stop'
 $script:OwnershipCases = [Collections.Generic.List[object]]::new()
 
+function Import-OwnershipBindings([string] $RepositoryRoot, [string] $AssemblyPath,
+    [string] $RequiredType = 'GraphCode.Validation.Ownership.StandaloneProcessJob') {
+    & (Join-Path $RepositoryRoot 'Tools\windows\Import-CompiledValidationAssembly.ps1') `
+        -AssemblyPath $AssemblyPath -RequiredType $RequiredType | Out-Null
+}
+
 function Read-OwnershipProductionAst([string] $Path) {
     $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$errors)
@@ -29,10 +35,16 @@ function Invoke-OwnershipCase([string] $Id, [scriptblock] $Body) {
     if (@($script:OwnershipCases | Where-Object Id -CEQ $Id).Count -ne 0) { throw "Duplicate ownership case: $Id" }
     try {
         & $Body 6>&1 | ForEach-Object {
-            if ([string]$_ -cne 'GRAPHCODE_VALIDATION_ROOT_RETENTION_REQUIRED=ownership_unproven') { $_ }
+            if ([string]$_ -cne 'GRAPHCODE_VALIDATION_ROOT_RETENTION_REQUIRED=ownership_unproven' -or
+                -not $script:OwnershipMockSignals) { $_ }
         } | Out-Null
         $script:OwnershipCases.Add([ordered]@{ Id = $Id; Passed = $true; Failure = $null })
     } catch {
+        if (-not $script:OwnershipMockSignals -and $_.Exception.Data['GraphCodeValidationRootRetentionRequired'] -eq $true) {
+            [Console]::Out.WriteLine('GRAPHCODE_VALIDATION_ROOT_RETENTION_REQUIRED=ownership_unproven')
+            [Console]::Out.Flush()
+            [Threading.Thread]::Sleep([Threading.Timeout]::Infinite)
+        }
         $script:OwnershipCases.Add([ordered]@{ Id = $Id; Passed = $false; Failure = $_.ToString() })
     }
 }

@@ -8,6 +8,7 @@ namespace GraphCode.Validation.Ownership;
 public interface IOwnedCleanupAuthority
 {
     string Identity { get; }
+    bool OwnershipUnproven { get; }
     Task<string>? StandardOutput { get; }
     Task<string>? StandardError { get; }
     void Terminate();
@@ -24,9 +25,27 @@ public static class OwnedCleanupCoordinator
     {
         var deadline = new Deadline(timeout);
         var failures = new List<Exception>();
+        if (authority.OwnershipUnproven)
+        {
+            var unknownProof = new OwnedCleanupProof(false, false,
+                authority.StandardOutput?.IsCompletedSuccessfully ?? true,
+                authority.StandardError?.IsCompletedSuccessfully ?? true, false);
+            foreach (Task<string>? reader in new[] { authority.StandardOutput, authority.StandardError })
+                if (reader?.IsFaulted == true) failures.Add(reader.Exception!);
+            var unknown = new AggregateException("OWNED_CLEANUP_UNPROVEN: live descendant retention signal; termination and close withheld.", failures);
+            Exception reported = primary ?? unknown;
+            reported.Data["OwnedCleanupProof"] = unknownProof;
+            reported.Data["OwnedCleanupFailure"] = unknown;
+            authority.Retain(reported);
+            if (primary == null) throw unknown;
+            return unknownProof;
+        }
         bool rootExited = false, jobEmpty = false;
         bool outEof = authority.StandardOutput == null, errEof = authority.StandardError == null;
-        try { authority.Terminate(); }
+        try
+        {
+            authority.Terminate();
+        }
         catch (Exception failure) { failures.Add(failure); }
         try
         {
@@ -55,7 +74,7 @@ public static class OwnedCleanupCoordinator
             catch (Exception failure) { failures.Add(new IOException(stream.Name + " EOF unproved.", failure)); }
         }
         bool closed = false;
-        if (new OwnedCleanupProof(rootExited, jobEmpty, outEof, errEof, false).CanRelease)
+        if (!authority.OwnershipUnproven && new OwnedCleanupProof(rootExited, jobEmpty, outEof, errEof, false).CanRelease)
         {
             closed = true;
             foreach (Action close in authority.CloseActions)

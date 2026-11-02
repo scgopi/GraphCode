@@ -6,7 +6,8 @@ param(
 )
 
 . (Join-Path $PSScriptRoot 'AdapterSupport.ps1')
-[Reflection.Assembly]::LoadFrom($AssemblyPath) | Out-Null
+$script:OwnershipMockSignals = $true
+Import-OwnershipBindings $RepositoryRoot $AssemblyPath
 Import-Module (Join-Path $RepositoryRoot 'Tools\windows\ShellProcessOwnership.psm1') -Force -ErrorAction Stop
 $gatePath = Join-Path $RepositoryRoot 'Tools\windows\uia-live-gate.ps1'
 $gate = Read-OwnershipProductionAst $gatePath
