@@ -145,7 +145,7 @@ try {
     }
   }
 '@
-Assert-Delete ($statement.Extent.Text.Replace("`r`n", "`n") -ceq $expectedWrapper) 'Unsafe production Select wrapper'
+Assert-Delete ($statement.Extent.Text.Replace("`r`n", "`n") -ceq $expectedWrapper.Replace("`r`n", "`n")) 'Unsafe production Select wrapper'
 $invokeSelect = [scriptblock]::Create($statement.Extent.Text)
 function Assert-MockBindings($Target, $Selection, [hashtable] $State) {
   foreach ($value in @($Target, $Selection)) {
