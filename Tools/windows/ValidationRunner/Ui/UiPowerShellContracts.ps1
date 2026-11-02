@@ -9,26 +9,6 @@ $OutputEncoding = [Text.UTF8Encoding]::new($false)
 $null = [IO.Directory]::CreateDirectory($ArtifactRoot)
 & (Join-Path $RepositoryRoot 'Tools\windows\Import-CompiledValidationAssembly.ps1') `
   -AssemblyPath $AssemblyPath -RequiredType 'GraphCodeUiaGateState' | Out-Null
-$frameworkAssemblies = @{}
-foreach ($name in @('WindowsBase', 'UIAutomationTypes', 'UIAutomationClient')) {
-  $path = Join-Path $PSHOME "$name.dll"
-  $identity = [Reflection.AssemblyName]::GetAssemblyName($path)
-  if ($identity.Version.Major -ne [Environment]::Version.Major) {
-    throw "UIA runtime dependency $path does not match PowerShell CLR $([Environment]::Version); reference-pack assemblies are not supported"
-  }
-  $assembly = [Reflection.Assembly]::LoadFrom($path)
-  if ($assembly.GetName().Version.Major -ne [Environment]::Version.Major -or
-      @($assembly.GetCustomAttributesData() | Where-Object {
-        $_.AttributeType.FullName -ceq 'System.Runtime.CompilerServices.ReferenceAssemblyAttribute'
-      }).Count -ne 0) {
-    throw "UIA dependency is not a compatible runtime assembly: $path"
-  }
-  $frameworkAssemblies[$name] = $assembly
-}
-if ([System.Windows.Automation.ControlType].Assembly -ne $frameworkAssemblies.UIAutomationTypes -or
-    [System.Windows.Automation.InvokePattern].Assembly -ne $frameworkAssemblies.UIAutomationClient) {
-  throw 'UIA fixture types do not belong to the explicitly selected PowerShell runtime assemblies'
-}
 $source = [IO.File]::ReadAllText((Join-Path $RepositoryRoot 'Tools\windows\uia-live-gate.ps1'))
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$null, [ref]$errors)

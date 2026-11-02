@@ -111,4 +111,27 @@ try {
     }
   } finally { $pe.Dispose() }
 } finally { $file.Dispose() }
+if ($RequiredType -cin @("GraphCodeUiaGateState", "GraphCodeUiaAttribution")) {
+  $uiFrameworkAssemblies = @{}
+  foreach ($runtimeName in @("WindowsBase", "UIAutomationTypes", "UIAutomationClient")) {
+    $runtimePath = Join-Path $PSHOME "$runtimeName.dll"
+    $runtimeIdentity = [Reflection.AssemblyName]::GetAssemblyName($runtimePath)
+    if ($runtimeIdentity.Version.Major -ne [Environment]::Version.Major) {
+      throw "UIA runtime dependency $runtimePath does not match PowerShell CLR $([Environment]::Version); reference-pack assemblies are not supported"
+    }
+    $runtimeAssembly = [Reflection.Assembly]::LoadFrom($runtimePath)
+    if ($runtimeAssembly.GetName().Version.Major -ne [Environment]::Version.Major -or
+        @($runtimeAssembly.GetCustomAttributesData() | Where-Object {
+          $_.AttributeType.FullName -ceq "System.Runtime.CompilerServices.ReferenceAssemblyAttribute"
+        }).Count -ne 0) {
+      throw "UIA dependency is not a compatible runtime assembly: $runtimePath"
+    }
+    $uiFrameworkAssemblies[$runtimeName] = $runtimeAssembly
+  }
+  if ([System.Windows.Rect].Assembly -ne $uiFrameworkAssemblies.WindowsBase -or
+      [System.Windows.Automation.ControlType].Assembly -ne $uiFrameworkAssemblies.UIAutomationTypes -or
+      [System.Windows.Automation.InvokePattern].Assembly -ne $uiFrameworkAssemblies.UIAutomationClient) {
+    throw "UIA types do not belong to the explicitly selected PowerShell runtime assemblies"
+  }
+}
 Write-Output $assembly
