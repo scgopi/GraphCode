@@ -21,7 +21,7 @@ env:
 # on every Windows-relevant pull request: windows-shell and packaging run in
 # windows-shell.yml (required check `windows-shell`), and hardening runs in
 # windows-hardening.yml (required `Deterministic hardening (...)` checks). The
-# remaining tasks and the source-only runner contract are split across three
+# remaining tasks and the compiled runner contract are split across three
 # parallel parts behind the required
 # `windows-spikes` aggregate job.
 jobs:
@@ -59,8 +59,8 @@ jobs:
         shell: pwsh
         run: ./Tools/windows/validate.ps1 -Task privacy
 
-  # ValidationRunner.Tests.ps1 is source-only but deliberately uses the real
-  # pinned Swift formatter for its negative control. Run it once on Windows
+  # The compiled contract host uses the real pinned Swift formatter for its
+  # negative control. Run the full host once on Windows
   # 2022 in parallel instead of repeating it inside spikes-swift and both
   # deterministic hardening legs. Windows 2025 remains covered by hardening.
   validation-runner:
@@ -68,7 +68,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.windows == 'true') }}
     runs-on: windows-2022
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -82,10 +82,68 @@ jobs:
           swift-build: 6.3.3-RELEASE
           cache: true
 
-      - name: Verify validation runner contract
+      - name: Install pinned compiled validation SDK
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        timeout-minutes: 10
+        with:
+          dotnet-version: 10.0.403
+
+      - name: Build compiled validation runner
+        shell: pwsh
+        working-directory: Tools/windows/ValidationRunner
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = dotnet --version
+          if ($LASTEXITCODE -ne 0 -or $version -cne '10.0.403') {
+            throw 'Compiled validation requires SDK 10.0.403 selected by global.json.'
+          }
+          dotnet build -c Release
+          if ($LASTEXITCODE -ne 0) { throw "Compiled validation build failed: exit=$LASTEXITCODE" }
+
+      - name: Verify complete compiled validation runner contract
         shell: pwsh
         timeout-minutes: 15
-        run: ./Tools/windows/Invoke-ValidationRunnerContract.ps1
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path -LiteralPath .ci-validation-runner\coverage.json) {
+            throw 'Compiled validation requires a fresh coverage report; prior evidence was retained.'
+          }
+          $output = [Collections.Generic.List[string]]::new()
+          $exitCode = $null
+          & {
+            .\Tools\windows\ValidationRunner\bin\Release\net10.0-windows\ValidationRunner.exe --repository-root $PWD --artifact-root .ci-validation-runner
+            $script:exitCode = $LASTEXITCODE
+          } 2>&1 | ForEach-Object {
+            $line = "$_"
+            $output.Add($line)
+            Write-Host $line
+          }
+          if ($exitCode -ne 0) { throw "Compiled validation failed: exit=$exitCode" }
+          $report = Get-Content -LiteralPath .ci-validation-runner\coverage.json -Raw | ConvertFrom-Json
+          if ($report.runner -cne 'CompiledValidationRunner' -or
+              $report.complete -isnot [bool] -or -not $report.complete -or
+              -not ($report.requiredCount -is [int] -or $report.requiredCount -is [long]) -or
+              -not ($report.passedCount -is [int] -or $report.passedCount -is [long]) -or
+              $report.requiredCount -le 0 -or $report.passedCount -ne $report.requiredCount -or
+              @($report.units).Count -ne $report.requiredCount -or @($report.errors).Count -ne 0) {
+            throw 'Compiled validation did not report complete positive full coverage.'
+          }
+          $passMarkers = @($output | Where-Object { $_ -ceq 'CompiledValidationRunner: PASS' }).Count
+          $executedMarkers = @($output | Where-Object { $_ -ceq 'VALIDATION_RUNNER_EXECUTED=1' }).Count
+          if ($passMarkers -ne 1 -or $executedMarkers -ne 1) {
+            throw 'Compiled validation must report exactly one full PASS and one positive execution marker.'
+          }
+
+      - name: Retain compiled validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        timeout-minutes: 5
+        with:
+          name: compiled-validation-runner-${{ github.run_attempt }}
+          path: .ci-validation-runner
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Resolve capture contract failure diagnostics root
         id: capture_temp

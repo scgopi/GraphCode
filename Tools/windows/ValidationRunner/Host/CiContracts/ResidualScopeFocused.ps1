@@ -5,6 +5,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $null = [Reflection.Assembly]::LoadFrom($AssemblyPath)
+$null = [Reflection.Assembly]::LoadFrom((Join-Path (Split-Path $AssemblyPath -Parent) 'WindowsValidationBindings.dll'))
 $exitCode = 1
 try {
   $context = [GraphCode.Validation.ValidationContext]::new($RepositoryRoot, $ArtifactRoot)

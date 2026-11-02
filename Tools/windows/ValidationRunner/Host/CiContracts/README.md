@@ -60,3 +60,14 @@ focused execution passed the five behavioral families and all topology controls,
 while four topology observations correctly remained RED against the legacy
 workflow/wrapper before the host owner's cutover. No full coverage or CI success
 is claimed by that partial result.
+
+After the four-file CI/caller lease was transferred to this lane, the actual
+workflow and wrapper cutover made all 35 topology cases pass. The six families
+plus the deduplicated residual suite then executed **143/143 passing cases**;
+the standalone topology script passed 24 checks and the integrated host passed
+61 self-tests. The initial topology-only focused invocation exposed a lazy
+binding-load error in the harness's exit barrier after its 35 cases had passed.
+Explicitly loading the real Windows bindings fixed that harness error without
+replacing or weakening the retained-authority barrier. These focused results
+remain distinct from the integration owner's normal full-host run and from
+hosted CI, neither of which this lane ran.
