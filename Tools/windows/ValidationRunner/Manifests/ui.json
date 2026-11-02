@@ -301,12 +301,6 @@
       "requiredGroups": []
     },
     {
-      "id": "ui.native",
-      "owner": "Ui",
-      "minimumCount": 1,
-      "requiredGroups": []
-    },
-    {
       "id": "ui.native.lookup.named-direct-viewport",
       "owner": "Ui",
       "minimumCount": 1,
@@ -859,13 +853,853 @@
       "requiredGroups": []
     },
     {
-      "id": "ui.root.source-assertions",
+      "id": "ui.production.consumer-linkage",
       "owner": "Ui",
       "minimumCount": 1,
       "requiredGroups": []
     },
     {
-      "id": "ui.production.consumer-linkage",
+      "id": "ui.root.source.line-5342",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5350",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5369",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5528",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5545",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5572",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5584",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5973",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5979",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5987",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6062",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6097",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6100",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6165",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6171",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6199",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6210",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6215",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6221",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6226",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6231",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6246",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6250",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6257",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6278",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6285",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6339",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6345",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6355",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6417",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6426",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6430",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6436",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6440",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6446",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6454",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6462",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6472",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6514",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6520",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6526",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6542",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6551",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6677",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6680",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6773",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6788",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6801",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6909",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6974",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7042",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7348",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7351",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7355",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7365",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7381",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7387",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7396",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.evaluator.unknown-operator",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.evaluator.unknown-resource",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.evaluator.missing-file",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.evaluator.malformed-tree",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.evaluator.actual-predicate-false",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.evaluator.wrong-production-text",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.evaluator.depth-boundary",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.evaluator.depth-overflow",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5366",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5380",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5392",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5396",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5399",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5407",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5410",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5432",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5449",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5457",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5462",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5470",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5477",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5485",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5501",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5514",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5524",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5537",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5553",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5561",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5569",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5580",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5632",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5659",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5683",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5696",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5713",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5724",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5739",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5752",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5761",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5773",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5783",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5792",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5807",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5812",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5897",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5905",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5914",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5918",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6057",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6093",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6157",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6182",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6276",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6292",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6298",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6305",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6314",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6326",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6352",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6412",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6467",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6591",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6654",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6754",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6770",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6853",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6864",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6866",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6870",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6877",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6892",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6905",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6921",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6925",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6939",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6958",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6967",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7027",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7136",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7235",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7326",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7337",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7344",
       "owner": "Ui",
       "minimumCount": 1,
       "requiredGroups": []

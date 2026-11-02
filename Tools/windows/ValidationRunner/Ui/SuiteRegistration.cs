@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -10,7 +11,7 @@ public static class SuiteRegistration
     public static IReadOnlyList<IValidationSuite> CreateSuites() => new IValidationSuite[]
     {
         new ActivationSuite(), new ManagedUiSuite(), new NativeUiSuite()
-    };
+    }.Concat(UiAdapterCases.CreateSuites()).ToArray();
 }
 
 public sealed class ActivationSuite : IValidationSuite
