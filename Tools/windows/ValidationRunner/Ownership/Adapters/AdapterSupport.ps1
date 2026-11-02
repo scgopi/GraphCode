@@ -1,10 +1,34 @@
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $script:OwnershipCases = [Collections.Generic.List[object]]::new()
+
+trap {
+    if (-not $script:OwnershipMockSignals -and $_.Exception.Data['GraphCodeValidationRootRetentionRequired'] -eq $true) {
+        try {
+            [Console]::Out.WriteLine('GRAPHCODE_VALIDATION_ROOT_RETENTION_REQUIRED=ownership_unproven')
+            [Console]::Out.Flush()
+        } finally { [Threading.Thread]::Sleep([Threading.Timeout]::Infinite) }
+    }
+    throw
+}
 
 function Import-OwnershipBindings([string] $RepositoryRoot, [string] $AssemblyPath,
     [string] $RequiredType = 'GraphCode.Validation.Ownership.StandaloneProcessJob') {
     & (Join-Path $RepositoryRoot 'Tools\windows\Import-CompiledValidationAssembly.ps1') `
         -AssemblyPath $AssemblyPath -RequiredType $RequiredType | Out-Null
+}
+
+function Import-OwnershipCaptureFunctions([string] $RepositoryRoot, [string] $AssemblyPath) {
+    Import-OwnershipBindings $RepositoryRoot $AssemblyPath
+    Import-Module (Join-Path $RepositoryRoot 'Tools\windows\ShellProcessOwnership.psm1') -Force -ErrorAction Stop
+    $gate = Read-OwnershipProductionAst (Join-Path $RepositoryRoot 'Tools\windows\uia-live-gate.ps1')
+    $context = @{
+        '$PSScriptRoot' = ("'" + (Join-Path $RepositoryRoot 'Tools\windows').Replace("'", "''") + "'")
+        '$validationAssemblyPath' = ("'" + $AssemblyPath.Replace("'", "''") + "'")
+    }
+    . Import-OwnershipProductionFunctions $gate @('Initialize-MultiProjectProcessJob', 'Initialize-UiaOwnedStreamCapture') $context
+    . Import-OwnershipProductionFunctions $gate @('New-UiaOwnershipFailure', 'Start-MultiProjectOwnedProcess',
+        'Wait-MultiProjectCapture', 'Complete-MultiProjectCapture')
 }
 
 function Read-OwnershipProductionAst([string] $Path) {

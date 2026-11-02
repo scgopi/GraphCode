@@ -99,7 +99,9 @@ foreach ($mode in @('normal', 'stop', 'inherited', 'abrupt', 'timeout', 'inherit
             if ($capture -and -not $capture.cleaned) { $null = Complete-MultiProjectCapture $capture $root 3000 $primary }
         }
     }
-    Complete-OwnershipFamily ("ownership.mixed-capture." + $mode) 1 @('controlled-native', 'bounded-capture-eight-modes')
+    $groups = @('controlled-native', 'bounded-capture-eight-modes')
+    if ($mode -in @('primary-secondary', 'cleanup-only')) { $groups += 'primary-and-cleanup-errors' }
+    Complete-OwnershipFamily ("ownership.mixed-capture." + $mode) 1 $groups
 }
 $treeRoot = Join-Path $env:TEMP ('owned-tree-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $treeRoot

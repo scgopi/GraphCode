@@ -14,6 +14,13 @@ namespace GraphCode.Validation.Ownership;
 
 public static class SuiteRegistration
 {
+    private static readonly string[] mixedUiPolicyIds = Array.ConvertAll(new[]
+    {
+        1724, 1733, 1749, 1757, 1769, 1777, 1789, 1804, 1811, 1818, 1824, 1837, 1843, 1854, 1870, 1879, 1917, 1924, 1951,
+        3392, 3423, 3443, 3458, 3469, 3482, 3487, 3497, 3524, 3530, 3535, 3540, 3545, 3550, 3555, 3560, 3565, 3570, 3575,
+        3596, 3601, 3608, 3625, 3635, 3732, 3755, 3763, 3771, 3792, 3816, 3846
+    }, line => "ownership.mixed-ui.source-line-" + line);
+
     public static IReadOnlyList<IValidationSuite> CreateSuites() =>
     [
         new OwnershipSuite(),
@@ -38,7 +45,28 @@ public static class SuiteRegistration
                 "ownership.mixed-capture.primary-secondary", "ownership.mixed-capture.cleanup-only",
                 "ownership.ui-process-tree.controlled-child", "ownership.ui-process-tree.cleanup-complete"]),
         new Adapters.StandaloneSuites.CaseScriptSuite("ownership.production-linkage", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\ProductionLinkage.Contracts.ps1",
-            "OWNERSHIP_CASE_RESULT=", ["ownership.legacy.packaging-shared-linkage", "ownership.legacy.uia-shared-linkage"])
+            "OWNERSHIP_CASE_RESULT=", ["ownership.legacy.packaging-shared-linkage", "ownership.legacy.uia-shared-linkage"]),
+        new Adapters.StandaloneSuites.CaseScriptSuite("ownership.mixed-receipt", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\MixedReceipt.Contracts.ps1",
+            "OWNERSHIP_CASE_RESULT=", ["ownership.mixed-receipt.source-line-2411", "ownership.mixed-receipt.source-line-2439",
+                "ownership.mixed-receipt.source-line-2445", "ownership.mixed-receipt.source-line-2460", "ownership.mixed-receipt.source-line-2520"]),
+        new Adapters.StandaloneSuites.CaseScriptSuite("ownership.mixed-ui-policy", "Tools\\windows\\ValidationRunner\\Ui\\MixedPolicyContracts.ps1",
+            "OWNERSHIP_CASE_RESULT=", mixedUiPolicyIds),
+        new Adapters.StandaloneSuites.CaseScriptSuite("ownership.mixed-protocol", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\MixedProtocol.Contracts.ps1",
+            "OWNERSHIP_CASE_RESULT=", Array.ConvertAll(new[] { 3353, 3368, 3373, 3383, 3889, 3894, 3897, 3908, 3930, 3941, 3943, 3948, 3954, 3973, 3988 },
+                line => "ownership.mixed-protocol.source-line-" + line)),
+        new Adapters.StandaloneSuites.CaseScriptSuite("ownership.mixed-stream", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\MixedStream.Contracts.ps1",
+            "OWNERSHIP_CASE_RESULT=", Array.ConvertAll(new[] { 2193, 2221, 2305, 2342, 2359 },
+                line => "ownership.mixed-stream.source-line-" + line)),
+        new Adapters.StandaloneSuites.CaseScriptSuite("ownership.mixed-startup", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\MixedStartup.Contracts.ps1",
+            "OWNERSHIP_CASE_RESULT=", Array.ConvertAll(new[] { 2060, 2068, 2074, 2083, 2101, 2109, 2126, 2137, 2143, 2149, 2165, 2173 },
+                line => "ownership.mixed-startup.source-line-" + line)),
+        new Adapters.StandaloneSuites.CaseScriptSuite("ownership.mixed-ui-native", "Tools\\windows\\ValidationRunner\\Ui\\MixedNativeContracts.ps1",
+            "OWNERSHIP_CASE_RESULT=", Array.ConvertAll(new[] { 2706, 2724, 2732, 2742, 2751, 2785, 2808, 2845, 2850, 2857, 2871, 2897, 2906, 2924, 3013,
+                3024, 3040, 3057, 3129, 3138, 3154, 3202, 3214, 3224, 3237, 3268, 3278, 3283, 3291, 3296, 3314, 3331, 3341 },
+                line => "ownership.mixed-ui.source-line-" + line).Concat(new[] { "ownership.mixed-ui.focus-control-false", "ownership.mixed-ui.focus-control-throw" }).ToArray()),
+        new Adapters.StandaloneSuites.CaseScriptSuite("ownership.mixed-pipe", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\MixedPipe.Contracts.ps1",
+            "OWNERSHIP_CASE_RESULT=", Array.ConvertAll(new[] { 4053, 4056, 4063, 4072, 4093 },
+                line => "ownership.mixed-pipe.source-line-" + line))
     ];
 }
 
@@ -69,14 +97,9 @@ public sealed class OwnershipSuite : IValidationSuite
     ];
     private static readonly string[] nativeIds = ["normal", "abrupt", "timeout", "inherited", "inherited-timeout", "arguments-environment", "real-pipe",
         "bytes-utf8-bom", "bytes-utf16-bom", "bytes-invalid-utf8", "bytes-utf8-supplementary"];
-    private static readonly (string Id, string Evidence)[] unported =
-    [
-        ("legacy.mixed-multiproject", "Complete mixed source 1672-4245 remains mandatory: UI predicates, native/fresh snapshot policies, receipts, strict protocol, owned real pipes, eight bounded-capture and primary/cleanup negative controls. Source invocation inventories are not executed counts.")
-    ];
-
     public string Id => "ownership";
     public IReadOnlyList<string> UnitIds { get; } = managedIds.Select(id => "ownership.managed." + id)
-        .Concat(nativeIds.Select(id => "ownership.native." + id)).Concat(unported.Select(p => "ownership." + p.Id)).ToArray();
+        .Concat(nativeIds.Select(id => "ownership.native." + id)).ToArray();
 
     public async Task<IReadOnlyList<UnitResult>> RunAsync(ValidationContext context, CancellationToken cancellationToken)
     {
@@ -96,8 +119,6 @@ public sealed class OwnershipSuite : IValidationSuite
             cancellationToken.ThrowIfCancellationRequested();
             await ExecuteAsync("ownership.native." + id, () => NativeAsync(id, root, alpha, beta, cancellationToken), results, "controlled-native").ConfigureAwait(false);
         }
-        results.AddRange(unported.Select(p => new UnitResult("ownership." + p.Id, UnitStatus.Incomplete, 0,
-            p.Evidence + " Not replaced by the separately counted compiled cases.")));
         return results;
     }
 

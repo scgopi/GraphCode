@@ -66,13 +66,28 @@ transport is the host's authoritative held-job supervisor. Scope, ScriptMethod,
 ErrorRecord identity, information streams and missing-versus-empty environment
 membership remain PowerShell assertions.
 
-The full mixed family remains mandatory and `Incomplete`; it cannot be
-replaced by the compiled helper tests.
+The full mixed family remains mandatory and cannot be replaced by compiled
+helper tests. `mixed-source-map.json` maps all 126 original invocation
+templates onto 133 unique dependency units, with 465 expected original
+expanded cases. The host derives this family only after every dependency
+actually passes its exact count and the map is complete, unique and matches
+the manifest. The two added primitive-focus failure controls remain separate
+required units, not an inflation of an original template.
 `source-correspondence.json` records every one of
 the immutable mixed source's 126 invocation templates and 192 assertion
 commands, with stable source IDs and zero claimed execution. Those source
 occurrences are not runtime counts. The mixed eight-mode capture/cleanup
 negative controls remain required.
+
+The original mixed ownership/protocol assertions run in focused adapters:
+canonical startup event identity and privacy (33), streamed record/ErrorRecord
+identity (18), whole accepted peer receipt and canonical negative controls
+(65), exact request/response/publication and clipping policy (42), and five
+real production-stub pipe obligations. The UI implementation supplies the
+other original 83 templates in its own files (116 policy and 178 native-policy
+expanded cases), plus two independent primitive failure controls. Counts
+describe actual executed cases; the source invocation/assertion census does
+not count as execution.
 
 The three mixed source-boundary assertions now have actual protected
 PowerShell source checks. Six newly reconciled startup/tree units also run:

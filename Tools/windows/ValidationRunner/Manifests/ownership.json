@@ -1,120 +1,1596 @@
 {
   "units": [
-    { "id": "ownership.managed.quote-empty", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.quote-trailing-slash", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.quote-embedded", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.quote-unicode", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.quote-nul", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.stream-raw", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.stream-surrogate-boundary", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.stream-no-overwrite", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.stream-independent-faults", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.stream-shared-deadline", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.receipt-valid", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.receipt-existing", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.receipt-missing", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.receipt-file", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.receipt-absent", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.receipt-duplicate-json", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.receipt-foreign-root", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.receipt-over-limit", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.proof-success", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.proof-root-survivor", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.proof-job-survivor", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.proof-stdout-fault", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.proof-stderr-fault", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.cleanup-success", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.cleanup-root-survivor", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.cleanup-job-survivor", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.cleanup-stdout-fault", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.cleanup-both-stream-faults", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.cleanup-primary-error", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.cleanup-only-error", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.cleanup-original-deadline", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.cleanup-later-actions", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.cleanup-descendant-unknown", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.signal-fragmented", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.signal-crlf", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.signal-eof", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.signal-exact-only", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.signal-overlong", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.raw-codec-malformed-eof", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.raw-codec-retention-after-malformed", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.json-malformed", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.json-duplicate", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.json-nested-duplicate", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.json-array", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.json-case-sensitive", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.frame-fragmented-unicode", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.frame-clean-eof", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.frame-short-header", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.frame-short-body", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.frame-zero", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.frame-over-limit", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.frame-invalid-utf8", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-positive-rename", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-resume-unchanged", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-foreign-owner", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-foreign-node", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-missing-title", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-extra-field", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-title-type", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-version-string", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-version-bool", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-request-id", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-blank-title", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-request-duplicate", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-unanswered-publication", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-response-unknown", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-response-extra", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-response-type", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-response-duplicate", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-control-positive", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-control-owner", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-control-selection", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-control-extra", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-control-type", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-control-duplicate", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.managed.peer-control-second", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.native.normal", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.native.abrupt", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.native.timeout", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.native.inherited", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.native.inherited-timeout", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.native.arguments-environment", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.native.real-pipe", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.native.bytes-utf8-bom", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.native.bytes-utf16-bom", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.native.bytes-invalid-utf8", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.native.bytes-utf8-supplementary", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.mixed-capture.normal", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.mixed-capture.stop", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.mixed-capture.inherited", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.mixed-capture.abrupt", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.mixed-capture.timeout", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.mixed-capture.inherited-timeout", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.mixed-capture.primary-secondary", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.mixed-capture.cleanup-only", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.legacy.ownership-receipts", "owner": "Ownership", "minimumCount": 7, "exactCount": 7 },
-    { "id": "ownership.legacy.retention-boundary", "owner": "Ownership", "minimumCount": 6, "exactCount": 6 },
-    { "id": "ownership.legacy.capture-ownership", "owner": "Ownership", "minimumCount": 14, "exactCount": 14 },
-    { "id": "ownership.legacy.tree-ownership", "owner": "Ownership", "minimumCount": 4, "exactCount": 4 },
-    { "id": "ownership.legacy.provider-ownership", "owner": "Ownership", "minimumCount": 4, "exactCount": 4 },
-    { "id": "ownership.legacy.pre-uia-isolation", "owner": "Ownership", "minimumCount": 10, "exactCount": 10 },
-    { "id": "ownership.legacy.mixed-multiproject", "owner": "Ownership", "minimumCount": 1,
-      "requiredGroups": ["mixed-ui-policy", "request-response-publication", "receipt-negative-controls", "owned-real-pipes", "bounded-capture-eight-modes", "primary-and-cleanup-errors"] },
-    { "id": "ownership.legacy.peer-emission", "owner": "Ownership", "minimumCount": 1 },
-    { "id": "ownership.legacy.rename-submit", "owner": "Ownership", "minimumCount": 1 },
-    { "id": "ownership.legacy.fresh-capture", "owner": "Ownership", "minimumCount": 1 },
-    { "id": "ownership.legacy.packaging-shared-linkage", "owner": "Ownership", "minimumCount": 1 },
-    { "id": "ownership.legacy.uia-shared-linkage", "owner": "Ownership", "minimumCount": 1 },
-    { "id": "ownership.ui-startup.helpers", "owner": "Ownership", "minimumCount": 13, "exactCount": 13 },
-    { "id": "ownership.ui-startup.redacted-log", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.ui-startup.truncated-log", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.ui-startup.missing-log", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.ui-startup.retained-report", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.ui-process-tree.controlled-child", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.ui-process-tree.cleanup-complete", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 },
-    { "id": "ownership.ui-process-tree.pid-reuse", "owner": "Ownership", "minimumCount": 1, "exactCount": 1 }
+    {
+      "id": "ownership.managed.quote-empty",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.quote-trailing-slash",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.quote-embedded",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.quote-unicode",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.quote-nul",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.stream-raw",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.stream-surrogate-boundary",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.stream-no-overwrite",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.stream-independent-faults",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.stream-shared-deadline",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.receipt-valid",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.receipt-existing",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.receipt-missing",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.receipt-file",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.receipt-absent",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.receipt-duplicate-json",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.receipt-foreign-root",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.receipt-over-limit",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.proof-success",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.proof-root-survivor",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.proof-job-survivor",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.proof-stdout-fault",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.proof-stderr-fault",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.cleanup-success",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.cleanup-root-survivor",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.cleanup-job-survivor",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.cleanup-stdout-fault",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.cleanup-both-stream-faults",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.cleanup-primary-error",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.cleanup-only-error",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.cleanup-original-deadline",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.cleanup-later-actions",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.cleanup-descendant-unknown",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.signal-fragmented",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.signal-crlf",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.signal-eof",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.signal-exact-only",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.signal-overlong",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.raw-codec-malformed-eof",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.raw-codec-retention-after-malformed",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.json-malformed",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.json-duplicate",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.json-nested-duplicate",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.json-array",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.json-case-sensitive",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.frame-fragmented-unicode",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.frame-clean-eof",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.frame-short-header",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.frame-short-body",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.frame-zero",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.frame-over-limit",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.frame-invalid-utf8",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-positive-rename",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-resume-unchanged",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-foreign-owner",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-foreign-node",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-missing-title",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-extra-field",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-title-type",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-version-string",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-version-bool",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-request-id",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-blank-title",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-request-duplicate",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-unanswered-publication",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-response-unknown",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-response-extra",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-response-type",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-response-duplicate",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-control-positive",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-control-owner",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-control-selection",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-control-extra",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-control-type",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-control-duplicate",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.peer-control-second",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.native.normal",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.native.abrupt",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.native.timeout",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.native.inherited",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.native.inherited-timeout",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.native.arguments-environment",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.native.real-pipe",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.native.bytes-utf8-bom",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.native.bytes-utf16-bom",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.native.bytes-invalid-utf8",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.native.bytes-utf8-supplementary",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-capture.normal",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-capture.stop",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-capture.inherited",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-capture.abrupt",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-capture.timeout",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-capture.inherited-timeout",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-capture.primary-secondary",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-capture.cleanup-only",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.legacy.ownership-receipts",
+      "owner": "Ownership",
+      "minimumCount": 7,
+      "exactCount": 7
+    },
+    {
+      "id": "ownership.mixed-receipt.source-line-2411",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-receipt.source-line-2439",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-receipt.source-line-2445",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-receipt.source-line-2460",
+      "owner": "Ownership",
+      "minimumCount": 51,
+      "exactCount": 51
+    },
+    {
+      "id": "ownership.mixed-receipt.source-line-2520",
+      "owner": "Ownership",
+      "minimumCount": 11,
+      "exactCount": 11
+    },
+    {
+      "id": "ownership.mixed-protocol.source-line-3353",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-protocol.source-line-3368",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-protocol.source-line-3373",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-protocol.source-line-3383",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-protocol.source-line-3897",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-protocol.source-line-3908",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-protocol.source-line-3930",
+      "owner": "Ownership",
+      "minimumCount": 9,
+      "exactCount": 9
+    },
+    {
+      "id": "ownership.mixed-protocol.source-line-3941",
+      "owner": "Ownership",
+      "minimumCount": 3,
+      "exactCount": 3
+    },
+    {
+      "id": "ownership.mixed-protocol.source-line-3943",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-protocol.source-line-3948",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-protocol.source-line-3954",
+      "owner": "Ownership",
+      "minimumCount": 6,
+      "exactCount": 6
+    },
+    {
+      "id": "ownership.mixed-protocol.source-line-3973",
+      "owner": "Ownership",
+      "minimumCount": 4,
+      "exactCount": 4
+    },
+    {
+      "id": "ownership.mixed-protocol.source-line-3988",
+      "owner": "Ownership",
+      "minimumCount": 10,
+      "exactCount": 10
+    },
+    {
+      "id": "ownership.mixed-protocol.source-line-3889",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-protocol.source-line-3894",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-stream.source-line-2193",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-stream.source-line-2221",
+      "owner": "Ownership",
+      "minimumCount": 7,
+      "exactCount": 7
+    },
+    {
+      "id": "ownership.mixed-stream.source-line-2305",
+      "owner": "Ownership",
+      "minimumCount": 3,
+      "exactCount": 3
+    },
+    {
+      "id": "ownership.mixed-stream.source-line-2342",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-stream.source-line-2359",
+      "owner": "Ownership",
+      "minimumCount": 6,
+      "exactCount": 6
+    },
+    {
+      "id": "ownership.mixed-startup.source-line-2060",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-startup.source-line-2068",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-startup.source-line-2074",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-startup.source-line-2083",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-startup.source-line-2101",
+      "owner": "Ownership",
+      "minimumCount": 14,
+      "exactCount": 14
+    },
+    {
+      "id": "ownership.mixed-startup.source-line-2109",
+      "owner": "Ownership",
+      "minimumCount": 6,
+      "exactCount": 6
+    },
+    {
+      "id": "ownership.mixed-startup.source-line-2126",
+      "owner": "Ownership",
+      "minimumCount": 4,
+      "exactCount": 4
+    },
+    {
+      "id": "ownership.mixed-startup.source-line-2137",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-startup.source-line-2143",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-startup.source-line-2149",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-startup.source-line-2165",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-startup.source-line-2173",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-pipe.source-line-4053",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-pipe.source-line-4056",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-pipe.source-line-4063",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-pipe.source-line-4072",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-pipe.source-line-4093",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-2706",
+      "owner": "Ownership",
+      "minimumCount": 3,
+      "exactCount": 3
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-2724",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-2732",
+      "owner": "Ownership",
+      "minimumCount": 2,
+      "exactCount": 2
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-2742",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-2751",
+      "owner": "Ownership",
+      "minimumCount": 10,
+      "exactCount": 10
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-2785",
+      "owner": "Ownership",
+      "minimumCount": 8,
+      "exactCount": 8
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-2808",
+      "owner": "Ownership",
+      "minimumCount": 22,
+      "exactCount": 22
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-2845",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-2850",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-2857",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-2871",
+      "owner": "Ownership",
+      "minimumCount": 2,
+      "exactCount": 2
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-2897",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-2906",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-2924",
+      "owner": "Ownership",
+      "minimumCount": 59,
+      "exactCount": 59
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3013",
+      "owner": "Ownership",
+      "minimumCount": 2,
+      "exactCount": 2
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3024",
+      "owner": "Ownership",
+      "minimumCount": 3,
+      "exactCount": 3
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3040",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3057",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3129",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3138",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3154",
+      "owner": "Ownership",
+      "minimumCount": 29,
+      "exactCount": 29
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3202",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3214",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3224",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3237",
+      "owner": "Ownership",
+      "minimumCount": 3,
+      "exactCount": 3
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3268",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3278",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3283",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3291",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3296",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3314",
+      "owner": "Ownership",
+      "minimumCount": 8,
+      "exactCount": 8
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3331",
+      "owner": "Ownership",
+      "minimumCount": 7,
+      "exactCount": 7
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3341",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.focus-control-false",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.focus-control-throw",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1724",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1733",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1749",
+      "owner": "Ownership",
+      "minimumCount": 6,
+      "exactCount": 6
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1757",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1769",
+      "owner": "Ownership",
+      "minimumCount": 4,
+      "exactCount": 4
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1777",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1789",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1804",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1811",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1818",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1824",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1837",
+      "owner": "Ownership",
+      "minimumCount": 5,
+      "exactCount": 5
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1843",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1854",
+      "owner": "Ownership",
+      "minimumCount": 4,
+      "exactCount": 4
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1870",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1879",
+      "owner": "Ownership",
+      "minimumCount": 8,
+      "exactCount": 8
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1917",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1924",
+      "owner": "Ownership",
+      "minimumCount": 4,
+      "exactCount": 4
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-1951",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3392",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3423",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3443",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3458",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3469",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3482",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3487",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3497",
+      "owner": "Ownership",
+      "minimumCount": 17,
+      "exactCount": 17
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3524",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3530",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3535",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3540",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3545",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3550",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3555",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3560",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3565",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3570",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3575",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3596",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3601",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3608",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3625",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3635",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3732",
+      "owner": "Ownership",
+      "minimumCount": 8,
+      "exactCount": 8
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3755",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3763",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3771",
+      "owner": "Ownership",
+      "minimumCount": 9,
+      "exactCount": 9
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3792",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3816",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.mixed-ui.source-line-3846",
+      "owner": "Ownership",
+      "minimumCount": 11,
+      "exactCount": 11
+    },
+    {
+      "id": "ownership.legacy.retention-boundary",
+      "owner": "Ownership",
+      "minimumCount": 6,
+      "exactCount": 6
+    },
+    {
+      "id": "ownership.legacy.capture-ownership",
+      "owner": "Ownership",
+      "minimumCount": 14,
+      "exactCount": 14
+    },
+    {
+      "id": "ownership.legacy.tree-ownership",
+      "owner": "Ownership",
+      "minimumCount": 4,
+      "exactCount": 4
+    },
+    {
+      "id": "ownership.legacy.provider-ownership",
+      "owner": "Ownership",
+      "minimumCount": 4,
+      "exactCount": 4
+    },
+    {
+      "id": "ownership.legacy.pre-uia-isolation",
+      "owner": "Ownership",
+      "minimumCount": 10,
+      "exactCount": 10
+    },
+    {
+      "id": "ownership.legacy.mixed-multiproject",
+      "owner": "Ownership",
+      "minimumCount": 465,
+      "requiredGroups": [
+        "mixed-ui-policy",
+        "request-response-publication",
+        "receipt-negative-controls",
+        "owned-real-pipes",
+        "bounded-capture-eight-modes",
+        "primary-and-cleanup-errors"
+      ],
+      "exactCount": 465,
+      "compositeOf": [
+        "ownership.mixed-ui.source-line-1724",
+        "ownership.mixed-ui.source-line-1733",
+        "ownership.mixed-ui.source-line-1749",
+        "ownership.mixed-ui.source-line-1757",
+        "ownership.mixed-ui.source-line-1769",
+        "ownership.mixed-ui.source-line-1777",
+        "ownership.mixed-ui.source-line-1789",
+        "ownership.mixed-ui.source-line-1804",
+        "ownership.mixed-ui.source-line-1811",
+        "ownership.mixed-ui.source-line-1818",
+        "ownership.mixed-ui.source-line-1824",
+        "ownership.mixed-ui.source-line-1837",
+        "ownership.mixed-ui.source-line-1843",
+        "ownership.mixed-ui.source-line-1854",
+        "ownership.mixed-ui.source-line-1870",
+        "ownership.mixed-ui.source-line-1879",
+        "ownership.mixed-ui.source-line-1917",
+        "ownership.mixed-ui.source-line-1924",
+        "ownership.mixed-ui.source-line-1951",
+        "ownership.mixed-startup.source-line-2060",
+        "ownership.mixed-startup.source-line-2068",
+        "ownership.mixed-startup.source-line-2074",
+        "ownership.mixed-startup.source-line-2083",
+        "ownership.mixed-startup.source-line-2101",
+        "ownership.mixed-startup.source-line-2109",
+        "ownership.mixed-startup.source-line-2126",
+        "ownership.mixed-startup.source-line-2137",
+        "ownership.mixed-startup.source-line-2143",
+        "ownership.mixed-startup.source-line-2149",
+        "ownership.mixed-startup.source-line-2165",
+        "ownership.mixed-startup.source-line-2173",
+        "ownership.mixed-stream.source-line-2193",
+        "ownership.mixed-stream.source-line-2221",
+        "ownership.mixed-stream.source-line-2305",
+        "ownership.mixed-stream.source-line-2342",
+        "ownership.mixed-stream.source-line-2359",
+        "ownership.mixed-receipt.source-line-2411",
+        "ownership.mixed-receipt.source-line-2439",
+        "ownership.mixed-receipt.source-line-2445",
+        "ownership.mixed-receipt.source-line-2460",
+        "ownership.mixed-receipt.source-line-2520",
+        "ownership.mixed-ui.source-line-2706",
+        "ownership.mixed-ui.source-line-2724",
+        "ownership.mixed-ui.source-line-2732",
+        "ownership.mixed-ui.source-line-2742",
+        "ownership.mixed-ui.source-line-2751",
+        "ownership.mixed-ui.source-line-2785",
+        "ownership.mixed-ui.source-line-2808",
+        "ownership.mixed-ui.source-line-2845",
+        "ownership.mixed-ui.source-line-2850",
+        "ownership.mixed-ui.source-line-2857",
+        "ownership.mixed-ui.source-line-2871",
+        "ownership.mixed-ui.source-line-2897",
+        "ownership.mixed-ui.source-line-2906",
+        "ownership.mixed-ui.source-line-2924",
+        "ownership.mixed-ui.source-line-3013",
+        "ownership.mixed-ui.source-line-3024",
+        "ownership.mixed-ui.source-line-3040",
+        "ownership.mixed-ui.source-line-3057",
+        "ownership.mixed-ui.source-line-3129",
+        "ownership.mixed-ui.source-line-3138",
+        "ownership.mixed-ui.source-line-3154",
+        "ownership.mixed-ui.source-line-3202",
+        "ownership.mixed-ui.source-line-3214",
+        "ownership.mixed-ui.source-line-3224",
+        "ownership.mixed-ui.source-line-3237",
+        "ownership.mixed-ui.source-line-3268",
+        "ownership.mixed-ui.source-line-3278",
+        "ownership.mixed-ui.source-line-3283",
+        "ownership.mixed-ui.source-line-3291",
+        "ownership.mixed-ui.source-line-3296",
+        "ownership.mixed-ui.source-line-3314",
+        "ownership.mixed-ui.source-line-3331",
+        "ownership.mixed-ui.source-line-3341",
+        "ownership.mixed-protocol.source-line-3353",
+        "ownership.mixed-protocol.source-line-3368",
+        "ownership.mixed-protocol.source-line-3373",
+        "ownership.mixed-protocol.source-line-3383",
+        "ownership.mixed-ui.source-line-3392",
+        "ownership.mixed-ui.source-line-3423",
+        "ownership.mixed-ui.source-line-3443",
+        "ownership.mixed-ui.source-line-3458",
+        "ownership.mixed-ui.source-line-3469",
+        "ownership.mixed-ui.source-line-3482",
+        "ownership.mixed-ui.source-line-3487",
+        "ownership.mixed-ui.source-line-3497",
+        "ownership.mixed-ui.source-line-3524",
+        "ownership.mixed-ui.source-line-3530",
+        "ownership.mixed-ui.source-line-3535",
+        "ownership.mixed-ui.source-line-3540",
+        "ownership.mixed-ui.source-line-3545",
+        "ownership.mixed-ui.source-line-3550",
+        "ownership.mixed-ui.source-line-3555",
+        "ownership.mixed-ui.source-line-3560",
+        "ownership.mixed-ui.source-line-3565",
+        "ownership.mixed-ui.source-line-3570",
+        "ownership.mixed-ui.source-line-3575",
+        "ownership.mixed-ui.source-line-3596",
+        "ownership.mixed-ui.source-line-3601",
+        "ownership.mixed-ui.source-line-3608",
+        "ownership.mixed-ui.source-line-3625",
+        "ownership.mixed-ui.source-line-3635",
+        "ownership.mixed-ui.source-line-3732",
+        "ownership.mixed-ui.source-line-3755",
+        "ownership.mixed-ui.source-line-3763",
+        "ownership.mixed-ui.source-line-3771",
+        "ownership.mixed-ui.source-line-3792",
+        "ownership.mixed-ui.source-line-3816",
+        "ownership.mixed-ui.source-line-3846",
+        "ownership.mixed-protocol.source-line-3889",
+        "ownership.mixed-protocol.source-line-3894",
+        "ownership.mixed-protocol.source-line-3897",
+        "ownership.mixed-protocol.source-line-3908",
+        "ownership.mixed-protocol.source-line-3930",
+        "ownership.mixed-protocol.source-line-3941",
+        "ownership.mixed-protocol.source-line-3943",
+        "ownership.mixed-protocol.source-line-3948",
+        "ownership.mixed-protocol.source-line-3954",
+        "ownership.mixed-protocol.source-line-3973",
+        "ownership.mixed-protocol.source-line-3988",
+        "ownership.mixed-pipe.source-line-4053",
+        "ownership.mixed-pipe.source-line-4056",
+        "ownership.mixed-pipe.source-line-4063",
+        "ownership.mixed-pipe.source-line-4072",
+        "ownership.mixed-pipe.source-line-4093",
+        "ownership.mixed-capture.normal",
+        "ownership.mixed-capture.stop",
+        "ownership.mixed-capture.inherited",
+        "ownership.mixed-capture.abrupt",
+        "ownership.mixed-capture.timeout",
+        "ownership.mixed-capture.inherited-timeout",
+        "ownership.mixed-capture.primary-secondary",
+        "ownership.mixed-capture.cleanup-only"
+      ],
+      "sourceTemplateCount": 126,
+      "sourceMap": "Ownership\\mixed-source-map.json"
+    },
+    {
+      "id": "ownership.legacy.peer-emission",
+      "owner": "Ownership",
+      "minimumCount": 1
+    },
+    {
+      "id": "ownership.legacy.rename-submit",
+      "owner": "Ownership",
+      "minimumCount": 1
+    },
+    {
+      "id": "ownership.legacy.fresh-capture",
+      "owner": "Ownership",
+      "minimumCount": 1
+    },
+    {
+      "id": "ownership.legacy.packaging-shared-linkage",
+      "owner": "Ownership",
+      "minimumCount": 1
+    },
+    {
+      "id": "ownership.legacy.uia-shared-linkage",
+      "owner": "Ownership",
+      "minimumCount": 1
+    },
+    {
+      "id": "ownership.ui-startup.helpers",
+      "owner": "Ownership",
+      "minimumCount": 13,
+      "exactCount": 13
+    },
+    {
+      "id": "ownership.ui-startup.redacted-log",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.ui-startup.truncated-log",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.ui-startup.missing-log",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.ui-startup.retained-report",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.ui-process-tree.controlled-child",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.ui-process-tree.cleanup-complete",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.ui-process-tree.pid-reuse",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    }
   ]
 }
