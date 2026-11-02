@@ -300,81 +300,56 @@ public sealed class OwnedChildSupervisor
             throw new AggregateException("OWNED_CAPTURE_DRAIN: independent readers did not all reach successful EOF.", failures);
     }
 
-    private async Task<OwnedCleanupProof> CleanupAsync(Exception? primary)
+    private Task<OwnedCleanupProof> CleanupAsync(Exception? primary) =>
+        OwnedCleanupCoordinator.CompleteAsync(new NativeCleanupAuthority(this), primary, TimeSpan.FromSeconds(5));
+
+    private sealed class NativeCleanupAuthority(OwnedChildSupervisor owner) : IOwnedCleanupAuthority
     {
-        var limit = new Deadline(TimeSpan.FromSeconds(5));
-        var failures = new List<Exception>();
-        bool rootExited = root == IntPtr.Zero, empty = job == IntPtr.Zero;
-        bool outEof = stdout == null, errEof = stderr == null, closed = false;
-        try
+        public string Identity => $"pid={owner.ProcessId}; creation={owner.creationFileTime}; job={owner.job}";
+        public Task<string>? StandardOutput => owner.stdout;
+        public Task<string>? StandardError => owner.stderr;
+        public IReadOnlyList<Action> CloseActions =>
+        [
+            () => owner.stdoutReader?.Dispose(), () => owner.stderrReader?.Dispose(),
+            () => Close(ref owner.thread),
+            () => { if (owner.job != IntPtr.Zero) { StandaloneProcessJob.Close(owner.job); owner.job = IntPtr.Zero; } },
+            () => Close(ref owner.root)
+        ];
+
+        public void Terminate()
         {
-            if (assigned) StandaloneProcessJob.Terminate(job);
-            else if (root != IntPtr.Zero)
+            if (owner.assigned) StandaloneProcessJob.Terminate(owner.job);
+            else if (owner.root != IntPtr.Zero)
             {
-                // The retained CreateProcess handle is still suspended behind the unreleased barrier.
-                if (resumed) throw new InvalidOperationException("Unassigned root was unexpectedly resumed.");
-                if (WaitForSingleObject(root, 0) != 0 && !TerminateProcess(root, 124))
+                if (owner.resumed) throw new InvalidOperationException("Unassigned root was unexpectedly resumed.");
+                if (WaitForSingleObject(owner.root, 0) != 0 && !TerminateProcess(owner.root, 124))
                     throw new Win32Exception();
             }
         }
-        catch (Exception failure) { failures.Add(failure); }
-        try
+
+        public Task<bool> WaitForJobEmptyAsync(Deadline deadline)
         {
-            if (job != IntPtr.Zero)
+            if (owner.job == IntPtr.Zero) return Task.FromResult(true);
+            StandaloneProcessJob.WaitForEmpty(owner.job, deadline);
+            return Task.FromResult(StandaloneProcessJob.Active(owner.job) == 0);
+        }
+
+        public async Task<bool> WaitForRootExitAsync(Deadline deadline)
+        {
+            while (owner.root != IntPtr.Zero && !owner.RootExited())
             {
-                StandaloneProcessJob.WaitForEmpty(job, limit);
-                empty = StandaloneProcessJob.Active(job) == 0;
+                if (deadline.Expired) throw new TimeoutException("Held root exit unproved.");
+                await Task.Delay(Math.Min(10, deadline.RemainingMilliseconds)).ConfigureAwait(false);
             }
+            return true;
         }
-        catch (Exception failure) { failures.Add(failure); }
-        try
+
+        public void Retain(Exception failure)
         {
-            while (root != IntPtr.Zero && !RootExited())
-            {
-                if (limit.Expired) throw new TimeoutException("Held root exit unproved.");
-                await Task.Delay(Math.Min(10, limit.RemainingMilliseconds)).ConfigureAwait(false);
-            }
-            rootExited = true;
+            retained.Add(owner);
+            OwnershipRetention.Tag(failure, owner.artifactRoot);
+            failure.Data["OwnedRetainedLease"] = owner;
         }
-        catch (Exception failure) { failures.Add(failure); }
-        // Do not let a faulted stdout hide a pending/faulted stderr, or grant it a new timeout.
-        foreach (var stream in new[] { (Task: stdout, Name: "stdout"), (Task: stderr, Name: "stderr") })
-        {
-            if (stream.Task == null) continue;
-            try
-            {
-                await stream.Task.WaitAsync(limit.Remaining).ConfigureAwait(false);
-                if (stream.Name == "stdout") outEof = true; else errEof = true;
-            }
-            catch (Exception failure) { failures.Add(new IOException(stream.Name + " EOF unproved.", failure)); }
-        }
-        if (new OwnedCleanupProof(rootExited, empty, outEof, errEof, false).CanRelease)
-        {
-            foreach (Action close in new Action[]
-            {
-                () => stdoutReader?.Dispose(), () => stderrReader?.Dispose(),
-                () => Close(ref thread),
-                () => { if (job != IntPtr.Zero) { StandaloneProcessJob.Close(job); job = IntPtr.Zero; } },
-                () => Close(ref root)
-            })
-            {
-                try { close(); }
-                catch (Exception failure) { failures.Add(failure); }
-            }
-            closed = failures.Count == 0;
-        }
-        var proof = new OwnedCleanupProof(rootExited, empty, outEof, errEof, closed);
-        if (primary != null) primary.Data["OwnedCleanupProof"] = proof;
-        if (!closed || failures.Count != 0)
-        {
-            retained.Add(this);
-            var cleanup = new AggregateException($"OWNED_CLEANUP_UNPROVEN: pid={ProcessId}; creation={creationFileTime}; job={job}; proof={proof}", failures);
-            OwnershipRetention.Tag(primary ?? cleanup, artifactRoot);
-            (primary ?? cleanup).Data["OwnedCleanupFailure"] = cleanup;
-            (primary ?? cleanup).Data["OwnedRetainedLease"] = this;
-            if (primary == null) throw cleanup;
-        }
-        return proof;
     }
 
     private static void Close(ref IntPtr handle)

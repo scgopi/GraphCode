@@ -29,6 +29,8 @@ public sealed class OwnershipSuite : IValidationSuite
         "receipt-valid", "receipt-existing", "receipt-missing", "receipt-file", "receipt-absent",
         "receipt-duplicate-json", "receipt-foreign-root", "receipt-over-limit",
         "proof-success", "proof-root-survivor", "proof-job-survivor", "proof-stdout-fault", "proof-stderr-fault",
+        "cleanup-success", "cleanup-root-survivor", "cleanup-job-survivor", "cleanup-stdout-fault",
+        "cleanup-both-stream-faults", "cleanup-primary-error", "cleanup-only-error", "cleanup-original-deadline", "cleanup-later-actions",
         "json-malformed", "json-duplicate", "json-nested-duplicate", "json-array", "json-case-sensitive",
         "frame-fragmented-unicode", "frame-clean-eof", "frame-short-header", "frame-short-body", "frame-zero", "frame-over-limit", "frame-invalid-utf8",
         "peer-positive-rename", "peer-resume-unchanged", "peer-foreign-owner", "peer-foreign-node",
@@ -230,6 +232,51 @@ public sealed class OwnershipSuite : IValidationSuite
             var proof = new OwnedCleanupProof(id != "proof-root-survivor", id != "proof-job-survivor",
                 id != "proof-stdout-fault", id != "proof-stderr-fault", false);
             Require(proof.CanRelease == (id == "proof-success"), "UNKNOWN proof allowed resource release.");
+            return;
+        }
+        if (id.StartsWith("cleanup-", StringComparison.Ordinal))
+        {
+            var authority = new FakeCleanupAuthority
+            {
+                RootExited = id is not ("cleanup-root-survivor" or "cleanup-primary-error"),
+                JobEmpty = id != "cleanup-job-survivor",
+                CloseFails = id is "cleanup-only-error" or "cleanup-later-actions",
+                ConsumeDeadline = id == "cleanup-original-deadline"
+            };
+            if (id is "cleanup-stdout-fault" or "cleanup-both-stream-faults")
+                authority.StandardOutput = Task.FromException<string>(new IOException("original stdout"));
+            if (id == "cleanup-both-stream-faults")
+                authority.StandardError = Task.FromException<string>(new IOException("original stderr"));
+            if (id == "cleanup-original-deadline")
+                authority.StandardOutput = new TaskCompletionSource<string>().Task;
+            var primary = id == "cleanup-primary-error" ? new IOException("original primary") : null;
+            OwnedCleanupProof? proof = null;
+            if (id == "cleanup-success")
+                proof = await OwnedCleanupCoordinator.CompleteAsync(authority, null, TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+            else if (primary != null)
+            {
+                proof = await OwnedCleanupCoordinator.CompleteAsync(authority, primary, TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+                Require(ReferenceEquals(authority.RetainedError, primary) && primary.Message == "original primary" &&
+                    primary.Data["OwnedCleanupFailure"] is AggregateException, "Primary identity/secondary cleanup diagnostic changed.");
+            }
+            else
+            {
+                var failure = await RejectAsync<AggregateException>(() => OwnedCleanupCoordinator.CompleteAsync(authority, null,
+                    TimeSpan.FromMilliseconds(id == "cleanup-original-deadline" ? 100 : 1000))).ConfigureAwait(false);
+                proof = failure.Data["OwnedCleanupProof"] as OwnedCleanupProof;
+                Require(ReferenceEquals(authority.RetainedError, failure), "Cleanup-only failure not retained by exact identity.");
+                if (id == "cleanup-both-stream-faults")
+                    Require(failure.InnerExceptions.Count == 2 && failure.InnerExceptions.All(e => e.InnerException is IOException),
+                        "A failed stdout hid the independent stderr failure.");
+            }
+            Require(authority.Terminations == 1 && authority.JobWaits == 1 && authority.RootWaits == 1 &&
+                ReferenceEquals(authority.JobDeadline, authority.RootDeadline), "Cleanup skipped a proof or refreshed its deadline.");
+            bool closable = id is "cleanup-success" or "cleanup-only-error" or "cleanup-later-actions";
+            Require(authority.Closes == (closable ? 2 : 0), "UNKNOWN allowed close or a close error skipped a later action.");
+            Require(proof != null && proof.ResourcesClosed == (id == "cleanup-success") &&
+                authority.Retained == (id != "cleanup-success"), "Cleanup resource/retention disposition changed.");
+            if (id == "cleanup-original-deadline")
+                Require(authority.RootRemainingMilliseconds < 50, "Root wait received a refreshed deadline after job wait.");
             return;
         }
         if (id.StartsWith("json-", StringComparison.Ordinal))
@@ -513,5 +560,42 @@ public sealed class OwnershipSuite : IValidationSuite
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private sealed class FakeCleanupAuthority : IOwnedCleanupAuthority
+    {
+        public string Identity => "controlled-fake-held-authority; nativeCalls=0";
+        public Task<string>? StandardOutput { get; set; } = Task.FromResult("stdout");
+        public Task<string>? StandardError { get; set; } = Task.FromResult("stderr");
+        public bool RootExited = true, JobEmpty = true, CloseFails, ConsumeDeadline, Retained;
+        public int Terminations, JobWaits, RootWaits, Closes, RootRemainingMilliseconds;
+        public Deadline? JobDeadline, RootDeadline;
+        public Exception? RetainedError;
+        public void Terminate() => Terminations++;
+        public async Task<bool> WaitForJobEmptyAsync(Deadline deadline)
+        {
+            JobWaits++;
+            JobDeadline = deadline;
+            if (ConsumeDeadline) await Task.Delay(75).ConfigureAwait(false);
+            return JobEmpty;
+        }
+        public Task<bool> WaitForRootExitAsync(Deadline deadline)
+        {
+            RootWaits++;
+            RootDeadline = deadline;
+            RootRemainingMilliseconds = deadline.RemainingMilliseconds;
+            return Task.FromResult(RootExited);
+        }
+        public IReadOnlyList<Action> CloseActions =>
+        [
+            () => { Closes++; if (CloseFails) throw new IOException("original first close failure"); },
+            () => Closes++
+        ];
+        public void Retain(Exception failure)
+        {
+            Retained = true;
+            RetainedError = failure;
+            failure.Data[OwnershipRetention.RequiredKey] = true;
+        }
     }
 }

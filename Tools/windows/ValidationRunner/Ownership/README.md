@@ -35,7 +35,7 @@ and root-runner SHA-256
 `202D260A846670E314163F9D2565D07B1E0AD27A4D61F41EA99D67624FF6C869`.
 The old runner is never executed, embedded or extracted for execution.
 
-The 59 managed and seven controlled-native cases are individually registered
+The 68 managed and seven controlled-native cases are individually registered
 with exact-count manifest guards. The typed peer implements the complete
 request/response/publication/control core from `Stub-Daemon.ps1:29-294`; it is
 the implementation used by the compiled real-pipe fixture, not a passing fake.
