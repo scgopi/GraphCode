@@ -16,7 +16,8 @@ public sealed record UnitManifest(IReadOnlyList<RequiredUnit> Units);
 
 public sealed record CoverageReport(
     string Runner, bool Complete, int RequiredCount, int PassedCount,
-    IReadOnlyList<UnitResult> Units, IReadOnlyList<string> Errors);
+    IReadOnlyList<UnitResult> Units, IReadOnlyList<string> Errors,
+    long ActualExecutedCount = 0, int DerivedProofCount = 0);
 
 public static class Coverage
 {
@@ -109,7 +110,10 @@ public static class Coverage
         }
         var passed = ledger.Count(result => result.Status == UnitStatus.Passed);
         return new CoverageReport("CompiledValidationRunner", errors.Count == 0 && passed > 0 &&
-            passed == required.Count, required.Count, passed, ledger, errors);
+            passed == required.Count, required.Count, passed, ledger, errors,
+            ledger.Where(result => requirements[result.Id].CompositeOf is null && result.ExecutedCount > 0)
+                .Sum(result => (long)result.ExecutedCount),
+            ledger.Count(result => requirements[result.Id].CompositeOf is not null && result.Status == UnitStatus.Passed));
     }
 
     public static IReadOnlyList<string> RegistryErrors(IReadOnlyList<RequiredUnit> required, IReadOnlyList<IValidationSuite> suites) =>

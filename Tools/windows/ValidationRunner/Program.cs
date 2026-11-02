@@ -17,7 +17,7 @@ if (args.SequenceEqual(new[] { "--self-test" })) return HostSelfTests.Run();
 
 string? repositoryRoot = null;
 string? artifactRoot = null;
-string? selectedSuite = null;
+var selectedSuites = new HashSet<string>(StringComparer.Ordinal);
 for (var index = 0; index < args.Length; index++)
 {
     if (index + 1 >= args.Length) throw new ArgumentException($"Missing value for {args[index]}");
@@ -26,7 +26,9 @@ for (var index = 0; index < args.Length; index++)
     {
         case "--repository-root": repositoryRoot = Path.GetFullPath(value); break;
         case "--artifact-root": artifactRoot = Path.GetFullPath(value); break;
-        case "--suite": selectedSuite = value; break;
+        case "--suite":
+            if (!selectedSuites.Add(value)) throw new ArgumentException($"Duplicate suite selector: {value}");
+            break;
         default: throw new ArgumentException($"Unknown argument: {args[index - 1]}");
     }
 }
@@ -55,13 +57,14 @@ try
             throw new InvalidDataException($"{name}.CreateSuites has an invalid return type");
         suites.AddRange(registered);
     }
-    if (selectedSuite is not null && suites.All(suite => suite.Id != selectedSuite))
-        throw new ArgumentException($"No registered suite: {selectedSuite}");
+    foreach (var selection in selectedSuites)
+        if (suites.All(suite => suite.Id != selection))
+            throw new ArgumentException($"No registered suite: {selection}");
     var registryErrors = Coverage.RegistryErrors(required, suites);
     if (registryErrors.Count != 0)
         throw new InvalidDataException("Registry admission failed: " + string.Join("; ", registryErrors));
     var context = new ValidationContext(repositoryRoot, artifactRoot);
-    foreach (var suite in suites.Where(suite => selectedSuite is null || suite.Id == selectedSuite))
+    foreach (var suite in suites.Where(suite => selectedSuites.Count == 0 || selectedSuites.Contains(suite.Id)))
     {
         try
         {
@@ -89,7 +92,7 @@ await File.WriteAllTextAsync(reportPath, JsonSerializer.Serialize(report, Covera
 foreach (var unit in report.Units)
     Console.WriteLine(ConsoleReport.Unit(unit));
 for (var index = 0; index < report.Errors.Count; index++) Console.Error.WriteLine(ConsoleReport.Error(index + 1));
-Console.WriteLine($"COVERAGE required={report.RequiredCount} passed={report.PassedCount} complete={report.Complete} report={JsonSerializer.Serialize(reportPath)}");
+Console.WriteLine($"COVERAGE required={report.RequiredCount} passed={report.PassedCount} actualExecuted={report.ActualExecutedCount} derivedProofs={report.DerivedProofCount} complete={report.Complete} report={JsonSerializer.Serialize(reportPath)}");
 if (!report.Complete) return 1;
 Console.WriteLine("CompiledValidationRunner: PASS");
 Console.WriteLine("VALIDATION_RUNNER_EXECUTED=1");

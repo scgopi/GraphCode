@@ -157,6 +157,12 @@ public static class HostSelfTests
                     observations ?? [passed with { Groups = ["group"] }], sourceDirectory: compositeDirectory);
             }
             Check("composite-positive", () => Assert(Composite().Complete, "complete independently mapped proof rejected"));
+            Check("composite-not-double-counted", () =>
+            {
+                var report = Composite();
+                Assert(report.ActualExecutedCount == 1 && report.DerivedProofCount == 1,
+                    "derived composite proof was counted again as actual test execution");
+            });
             Check("composite-missing", () => Assert(!Composite(observations: []).Complete, "missing dependency admitted"));
             Check("composite-duplicate", () => Assert(!Composite(observations: [passed, passed]).Complete, "duplicate dependency admitted"));
             Check("composite-skipped", () => Assert(!Composite(observations: [passed with { Status = UnitStatus.Skipped }]).Complete, "skipped dependency admitted"));
