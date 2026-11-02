@@ -4251,9 +4251,11 @@ while (-not [IO.File]::Exists($launch.gate)) {
 $start = [Diagnostics.ProcessStartInfo]::new($launch.file)
 $start.UseShellExecute = $false
 $start.CreateNoWindow = -not $launch.visible
+$start.RedirectStandardInput = $true
 $start.WorkingDirectory = $launch.workingDirectory
 foreach ($argument in $launch.arguments) { $start.ArgumentList.Add([string]$argument) }
 $target = [Diagnostics.Process]::Start($start)
+$target.StandardInput.Close()
 try {
   $null = $target.Handle
   $temporaryIdentity = $launch.identity + ".pending"
@@ -12099,6 +12101,16 @@ try {
       Write-Host "UIA_PROCESS_TREE_CLEANUP=not_needed no UIA shell was launched"
     }
   }
+  }
+  $ownershipUnknown = ($gateFailure -and (ShellProcessOwnership\Test-ShellOwnershipUnproven $gateFailure)) -or
+    ($sandboxCleanupError -and (ShellProcessOwnership\Test-ShellOwnershipUnproven $sandboxCleanupError))
+  if ($ownershipUnknown) {
+    try {
+      [Console]::Out.WriteLine("GRAPHCODE_VALIDATION_ROOT_RETENTION_REQUIRED=ownership_unproven")
+      [Console]::Out.Flush()
+    } finally {
+      [Threading.Thread]::Sleep([Threading.Timeout]::Infinite)
+    }
   }
   if ($sandboxCleanupError -and $null -eq $gateFailure) { throw $sandboxCleanupError }
 }
