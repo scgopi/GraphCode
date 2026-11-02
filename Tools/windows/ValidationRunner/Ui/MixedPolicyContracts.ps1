@@ -5,6 +5,8 @@ param(
   [switch] $ImportOnly
 )
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Text.UTF8Encoding]::new($false)
 $script:MixedWindowsRoot = Join-Path $RepositoryRoot 'Tools\windows'
 $validationAssemblyPath = $AssemblyPath
 $mixedAssembly = & (Join-Path $script:MixedWindowsRoot 'Import-CompiledValidationAssembly.ps1') `
@@ -67,10 +69,13 @@ function Complete-Mixed([Collections.IDictionary] $Expected, [string[]] $Groups)
         source = 'Tools/windows/Tests/ValidationRunner.Tests.ps1'; invocationLine = [int]$line
         expectedExpandedCount = $expectedCount; cases = $observed
         productionInputs = 'Current production gate and compiled bindings'; nativeProductCalls = 0
-      }) -Depth 14 -Compress)
+      }) -Depth 14 -Compress -EscapeHandling EscapeNonAscii)
       groups = $Groups
     }
-    Write-Output ('OWNERSHIP_CASE_RESULT=' + ($row | ConvertTo-Json -Depth 16 -Compress))
+    $json = $row | ConvertTo-Json -Depth 16 -Compress -EscapeHandling EscapeNonAscii
+    $document = [System.Text.Json.JsonDocument]::Parse([string]$json)
+    $document.Dispose()
+    Write-Output ('OWNERSHIP_CASE_RESULT=' + $json)
   }
   foreach ($case in $script:MixedCases) {
     if (-not $Expected.Contains([int]$case.line)) { throw "Unregistered mixed invocation line: $($case.line)" }
