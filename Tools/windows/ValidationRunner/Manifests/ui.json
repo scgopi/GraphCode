@@ -1,0 +1,18 @@
+{
+  "units": [
+    { "id": "ui.activation.foreground-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.activation.foreground-acquired", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.activation.ownership-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.activation.invalid-window", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.activation.source-boundary", "owner": "Ui", "minimumCount": 6, "requiredGroups": [] },
+    { "id": "ui.input.batch", "owner": "Ui", "minimumCount": 21, "requiredGroups": [] },
+    { "id": "ui.popup.predicate", "owner": "Ui", "minimumCount": 10, "requiredGroups": [] },
+    { "id": "ui.popup.source", "owner": "Ui", "minimumCount": 9, "requiredGroups": [] },
+    { "id": "ui.popup.effect", "owner": "Ui", "minimumCount": 11, "requiredGroups": [] },
+    { "id": "ui.native.lookup", "owner": "Ui", "minimumCount": 14, "requiredGroups": [] },
+    { "id": "ui.native.hit", "owner": "Ui", "minimumCount": 6, "requiredGroups": [] },
+    { "id": "ui.geometry", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.host-info", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.gate-state", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] }
+  ]
+}
