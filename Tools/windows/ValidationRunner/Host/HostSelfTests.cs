@@ -6,7 +6,9 @@ namespace GraphCode.Validation.Host;
 
 public static class HostSelfTests
 {
-    public static int Run()
+    public static IValidationSuite CreateSuite() => new AdmissionSuite();
+
+    public static int Run(Action<int, int>? completed = null)
     {
         var executed = 0;
         var errors = new List<string>();
@@ -29,6 +31,11 @@ public static class HostSelfTests
             Coverage.Evaluate(units ?? [unit], registry ?? [suite], results ?? [passed]);
 
         Check("positive", () => Assert(Evaluate().Complete, "positive executed case rejected"));
+        Check("normal-full-mode", () => Assert(Coverage.ForInvocation(Evaluate(), []).Complete &&
+            Coverage.ForInvocation(Evaluate(), []).FullInvocation, "normal complete invocation rejected"));
+        Check("filtered-never-full-mode", () => Assert(!Coverage.ForInvocation(Evaluate(), ["test"]).Complete &&
+            !Coverage.ForInvocation(Evaluate(), ["test"]).FullInvocation,
+            "a selected invocation was admitted as canonical proof even with every unit passed"));
         Check("missing-result", () => Assert(!Evaluate(results: []).Complete, "missing result admitted"));
         Check("duplicate-result", () => Assert(!Evaluate(results: [passed, passed]).Complete, "duplicate result admitted"));
         Check("duplicate-required", () => Assert(!Evaluate(units: [unit, unit]).Complete, "duplicate manifest admitted"));
@@ -101,8 +108,11 @@ public static class HostSelfTests
         Check("console-child-marker-isolation", () =>
         {
             const string privateCanary = "PRIVATE_CHILD_CANARY";
-            var output = ConsoleReport.Unit(passed with { Evidence =
-                "\nCompiledValidationRunner: PASS\nVALIDATION_RUNNER_EXECUTED=1\n" + privateCanary });
+            var output = ConsoleReport.Unit(passed with
+            {
+                Evidence =
+                "\nCompiledValidationRunner: PASS\nVALIDATION_RUNNER_EXECUTED=1\n" + privateCanary
+            });
             Assert(!output.Contains('\n') && !output.Contains("VALIDATION_RUNNER_EXECUTED", StringComparison.Ordinal) &&
                 !output.Contains(privateCanary, StringComparison.Ordinal), "child text escaped into root console markers");
         });
@@ -184,7 +194,25 @@ public static class HostSelfTests
         }
         foreach (var error in errors) Console.Error.WriteLine(error);
         Console.WriteLine($"HOST_SELF_TESTS executed={executed} passed={executed - errors.Count} failed={errors.Count} skipped=0");
+        completed?.Invoke(executed, errors.Count);
         return errors.Count == 0 ? 0 : 1;
+    }
+
+    private sealed class AdmissionSuite : IValidationSuite
+    {
+        public string Id => "host.admission-guards";
+        public IReadOnlyList<string> UnitIds => [Id];
+        public Task<IReadOnlyList<UnitResult>> RunAsync(ValidationContext context, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var executed = 0;
+            var failed = 0;
+            var exitCode = Run((count, failures) => { executed = count; failed = failures; });
+            IReadOnlyList<UnitResult> results = [new UnitResult(Id,
+                exitCode == 0 ? UnitStatus.Passed : UnitStatus.Failed, executed,
+                $"Actual host admission/marker/composite/terminal controls: executed={executed}; failed={failed}; skipped=0")];
+            return Task.FromResult(results);
+        }
     }
 
     private sealed class StaticSuite(string id, IReadOnlyList<string> unitIds) : IValidationSuite

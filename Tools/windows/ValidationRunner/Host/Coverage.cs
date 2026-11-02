@@ -17,10 +17,22 @@ public sealed record UnitManifest(IReadOnlyList<RequiredUnit> Units);
 public sealed record CoverageReport(
     string Runner, bool Complete, int RequiredCount, int PassedCount,
     IReadOnlyList<UnitResult> Units, IReadOnlyList<string> Errors,
-    long ActualExecutedCount = 0, int DerivedProofCount = 0);
+    long ActualExecutedCount = 0, int DerivedProofCount = 0,
+    bool FullInvocation = false, IReadOnlyList<string>? SelectedSuites = null);
 
 public static class Coverage
 {
+    public static CoverageReport ForInvocation(CoverageReport report, IReadOnlyCollection<string> selectedSuites) =>
+        report with
+        {
+            Complete = report.Complete && selectedSuites.Count == 0,
+            FullInvocation = selectedSuites.Count == 0,
+            SelectedSuites = selectedSuites.Order(StringComparer.Ordinal).ToArray(),
+            Errors = report.Complete && selectedSuites.Count != 0
+                ? [.. report.Errors, "A selected diagnostic invocation is not canonical full-run proof"]
+                : report.Errors
+        };
+
     public static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -176,25 +188,25 @@ public static class Coverage
 
     private static UnitResult ValidateResult(RequiredUnit unit, UnitResult result, List<string> errors)
     {
-            var problems = new List<string>();
-            if (result.Status != UnitStatus.Passed) problems.Add($"Status is {result.Status}");
-            if (result.ExecutedCount < unit.MinimumCount) problems.Add($"Executed {result.ExecutedCount}; minimum {unit.MinimumCount}");
-            if (unit.ExactCount is not null && result.ExecutedCount != unit.ExactCount)
-                problems.Add($"Executed {result.ExecutedCount}; expected exactly {unit.ExactCount}");
-            if (string.IsNullOrWhiteSpace(result.Evidence)) problems.Add("No execution evidence");
-            foreach (var group in unit.RequiredGroups ?? [])
-                if ((result.Groups ?? []).Count(value => string.Equals(value, group, StringComparison.Ordinal)) != 1)
-                    problems.Add($"Required group did not pass exactly once: {group}");
-            if (problems.Count != 0)
+        var problems = new List<string>();
+        if (result.Status != UnitStatus.Passed) problems.Add($"Status is {result.Status}");
+        if (result.ExecutedCount < unit.MinimumCount) problems.Add($"Executed {result.ExecutedCount}; minimum {unit.MinimumCount}");
+        if (unit.ExactCount is not null && result.ExecutedCount != unit.ExactCount)
+            problems.Add($"Executed {result.ExecutedCount}; expected exactly {unit.ExactCount}");
+        if (string.IsNullOrWhiteSpace(result.Evidence)) problems.Add("No execution evidence");
+        foreach (var group in unit.RequiredGroups ?? [])
+            if ((result.Groups ?? []).Count(value => string.Equals(value, group, StringComparison.Ordinal)) != 1)
+                problems.Add($"Required group did not pass exactly once: {group}");
+        if (problems.Count != 0)
+        {
+            errors.Add($"{unit.Id}: {string.Join("; ", problems)}");
+            return result with
             {
-                errors.Add($"{unit.Id}: {string.Join("; ", problems)}");
-                return result with
-                {
-                    Status = result.Status is UnitStatus.Incomplete or UnitStatus.Skipped ? result.Status : UnitStatus.Failed,
-                    Evidence = $"{result.Evidence}; {string.Join("; ", problems)}"
-                };
-            }
-            return result;
+                Status = result.Status is UnitStatus.Incomplete or UnitStatus.Skipped ? result.Status : UnitStatus.Failed,
+                Evidence = $"{result.Evidence}; {string.Join("; ", problems)}"
+            };
+        }
+        return result;
     }
 
     private static UnitResult DeriveComposite(RequiredUnit unit, IReadOnlyList<UnitResult> ledger, string? sourceDirectory)

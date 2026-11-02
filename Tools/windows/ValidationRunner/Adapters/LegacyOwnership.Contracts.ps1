@@ -2,7 +2,7 @@ param(
   [Parameter(Mandatory)][string] $RepositoryRoot,
   [Parameter(Mandatory)][string] $ArtifactRoot,
   [Parameter(Mandatory)][string] $AssemblyPath,
-  [Parameter(Mandatory)][ValidateSet("shell-scope", "live-adapter", "live-cleanup")][string] $Contract
+  [Parameter(Mandatory)][ValidateSet("shell-scope", "live-adapter", "live-cleanup", "sdk-prerequisites")][string] $Contract
 )
 $ErrorActionPreference = "Stop"
 $tests = Join-Path $RepositoryRoot "Tools\windows\Tests"
@@ -13,15 +13,18 @@ $capturedConsole = [IO.StringWriter]::new()
 $output = @()
 $run = $null
 try {
-  # These named suites use mocked authorities only; their deliberate retention
-  # diagnostics must not be forwarded as a real native owner's lifetime signal.
+  # Legacy suites inject mocked ownership diagnostics. Keep those signals in
+  # their evidence rather than treating them as a native owner's lifetime signal.
   [Console]::SetOut($capturedConsole)
   if ($Contract -ceq "live-cleanup") {
     $output = @(& (Join-Path $tests "OwnedLiveProcessCleanup.Tests.ps1") 6>&1 3>&1 4>&1 5>&1)
   } else {
     . (Join-Path $RepositoryRoot "Tools\windows\Import-PinnedPester.ps1")
-    $file = if ($Contract -ceq "shell-scope") { "ShellProcessOwnership.Tests.ps1" } else { "OwnedLiveAdapter.Tests.ps1" }
-    $output = @(Invoke-Pester -Path (Join-Path $tests $file) -PassThru -Output None 6>&1 3>&1 4>&1 5>&1)
+    $files = if ($Contract -ceq "shell-scope") { @("ShellProcessOwnership.Tests.ps1") } `
+      elseif ($Contract -ceq "sdk-prerequisites") { @("DotNetSdk.Tests.ps1", "Bootstrap.Tests.ps1") } `
+      else { @("OwnedLiveAdapter.Tests.ps1") }
+    $paths = @($files | ForEach-Object { Join-Path $tests $_ })
+    $output = @(Invoke-Pester -Path $paths -PassThru -Output None 6>&1 3>&1 4>&1 5>&1)
     $runs = @($output | Where-Object {
         $null -ne $_.PSObject.Properties["TotalCount"] -and
           $null -ne $_.PSObject.Properties["PassedCount"] -and
@@ -55,8 +58,12 @@ if ($Contract -ceq "live-cleanup") {
   }
   $count = $run.TotalCount
 }
+$id = if ($Contract -ceq "sdk-prerequisites") { "host.sdk-prerequisites" } else { "host.legacy-ownership.$Contract" }
+$description = if ($Contract -ceq "sdk-prerequisites") {
+  "SDK prerequisites: actual installed-SDK probe plus controlled bootstrap/dependency cases"
+} else { "Actual original $Contract mock-only suite" }
 $row = [ordered]@{
-  id = "host.legacy-ownership.$Contract"; status = "Passed"; executedCount = $count
-  evidence = "Actual original $Contract mock-only suite; positive count and zero failed/skipped/not-run; retained detailed evidence: $caseRoot"
+  id = $id; status = "Passed"; executedCount = $count
+  evidence = "$description; positive count and zero failed/skipped/not-run; retained detailed evidence: $caseRoot"
 }
 Write-Output ("HOST_CASE_RESULT=" + ($row | ConvertTo-Json -Compress))

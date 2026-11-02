@@ -27,10 +27,11 @@ public static class StandaloneSuites
             output => EvidenceParser.Structured("ps.wire-targeting", "WireTargeting", output, 56, 56)),
         new ScriptSuite("ps.agent-command", "Invoke-AgentCommand.Tests.ps1", EvidenceParser.AgentCommand),
         new HostTaskSuite("host.task-inventory", "inventory", 17),
-        new HostTaskSuite("host.task-dry-run", "dry-run", 4),
+        new HostTaskSuite("host.task-dry-run", "dry-run", 7),
         new HostTaskSuite("host.unknown-task", "unknown", 1),
         new HostTaskSuite("host.foreign-fixture", "foreign-fixture", 1),
         new HostTaskSuite("host.untracked-format", "untracked-format", 1),
+        new HostTaskSuite("host.missing-providers", "missing-providers", 1),
         new HostSourceSuite("host.shell-prerequisite", "host-prerequisite", 4),
         new HostSourceSuite("host.provider-task-boundary", "provider-boundary", 5),
         new HostSourceSuite("ui.root.source.line-5346", "delayed-responses", 2),
@@ -44,6 +45,8 @@ public static class StandaloneSuites
             "HOST_CASE_RESULT=", ["host.legacy-ownership.live-adapter"], ["-Contract", "live-adapter"]),
         new CaseScriptSuite("host.legacy-ownership.live-cleanup", "Tools\\windows\\ValidationRunner\\Adapters\\LegacyOwnership.Contracts.ps1",
             "HOST_CASE_RESULT=", ["host.legacy-ownership.live-cleanup"], ["-Contract", "live-cleanup"]),
+        new CaseScriptSuite("host.sdk-prerequisites", "Tools\\windows\\ValidationRunner\\Adapters\\LegacyOwnership.Contracts.ps1",
+            "HOST_CASE_RESULT=", ["host.sdk-prerequisites"], ["-Contract", "sdk-prerequisites"]),
         new CaseScriptSuite("ui.source-contracts", "Tools\\windows\\ValidationRunner\\Ui\\UiSourceContracts.ps1",
             "UI_CASE_RESULT=", required.Where(unit => unit.Id.StartsWith("ui.activation.source.", StringComparison.Ordinal) ||
                 unit.Id.StartsWith("ui.popup.source.", StringComparison.Ordinal)).Select(unit => unit.Id).ToArray())
