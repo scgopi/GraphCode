@@ -7,7 +7,7 @@ The Windows port must have runnable commands before implementation fleets begin.
 | Surface | Command |
 |---|---|
 | Windows investigation spikes | `pwsh Tools/windows/validate.ps1 -Task all` |
-| Validation runner contract | `pwsh Tools/windows/Tests/ValidationRunner.Tests.ps1` |
+| Compiled validation runner contract | `pwsh -NoProfile -File Tools\windows\Invoke-ValidationRunnerContract.ps1` (builds and runs the normal full C# entry; see [runner documentation](ValidationRunner/README.md)) |
 | Isolated 30-key process environment boundary | `pwsh -NoProfile -File Tools\windows\Tests\IsolatedProcessEnvironment.Contracts.Tests.ps1 -Phase REGRESSION` |
 | Deterministic visual baseline | `pwsh Tools/windows/validate.ps1 -Task visual-baseline` |
 | TDD evidence contract | `pwsh Tools/tdd/Tests/TddEvidence.Tests.ps1` |
@@ -83,7 +83,8 @@ helper and preserve its existing source/IL/reference policy.
 The macOS shared-regression, Windows shell, Windows port, and Windows hardening
 workflows run on every pull request, including documentation-only changes.
 Workflow-level path/branch filters must not prevent their required check contexts
-from being reported. `ValidationRunner.Tests.ps1` guards the unfiltered triggers.
+from being reported. The compiled runner's CI contracts guard the unfiltered
+triggers and require positive full coverage from the normal executable.
 This deliberately trades additional CI usage for reliable branch protection.
 
 Full-pinned and owned-environment hardening remain dispatch/schedule-gated as
