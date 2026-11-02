@@ -999,7 +999,7 @@
       "id": "ui.production.consumer-linkage",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "169-194;6751-6778;7408-7430",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
@@ -1475,98 +1475,98 @@
       "id": "ui.root.source.line-5366",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5366-5368",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5380",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5380-5382",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5392",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5392-5394",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5396",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5396-5398",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5399",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5399-5401",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5407",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5407-5409",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5410",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5410-5413",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5432",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5432-5435",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5449",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5449-5451",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5457",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5457-5459",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5462",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5462-5464",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5470",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5470-5472",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5477",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5477-5479",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5485",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5485-5488",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
@@ -1601,126 +1601,126 @@
       "id": "ui.root.source.line-5553",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5553-5555",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5561",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5561-5563",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5569",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5569-5571",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5580",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5580-5583",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5632",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5632-5641",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5659",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5659-5662",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5683",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5683-5687",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5696",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5696-5698",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5713",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5713-5715",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5724",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5724-5726",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5739",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5739-5741",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5752",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5752-5754",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5761",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5761-5763",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5773",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5773-5777",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5783",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5783-5785",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5792",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5792-5794",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5807",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5807-5809",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-5812",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "5812-5814",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
@@ -1930,84 +1930,84 @@
       "id": "ui.root.source.line-6853",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "6853-6855",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-6864",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "6864-6864",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-6866",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "6866-6868",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-6870",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "6870-6872",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-6877",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "6877-6879",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-6892",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "6892-6894",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-6905",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "6905-6908",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-6921",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "6921-6923",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-6925",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "6925-6933",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-6939",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "6939-6941",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-6958",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "6958-6960",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-6967",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "6967-6973",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
@@ -2021,35 +2021,140 @@
       "id": "ui.root.source.line-7136",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "7136-7138",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-7235",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "7235-7239",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-7326",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "7326-7328",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-7337",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "7337-7339",
-      "state": "Incomplete",
+      "state": "Implemented",
       "owner": "Ui"
     },
     {
       "id": "ui.root.source.line-7344",
       "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
       "lines": "7344-7346",
-      "state": "Incomplete",
+      "state": "Implemented",
+      "owner": "Ui"
+    },
+    {
+      "id": "ui.promotion.enabled-heading",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7130-7323",
+      "state": "Implemented",
+      "owner": "Ui"
+    },
+    {
+      "id": "ui.connector.owned-pair",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7130-7323",
+      "state": "Implemented",
+      "owner": "Ui"
+    },
+    {
+      "id": "ui.connector.missing-source",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7130-7323",
+      "state": "Implemented",
+      "owner": "Ui"
+    },
+    {
+      "id": "ui.promotion.reordered",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7130-7323",
+      "state": "Implemented",
+      "owner": "Ui"
+    },
+    {
+      "id": "ui.promotion.disabled-action",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7130-7323",
+      "state": "Implemented",
+      "owner": "Ui"
+    },
+    {
+      "id": "ui.connector.missing-target",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7130-7323",
+      "state": "Implemented",
+      "owner": "Ui"
+    },
+    {
+      "id": "ui.connector.different-target-title",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7130-7323",
+      "state": "Implemented",
+      "owner": "Ui"
+    },
+    {
+      "id": "ui.promotion.extra-item",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7130-7323",
+      "state": "Implemented",
+      "owner": "Ui"
+    },
+    {
+      "id": "ui.connector.duplicate-source",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7130-7323",
+      "state": "Implemented",
+      "owner": "Ui"
+    },
+    {
+      "id": "ui.connector.same-endpoint",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7130-7323",
+      "state": "Implemented",
+      "owner": "Ui"
+    },
+    {
+      "id": "ui.promotion.separator-heading",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7130-7323",
+      "state": "Implemented",
+      "owner": "Ui"
+    },
+    {
+      "id": "ui.connector.blank-title",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7130-7323",
+      "state": "Implemented",
+      "owner": "Ui"
+    },
+    {
+      "id": "ui.promotion.wrong-caption",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7130-7323",
+      "state": "Implemented",
+      "owner": "Ui"
+    },
+    {
+      "id": "ui.promotion.exact",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7130-7323",
+      "state": "Implemented",
+      "owner": "Ui"
+    },
+    {
+      "id": "ui.connector.duplicate-target",
+      "source": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+      "lines": "7130-7323",
+      "state": "Implemented",
       "owner": "Ui"
     }
   ]

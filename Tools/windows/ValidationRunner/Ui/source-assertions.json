@@ -1178,10 +1178,15 @@
           },
           "left": {
             "kind": "resource",
-            "name": "gate"
+            "name": "gate-state"
           },
           "kind": "binary",
-          "operator": "Inotmatch"
+          "operator": "Inotmatch",
+          "migration": {
+            "legacyResource": "gate",
+            "legacyPattern": "SendMessageText\\(edit, 0x000D",
+            "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+          }
         },
         "left": {
           "right": {
@@ -1190,10 +1195,15 @@
           },
           "left": {
             "kind": "resource",
-            "name": "gate"
+            "name": "gate-state"
           },
           "kind": "binary",
-          "operator": "Inotmatch"
+          "operator": "Inotmatch",
+          "migration": {
+            "legacyResource": "gate",
+            "legacyPattern": "SendMessageString\\(edit, 0x000C",
+            "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+          }
         },
         "kind": "binary",
         "operator": "Or"
@@ -1985,10 +1995,15 @@
                               },
                               "left": {
                                 "kind": "resource",
-                                "name": "gate"
+                                "name": "gate-state"
                               },
                               "kind": "binary",
-                              "operator": "Inotmatch"
+                              "operator": "Inotmatch",
+                              "migration": {
+                                "legacyResource": "gate",
+                                "legacyPattern": "\\[DllImport\\(\"kernel32\\.dll\"\\)\\]\\s*private static extern uint GetCurrentThreadId",
+                                "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                              }
                             },
                             "left": {
                               "right": {
@@ -1998,10 +2013,15 @@
                                 },
                                 "left": {
                                   "kind": "resource",
-                                  "name": "gate"
+                                  "name": "gate-state"
                                 },
                                 "kind": "binary",
-                                "operator": "Inotmatch"
+                                "operator": "Inotmatch",
+                                "migration": {
+                                  "legacyResource": "gate",
+                                  "legacyPattern": "PostMessage\\(window, 0x0101, \\(UIntPtr\\)key, IntPtr\\.Zero\\)",
+                                  "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                }
                               },
                               "left": {
                                 "right": {
@@ -2011,10 +2031,15 @@
                                   },
                                   "left": {
                                     "kind": "resource",
-                                    "name": "gate"
+                                    "name": "input-safety"
                                   },
                                   "kind": "binary",
-                                  "operator": "Inotmatch"
+                                  "operator": "Inotmatch",
+                                  "migration": {
+                                    "legacyResource": "gate",
+                                    "legacyPattern": "IsRetainedProcessAlive\\(expectedProcessId\\)",
+                                    "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                  }
                                 },
                                 "left": {
                                   "right": {
@@ -2392,10 +2417,15 @@
         },
         "left": {
           "kind": "resource",
-          "name": "gate"
+          "name": "gate-state"
         },
         "kind": "binary",
-        "operator": "Inotmatch"
+        "operator": "Inotmatch",
+        "migration": {
+          "legacyResource": "gate",
+          "legacyPattern": "PostMessage\\(window, 0x802C, \\(UIntPtr\\)target, IntPtr\\.Zero\\)",
+          "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+        }
       },
       "left": {
         "right": {
@@ -2405,10 +2435,15 @@
           },
           "left": {
             "kind": "resource",
-            "name": "gate"
+            "name": "gate-state"
           },
           "kind": "binary",
-          "operator": "Inotmatch"
+          "operator": "Inotmatch",
+          "migration": {
+            "legacyResource": "gate",
+            "legacyPattern": "SendMessage\\(popup, 0x01E1, UIntPtr\\.Zero, IntPtr\\.Zero\\)",
+            "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+          }
         },
         "left": {
           "right": {
@@ -2784,14 +2819,19 @@
                                 "right": {
                                   "right": {
                                     "kind": "literal",
-                                    "value": "(?s)SendInput\\(\\(uint\\)inputs\\.Length.*?for \\(int attempt = 0; attempt < 20 && IsWindowVisible\\(popup\\); attempt\\+\\+\\).*?PostMessage\\(popup, 0x0100, \\(UIntPtr\\)0x0D, IntPtr\\.Zero\\).*?PostMessage\\(popup, 0x0101, \\(UIntPtr\\)0x0D, IntPtr\\.Zero\\)"
+                                    "value": "(?s)SendInput\\(\\(uint\\)inputs\\.Length.*?for \\(int attempt = 0; attempt < 20 && operations\\.IsWindowVisible\\(popup\\); attempt\\+\\+\\).*?PostMessage\\(popup, 0x0100, \\(UIntPtr\\)0x0D, IntPtr\\.Zero\\).*?PostMessage\\(popup, 0x0101, \\(UIntPtr\\)0x0D, IntPtr\\.Zero\\)"
                                   },
                                   "left": {
                                     "kind": "resource",
-                                    "name": "gate"
+                                    "name": "input-safety"
                                   },
                                   "kind": "binary",
-                                  "operator": "Inotmatch"
+                                  "operator": "Inotmatch",
+                                  "migration": {
+                                    "legacyResource": "gate",
+                                    "legacyPattern": "(?s)SendInput\\(\\(uint\\)inputs\\.Length.*?for \\(int attempt = 0; attempt < 20 && IsWindowVisible\\(popup\\); attempt\\+\\+\\).*?PostMessage\\(popup, 0x0100, \\(UIntPtr\\)0x0D, IntPtr\\.Zero\\).*?PostMessage\\(popup, 0x0101, \\(UIntPtr\\)0x0D, IntPtr\\.Zero\\)",
+                                    "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                  }
                                 },
                                 "left": {
                                   "right": {
@@ -2801,10 +2841,15 @@
                                     },
                                     "left": {
                                       "kind": "resource",
-                                      "name": "gate"
+                                      "name": "input-safety"
                                     },
                                     "kind": "binary",
-                                    "operator": "Inotmatch"
+                                    "operator": "Inotmatch",
+                                    "migration": {
+                                      "legacyResource": "gate",
+                                      "legacyPattern": "SendMessage\\(popup, 0x01E5, \\(UIntPtr\\)position, IntPtr\\.Zero\\)",
+                                      "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                    }
                                   },
                                   "left": {
                                     "right": {
@@ -2827,36 +2872,66 @@
                                         },
                                         "left": {
                                           "kind": "resource",
-                                          "name": "gate"
+                                          "name": "input-safety"
                                         },
                                         "kind": "binary",
-                                        "operator": "Inotmatch"
+                                        "operator": "Inotmatch",
+                                        "migration": {
+                                          "legacyResource": "gate",
+                                          "legacyPattern": "public bool Hilite, UsedKeyboardFallback",
+                                          "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                        }
                                       },
                                       "left": {
                                         "right": {
-                                          "right": {
-                                            "kind": "literal",
-                                            "value": "(?s)private static extern void Sleep\\(uint milliseconds\\).*?for \\(int attempt = 0; attempt < 50 && !hilite; attempt\\+\\+\\).*?GetMenuState\\(menu, \\(uint\\)position, 0x0400\\).*?Sleep\\(10\\).*?if \\(!hilite\\).*?throw new InvalidOperationException"
-                                          },
-                                          "left": {
-                                            "kind": "resource",
-                                            "name": "gate"
-                                          },
                                           "kind": "binary",
-                                          "operator": "Inotmatch"
+                                          "operator": "Or",
+                                          "left": {
+                                            "kind": "binary",
+                                            "operator": "Inotmatch",
+                                            "left": {
+                                              "kind": "resource",
+                                              "name": "gate-state"
+                                            },
+                                            "right": {
+                                              "kind": "literal",
+                                              "value": "private static extern void Sleep\\(uint milliseconds\\)"
+                                            }
+                                          },
+                                          "right": {
+                                            "kind": "binary",
+                                            "operator": "Inotmatch",
+                                            "left": {
+                                              "kind": "resource",
+                                              "name": "input-safety"
+                                            },
+                                            "right": {
+                                              "kind": "literal",
+                                              "value": "(?s)for \\(int attempt = 0; attempt < 50 && !hilite; attempt\\+\\+\\).*?GetMenuState\\(menu, \\(uint\\)position, 0x0400\\).*?operations\\.Sleep\\(10\\).*?if \\(!hilite\\).*?throw new InvalidOperationException"
+                                            }
+                                          },
+                                          "migration": {
+                                            "legacyPattern": "(?s)private static extern void Sleep\\(uint milliseconds\\).*?for \\(int attempt = 0; attempt < 50 && !hilite; attempt\\+\\+\\).*?GetMenuState\\(menu, \\(uint\\)position, 0x0400\\).*?Sleep\\(10\\).*?if \\(!hilite\\).*?throw new InvalidOperationException",
+                                            "reason": "Sleep ABI declaration and policy body now live in two explicitly linked production sources"
+                                          }
                                         },
                                         "left": {
                                           "right": {
                                             "right": {
                                               "kind": "literal",
-                                              "value": "SendMessage\\(popup, 0x0200, UIntPtr\\.Zero, MouseLParam\\(point\\.X, point\\.Y\\)\\)"
+                                              "value": "SendMessage\\(popup, 0x0200, UIntPtr\\.Zero, operations\\.MouseLParam\\(point\\.X, point\\.Y\\)\\)"
                                             },
                                             "left": {
                                               "kind": "resource",
-                                              "name": "gate"
+                                              "name": "input-safety"
                                             },
                                             "kind": "binary",
-                                            "operator": "Inotmatch"
+                                            "operator": "Inotmatch",
+                                            "migration": {
+                                              "legacyResource": "gate",
+                                              "legacyPattern": "SendMessage\\(popup, 0x0200, UIntPtr\\.Zero, MouseLParam\\(point\\.X, point\\.Y\\)\\)",
+                                              "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                            }
                                           },
                                           "left": {
                                             "right": {
@@ -2866,10 +2941,15 @@
                                               },
                                               "left": {
                                                 "kind": "resource",
-                                                "name": "gate"
+                                                "name": "input-safety"
                                               },
                                               "kind": "binary",
-                                              "operator": "Inotmatch"
+                                              "operator": "Inotmatch",
+                                              "migration": {
+                                                "legacyResource": "gate",
+                                                "legacyPattern": "GetCursorPos",
+                                                "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                              }
                                             },
                                             "left": {
                                               "right": {
@@ -2879,10 +2959,15 @@
                                                 },
                                                 "left": {
                                                   "kind": "resource",
-                                                  "name": "gate"
+                                                  "name": "input-safety"
                                                 },
                                                 "kind": "binary",
-                                                "operator": "Inotmatch"
+                                                "operator": "Inotmatch",
+                                                "migration": {
+                                                  "legacyResource": "gate",
+                                                  "legacyPattern": "SetCursorPos",
+                                                  "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                                }
                                               },
                                               "left": {
                                                 "right": {
@@ -2905,10 +2990,15 @@
                                                     },
                                                     "left": {
                                                       "kind": "resource",
-                                                      "name": "gate"
+                                                      "name": "input-safety"
                                                     },
                                                     "kind": "binary",
-                                                    "operator": "Inotmatch"
+                                                    "operator": "Inotmatch",
+                                                    "migration": {
+                                                      "legacyResource": "gate",
+                                                      "legacyPattern": "GetMenuItemRect",
+                                                      "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                                    }
                                                   },
                                                   "left": {
                                                     "right": {
@@ -3303,22 +3393,32 @@
             },
             "left": {
               "kind": "resource",
-              "name": "gate"
+              "name": "input-safety"
             },
             "kind": "binary",
-            "operator": "Inotmatch"
+            "operator": "Inotmatch",
+            "migration": {
+              "legacyResource": "gate",
+              "legacyPattern": "public bool HiliteAtEnterFallback, HiliteBeforeEnter;",
+              "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+            }
           },
           "left": {
             "right": {
               "kind": "literal",
-              "value": "(?s)for \\(int attempt = 0; attempt < 20 && IsWindowVisible\\(popup\\); attempt\\+\\+\\) Sleep\\(10\\);.*?hiliteAtEnterFallback = \\(GetMenuState\\(menu, \\(uint\\)position, 0x0400\\) & 0x0080\\) != 0;\\s*SendMessage\\(popup, 0x01E5, \\(UIntPtr\\)position, IntPtr\\.Zero\\);\\s*hiliteBeforeEnter = \\(GetMenuState\\(menu, \\(uint\\)position, 0x0400\\) & 0x0080\\) != 0;.*?if \\(!hiliteBeforeEnter\\)\\s*throw new InvalidOperationException.*?PostMessage\\(popup, 0x0100, \\(UIntPtr\\)0x0D, IntPtr\\.Zero\\)"
+              "value": "(?s)for \\(int attempt = 0; attempt < 20 && operations\\.IsWindowVisible\\(popup\\); attempt\\+\\+\\) operations\\.Sleep\\(10\\);.*?hiliteAtEnterFallback = \\(operations\\.GetMenuState\\(menu, \\(uint\\)position, 0x0400\\) & 0x0080\\) != 0;\\s*operations\\.SendMessage\\(popup, 0x01E5, \\(UIntPtr\\)position, IntPtr\\.Zero\\);\\s*hiliteBeforeEnter = \\(operations\\.GetMenuState\\(menu, \\(uint\\)position, 0x0400\\) & 0x0080\\) != 0;.*?if \\(!hiliteBeforeEnter\\)\\s*throw new InvalidOperationException.*?PostMessage\\(popup, 0x0100, \\(UIntPtr\\)0x0D, IntPtr\\.Zero\\)"
             },
             "left": {
               "kind": "resource",
-              "name": "gate"
+              "name": "input-safety"
             },
             "kind": "binary",
-            "operator": "Inotmatch"
+            "operator": "Inotmatch",
+            "migration": {
+              "legacyResource": "gate",
+              "legacyPattern": "(?s)for \\(int attempt = 0; attempt < 20 && IsWindowVisible\\(popup\\); attempt\\+\\+\\) Sleep\\(10\\);.*?hiliteAtEnterFallback = \\(GetMenuState\\(menu, \\(uint\\)position, 0x0400\\) & 0x0080\\) != 0;\\s*SendMessage\\(popup, 0x01E5, \\(UIntPtr\\)position, IntPtr\\.Zero\\);\\s*hiliteBeforeEnter = \\(GetMenuState\\(menu, \\(uint\\)position, 0x0400\\) & 0x0080\\) != 0;.*?if \\(!hiliteBeforeEnter\\)\\s*throw new InvalidOperationException.*?PostMessage\\(popup, 0x0100, \\(UIntPtr\\)0x0D, IntPtr\\.Zero\\)",
+              "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+            }
           },
           "kind": "binary",
           "operator": "Or"
@@ -4666,14 +4766,19 @@
                                                                                               "right": {
                                                                                                 "right": {
                                                                                                   "kind": "literal",
-                                                                                                  "value": "(?s)public static bool HoverPopupMenuItem.*?FindPopupForMenu\\(ownerProcess, menu\\).*?SendMessage\\(popup, 0x0200, UIntPtr\\.Zero, MouseLParam\\(client\\.X, client\\.Y\\)\\).*?GetMenuState\\(menu, \\(uint\\)position, 0x0400\\)"
+                                                                                                  "value": "(?s)public bool HoverPopupMenuItem.*?FindPopupForMenu\\(ownerProcess, menu\\).*?SendMessage\\(popup, 0x0200, UIntPtr\\.Zero, operations\\.MouseLParam\\(client\\.X, client\\.Y\\)\\).*?GetMenuState\\(menu, \\(uint\\)position, 0x0400\\)"
                                                                                                 },
                                                                                                 "left": {
                                                                                                   "kind": "resource",
-                                                                                                  "name": "gate"
+                                                                                                  "name": "input-safety"
                                                                                                 },
                                                                                                 "kind": "binary",
-                                                                                                "operator": "Inotmatch"
+                                                                                                "operator": "Inotmatch",
+                                                                                                "migration": {
+                                                                                                  "legacyResource": "gate",
+                                                                                                  "legacyPattern": "(?s)public static bool HoverPopupMenuItem.*?FindPopupForMenu\\(ownerProcess, menu\\).*?SendMessage\\(popup, 0x0200, UIntPtr\\.Zero, MouseLParam\\(client\\.X, client\\.Y\\)\\).*?GetMenuState\\(menu, \\(uint\\)position, 0x0400\\)",
+                                                                                                  "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                                                                                }
                                                                                               },
                                                                                               "left": {
                                                                                                 "right": {
@@ -4852,10 +4957,15 @@
                                                                                                                             },
                                                                                                                             "left": {
                                                                                                                               "kind": "resource",
-                                                                                                                              "name": "gate"
+                                                                                                                              "name": "gate-state"
                                                                                                                             },
                                                                                                                             "kind": "binary",
-                                                                                                                            "operator": "Inotmatch"
+                                                                                                                            "operator": "Inotmatch",
+                                                                                                                            "migration": {
+                                                                                                                              "legacyResource": "gate",
+                                                                                                                              "legacyPattern": "public static bool RevealSubmenuByKeyboard\\(IntPtr popup, IntPtr menu, int position\\)",
+                                                                                                                              "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                                                                                                            }
                                                                                                                           },
                                                                                                                           "left": {
                                                                                                                             "right": {
@@ -5667,10 +5777,15 @@
                     },
                     "left": {
                       "kind": "resource",
-                      "name": "gate"
+                      "name": "input-safety"
                     },
                     "kind": "binary",
-                    "operator": "Inotmatch"
+                    "operator": "Inotmatch",
+                    "migration": {
+                      "legacyResource": "gate",
+                      "legacyPattern": "LastEditTextSent = checked\\(\\(uint\\)typed\\[0\\]\\)",
+                      "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                    }
                   },
                   "left": {
                     "right": {
@@ -5680,23 +5795,33 @@
                       },
                       "left": {
                         "kind": "resource",
-                        "name": "gate"
+                        "name": "input-safety"
                       },
                       "kind": "binary",
-                      "operator": "Inotmatch"
+                      "operator": "Inotmatch",
+                      "migration": {
+                        "legacyResource": "gate",
+                        "legacyPattern": "SendUnicodeInput\\(parent, expectedProcessId, edit, text\\)",
+                        "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                      }
                     },
                     "left": {
                       "right": {
                         "right": {
                           "kind": "literal",
-                          "value": "LastEditClearSent = SendKeyInputs\\(LastEditClearExpected"
+                          "value": "LastEditClearSent = operations\\.SendKeyInputs\\(LastEditClearExpected"
                         },
                         "left": {
                           "kind": "resource",
-                          "name": "gate"
+                          "name": "input-safety"
                         },
                         "kind": "binary",
-                        "operator": "Inotmatch"
+                        "operator": "Inotmatch",
+                        "migration": {
+                          "legacyResource": "gate",
+                          "legacyPattern": "LastEditClearSent = SendKeyInputs\\(LastEditClearExpected",
+                          "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                        }
                       },
                       "left": {
                         "right": {
@@ -5856,16 +5981,36 @@
                                               },
                                               "left": {
                                                 "right": {
-                                                  "right": {
-                                                    "kind": "literal",
-                                                    "value": "(?s)var clear = new KeyInputRecord\\[2\\].*?EditBufferText\\(edit\\).*?var records = new KeyInputRecord\\[text\\.Length \\* 2\\]"
-                                                  },
-                                                  "left": {
-                                                    "kind": "resource",
-                                                    "name": "gate"
-                                                  },
                                                   "kind": "binary",
-                                                  "operator": "Inotmatch"
+                                                  "operator": "Or",
+                                                  "left": {
+                                                    "kind": "binary",
+                                                    "operator": "Inotmatch",
+                                                    "left": {
+                                                      "kind": "resource",
+                                                      "name": "input-safety"
+                                                    },
+                                                    "right": {
+                                                      "kind": "literal",
+                                                      "value": "(?s)var clear = new KeyInputRecord\\[2\\].*?EditBufferText\\(edit\\).*?SendUnicodeInput\\(parent, expectedProcessId, edit, text\\)"
+                                                    }
+                                                  },
+                                                  "right": {
+                                                    "kind": "binary",
+                                                    "operator": "Inotmatch",
+                                                    "left": {
+                                                      "kind": "resource",
+                                                      "name": "input-safety"
+                                                    },
+                                                    "right": {
+                                                      "kind": "literal",
+                                                      "value": "(?s)public int\\[\\] SendUnicodeInput\\(.*?var records = new KeyInputRecord\\[text\\.Length \\* 2\\]"
+                                                    }
+                                                  },
+                                                  "migration": {
+                                                    "legacyPattern": "(?s)var clear = new KeyInputRecord\\[2\\].*?EditBufferText\\(edit\\).*?var records = new KeyInputRecord\\[text\\.Length \\* 2\\]",
+                                                    "reason": "Preserve clear/read/Unicode call and Unicode record creation without depending on method declaration order"
+                                                  }
                                                 },
                                                 "left": {
                                                   "right": {
@@ -5875,10 +6020,15 @@
                                                     },
                                                     "left": {
                                                       "kind": "resource",
-                                                      "name": "gate"
+                                                      "name": "input-safety"
                                                     },
                                                     "kind": "binary",
-                                                    "operator": "Inotmatch"
+                                                    "operator": "Inotmatch",
+                                                    "migration": {
+                                                      "legacyResource": "gate",
+                                                      "legacyPattern": "SendMessage\\(edit, 0x00B1, UIntPtr\\.Zero, new IntPtr\\(-1\\)\\)",
+                                                      "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                                    }
                                                   },
                                                   "left": {
                                                     "right": {
@@ -5888,10 +6038,15 @@
                                                       },
                                                       "left": {
                                                         "kind": "resource",
-                                                        "name": "gate"
+                                                        "name": "gate-state"
                                                       },
                                                       "kind": "binary",
-                                                      "operator": "Inotmatch"
+                                                      "operator": "Inotmatch",
+                                                      "migration": {
+                                                        "legacyResource": "gate",
+                                                        "legacyPattern": "SendMessageText\\(edit, 0x000D",
+                                                        "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                                      }
                                                     },
                                                     "left": {
                                                       "right": {
@@ -5901,10 +6056,15 @@
                                                         },
                                                         "left": {
                                                           "kind": "resource",
-                                                          "name": "gate"
+                                                          "name": "input-safety"
                                                         },
                                                         "kind": "binary",
-                                                        "operator": "Inotmatch"
+                                                        "operator": "Inotmatch",
+                                                        "migration": {
+                                                          "legacyResource": "gate",
+                                                          "legacyPattern": "VirtualKey = 0x2E",
+                                                          "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                                        }
                                                       },
                                                       "left": {
                                                         "right": {
@@ -6018,10 +6178,15 @@
                                                                           },
                                                                           "left": {
                                                                             "kind": "resource",
-                                                                            "name": "gate"
+                                                                            "name": "gate-state"
                                                                           },
                                                                           "kind": "binary",
-                                                                          "operator": "Inotmatch"
+                                                                          "operator": "Inotmatch",
+                                                                          "migration": {
+                                                                            "legacyResource": "gate",
+                                                                            "legacyPattern": "SendMessageString\\(edit, 0x000C, UIntPtr\\.Zero, text\\)",
+                                                                            "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                                                          }
                                                                         },
                                                                         "left": {
                                                                           "right": {
@@ -6096,10 +6261,15 @@
                                                                                       },
                                                                                       "left": {
                                                                                         "kind": "resource",
-                                                                                        "name": "gate"
+                                                                                        "name": "gate-state"
                                                                                       },
                                                                                       "kind": "binary",
-                                                                                      "operator": "Inotmatch"
+                                                                                      "operator": "Inotmatch",
+                                                                                      "migration": {
+                                                                                        "legacyResource": "gate",
+                                                                                        "legacyPattern": "public static bool ClickButton\\(IntPtr button\\)",
+                                                                                        "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                                                                      }
                                                                                     },
                                                                                     "left": {
                                                                                       "right": {
@@ -8396,10 +8566,15 @@
                   },
                   "left": {
                     "kind": "resource",
-                    "name": "gate"
+                    "name": "gate-state"
                   },
                   "kind": "binary",
-                  "operator": "Inotmatch"
+                  "operator": "Inotmatch",
+                  "migration": {
+                    "legacyResource": "gate",
+                    "legacyPattern": "RealChildWindowFromPoint\\(dialog, clientPoint\\)",
+                    "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                  }
                 },
                 "left": {
                   "right": {
@@ -8409,10 +8584,15 @@
                     },
                     "left": {
                       "kind": "resource",
-                      "name": "gate"
+                      "name": "gate-state"
                     },
                     "kind": "binary",
-                    "operator": "Inotmatch"
+                    "operator": "Inotmatch",
+                    "migration": {
+                      "legacyResource": "gate",
+                      "legacyPattern": "HitTarget = !visibleEmpty && sameTopLevel && realChild == target",
+                      "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                    }
                   },
                   "left": {
                     "right": {
@@ -8421,10 +8601,15 @@
                     },
                     "left": {
                       "kind": "resource",
-                      "name": "gate"
+                      "name": "gate-state"
                     },
                     "kind": "binary",
-                    "operator": "Inotmatch"
+                    "operator": "Inotmatch",
+                    "migration": {
+                      "legacyResource": "gate",
+                      "legacyPattern": "SystemParametersInfoRect\\(0x0030",
+                      "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                    }
                   },
                   "kind": "binary",
                   "operator": "Or"
@@ -8473,10 +8658,15 @@
           },
           "left": {
             "kind": "resource",
-            "name": "gate"
+            "name": "gate-state"
           },
           "kind": "binary",
-          "operator": "Inotmatch"
+          "operator": "Inotmatch",
+          "migration": {
+            "legacyResource": "gate",
+            "legacyPattern": "ChosenUncoveredRectangle = piece",
+            "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+          }
         },
         "left": {
           "right": {
@@ -8486,10 +8676,15 @@
             },
             "left": {
               "kind": "resource",
-              "name": "gate"
+              "name": "gate-state"
             },
             "kind": "binary",
-            "operator": "Inotmatch"
+            "operator": "Inotmatch",
+            "migration": {
+              "legacyResource": "gate",
+              "legacyPattern": "GetWindow\\(target, 3\\)",
+              "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+            }
           },
           "left": {
             "right": {
@@ -8499,10 +8694,15 @@
               },
               "left": {
                 "kind": "resource",
-                "name": "gate"
+                "name": "gate-state"
               },
               "kind": "binary",
-              "operator": "Inotmatch"
+              "operator": "Inotmatch",
+              "migration": {
+                "legacyResource": "gate",
+                "legacyPattern": "SubtractCoveredRectangles",
+                "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+              }
             },
             "left": {
               "right": {
@@ -8577,10 +8777,15 @@
                           },
                           "left": {
                             "kind": "resource",
-                            "name": "gate"
+                            "name": "gate-state"
                           },
                           "kind": "binary",
-                          "operator": "Inotmatch"
+                          "operator": "Inotmatch",
+                          "migration": {
+                            "legacyResource": "gate",
+                            "legacyPattern": "\\} else if \\(!hit\\.HitTarget\\) \\{",
+                            "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                          }
                         },
                         "left": {
                           "right": {
@@ -8590,10 +8795,15 @@
                             },
                             "left": {
                               "kind": "resource",
-                              "name": "gate"
+                              "name": "gate-state"
                             },
                             "kind": "binary",
-                            "operator": "Inotmatch"
+                            "operator": "Inotmatch",
+                            "migration": {
+                              "legacyResource": "gate",
+                              "legacyPattern": "return RealChildWindowFromPoint\\(dialog, clientPoint\\) == target;",
+                              "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                            }
                           },
                           "left": {
                             "right": {
@@ -8603,10 +8813,15 @@
                               },
                               "left": {
                                 "kind": "resource",
-                                "name": "gate"
+                                "name": "gate-state"
                               },
                               "kind": "binary",
-                              "operator": "Inotmatch"
+                              "operator": "Inotmatch",
+                              "migration": {
+                                "legacyResource": "gate",
+                                "legacyPattern": "for \\(int column = 1; column <= 5; column\\+\\+\\)",
+                                "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                              }
                             },
                             "left": {
                               "right": {
@@ -8616,10 +8831,15 @@
                                 },
                                 "left": {
                                   "kind": "resource",
-                                  "name": "gate"
+                                  "name": "gate-state"
                                 },
                                 "kind": "binary",
-                                "operator": "Inotmatch"
+                                "operator": "Inotmatch",
+                                "migration": {
+                                  "legacyResource": "gate",
+                                  "legacyPattern": "for \\(int row = 1; row <= 3; row\\+\\+\\)",
+                                  "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                }
                               },
                               "left": {
                                 "right": {
@@ -8628,10 +8848,15 @@
                                 },
                                 "left": {
                                   "kind": "resource",
-                                  "name": "gate"
+                                  "name": "gate-state"
                                 },
                                 "kind": "binary",
-                                "operator": "Inotmatch"
+                                "operator": "Inotmatch",
+                                "migration": {
+                                  "legacyResource": "gate",
+                                  "legacyPattern": "if \\(!hit\\.HitTarget && !visibleEmpty && dialog != IntPtr\\.Zero\\)",
+                                  "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+                                }
                               },
                               "kind": "binary",
                               "operator": "Or"

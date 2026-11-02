@@ -19,18 +19,46 @@ $paths = @{
   designTokens = 'graphcode-windows\src\DesignTokens.zig'
   laneLayout = 'graphcode-windows\src\LaneLayout.zig'
   graphCanvas = 'graphcode-windows\src\GraphCanvas.zig'
+  'gate-state' = 'Tools\windows\ValidationRunner\Ui\Production\GraphCodeUiaGateState.cs'
+  'input-safety' = 'Tools\windows\ValidationRunner\Ui\Production\UiaInputSafety.cs'
+  'host-info' = 'Tools\windows\ValidationRunner\Ui\Production\GraphCodeUiaHostInfo.cs'
 }
 $resources = @{}
+$linkage = @{ verified = $false }
+function Assert-ProductionSourceLinkage {
+  if ($linkage.verified) { return }
+  $gateText = [IO.File]::ReadAllText((Join-Path $RepositoryRoot $paths.gate))
+  if ($gateText -match '\bclass\s+(GraphCodeUiaGateState|GraphCodeUiaHostInfo|GraphCodeUiaAttribution|GraphCodeMultiProjectRenameNative)\b' -or
+      -not $gateText.Contains('Import-CompiledValidationAssembly.ps1') -or
+      -not $gateText.Contains('-AssemblyPath $validationAssemblyPath -RequiredType $requiredType')) {
+    throw 'UIA production consumer does not load the single compiled production binding'
+  }
+  $bindings = $null
+  foreach ($name in @('GraphCodeUiaGateState', 'GraphCodeUiaHostInfo', 'GraphCodeUiaAttribution',
+      'GraphCodeMultiProjectRenameNative', 'GraphCode.Windows.UiaWindowActivation')) {
+    if (-not $gateText.Contains('"' + $name + '"')) { throw "Production gate does not require the shared type: $name" }
+    $current = & (Join-Path $RepositoryRoot 'Tools\windows\Import-CompiledValidationAssembly.ps1') `
+      -AssemblyPath $AssemblyPath -RequiredType $name
+    if ($bindings -and -not [object]::ReferenceEquals($current, $bindings)) { throw 'UIA production components do not share one binding assembly' }
+    $bindings = $current
+  }
+  $type = $bindings.GetType('GraphCodeUiaGateState', $true)
+  $input = $type.GetField('InputSafety', [Reflection.BindingFlags]'NonPublic,Static')
+  if (-not $input -or $input.FieldType -ne $bindings.GetType('GraphCode.Windows.UiaInputSafety', $true)) {
+    throw 'Production gate does not use the exact tested shared input component'
+  }
+  $project = [IO.File]::ReadAllText((Join-Path $RepositoryRoot 'Tools\windows\ValidationRunner\Bindings\Windows\WindowsValidationBindings.csproj'))
+  if (-not $project.Contains('Compile Include="..\..\Ui\Production\*.cs"') -or
+      -not $project.Contains('Compile Include="..\..\..\UiaWindowActivation.cs"')) {
+    throw 'Production binding does not compile the actual current shared sources'
+  }
+  $linkage.verified = $true
+}
 function Read-SourceResource([string] $Name) {
   if (-not $paths.ContainsKey($Name)) { throw "Undeclared UI source resource: $Name" }
   if (-not $resources.ContainsKey($Name)) {
+    if ($Name -cin @('gate-state', 'input-safety', 'host-info')) { Assert-ProductionSourceLinkage }
     $text = [IO.File]::ReadAllText((Join-Path $RepositoryRoot $paths[$Name]))
-    if ($Name -ceq 'gate') {
-      foreach ($component in @('GraphCodeUiaGateState', 'GraphCodeUiaHostInfo', 'GraphCodeUiaAttribution',
-          'GraphCodeMultiProjectRenameNative', 'UiaInputSafety')) {
-        $text += "`n" + [IO.File]::ReadAllText((Join-Path $uiRoot "Production\$component.cs"))
-      }
-    }
     $resources[$Name] = $text
   }
   return $resources[$Name]
@@ -70,6 +98,12 @@ function Get-AssertionValue($Node, [int] $Depth = 0) {
 }
 $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $results = [Collections.Generic.List[object]]::new()
+$linkageFailure = $null
+try { Assert-ProductionSourceLinkage } catch { $linkageFailure = $_ }
+$results.Add([ordered]@{
+  id = 'ui.production.consumer-linkage'; status = $(if ($linkageFailure) { 'Failed' } else { 'Passed' }); executedCount = 1
+  evidence = $(if ($linkageFailure) { $linkageFailure.ToString() } else { 'Actual gate imports exact file-backed shared assembly and current ordinary production sources' })
+})
 function Invoke-EvaluatorControl([string] $Name, [scriptblock] $Assertion) {
   $failure = $null
   try { & $Assertion } catch { $failure = $_ }

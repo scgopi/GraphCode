@@ -1703,6 +1703,96 @@
       "owner": "Ui",
       "minimumCount": 1,
       "requiredGroups": []
+    },
+    {
+      "id": "ui.connector.blank-title",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.connector.different-target-title",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.connector.duplicate-source",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.connector.duplicate-target",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.connector.missing-source",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.connector.missing-target",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.connector.owned-pair",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.connector.same-endpoint",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.promotion.disabled-action",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.promotion.enabled-heading",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.promotion.exact",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.promotion.extra-item",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.promotion.reordered",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.promotion.separator-heading",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.promotion.wrong-caption",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
     }
   ]
 }
