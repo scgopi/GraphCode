@@ -31,7 +31,14 @@ public static class SuiteRegistration
             "OWNERSHIP_CASE_RESULT=", ["ownership.ui-startup.helpers", "ownership.ui-startup.redacted-log", "ownership.ui-startup.truncated-log",
                 "ownership.ui-startup.missing-log", "ownership.ui-startup.retained-report", "ownership.ui-process-tree.pid-reuse"]),
         new Adapters.StandaloneSuites.CaseScriptSuite("ownership.mixed-source", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\MixedSource.Contracts.ps1",
-            "OWNERSHIP_CASE_RESULT=", ["ownership.legacy.peer-emission", "ownership.legacy.rename-submit", "ownership.legacy.fresh-capture"])
+            "OWNERSHIP_CASE_RESULT=", ["ownership.legacy.peer-emission", "ownership.legacy.rename-submit", "ownership.legacy.fresh-capture"]),
+        new Adapters.StandaloneSuites.CaseScriptSuite("ownership.controlled-capture", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\ControlledCapture.Contracts.ps1",
+            "OWNERSHIP_CASE_RESULT=", ["ownership.mixed-capture.normal", "ownership.mixed-capture.stop", "ownership.mixed-capture.inherited",
+                "ownership.mixed-capture.abrupt", "ownership.mixed-capture.timeout", "ownership.mixed-capture.inherited-timeout",
+                "ownership.mixed-capture.primary-secondary", "ownership.mixed-capture.cleanup-only",
+                "ownership.ui-process-tree.controlled-child", "ownership.ui-process-tree.cleanup-complete"]),
+        new Adapters.StandaloneSuites.CaseScriptSuite("ownership.production-linkage", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\ProductionLinkage.Contracts.ps1",
+            "OWNERSHIP_CASE_RESULT=", ["ownership.legacy.packaging-shared-linkage", "ownership.legacy.uia-shared-linkage"])
     ];
 }
 
@@ -50,6 +57,7 @@ public sealed class OwnershipSuite : IValidationSuite
         "cleanup-success", "cleanup-root-survivor", "cleanup-job-survivor", "cleanup-stdout-fault",
         "cleanup-both-stream-faults", "cleanup-primary-error", "cleanup-only-error", "cleanup-original-deadline", "cleanup-later-actions",
         "cleanup-descendant-unknown", "signal-fragmented", "signal-crlf", "signal-eof", "signal-exact-only", "signal-overlong",
+        "raw-codec-malformed-eof", "raw-codec-retention-after-malformed",
         "json-malformed", "json-duplicate", "json-nested-duplicate", "json-array", "json-case-sensitive",
         "frame-fragmented-unicode", "frame-clean-eof", "frame-short-header", "frame-short-body", "frame-zero", "frame-over-limit", "frame-invalid-utf8",
         "peer-positive-rename", "peer-resume-unchanged", "peer-foreign-owner", "peer-foreign-node",
@@ -59,14 +67,11 @@ public sealed class OwnershipSuite : IValidationSuite
         "peer-control-positive", "peer-control-owner", "peer-control-selection", "peer-control-extra", "peer-control-type",
         "peer-control-duplicate", "peer-control-second"
     ];
-    private static readonly string[] nativeIds = ["normal", "abrupt", "timeout", "inherited", "inherited-timeout", "arguments-environment", "real-pipe"];
+    private static readonly string[] nativeIds = ["normal", "abrupt", "timeout", "inherited", "inherited-timeout", "arguments-environment", "real-pipe",
+        "bytes-utf8-bom", "bytes-utf16-bom", "bytes-invalid-utf8", "bytes-utf8-supplementary"];
     private static readonly (string Id, string Evidence)[] unported =
     [
-        ("legacy.mixed-multiproject", "Complete mixed source 1672-4245 remains mandatory: UI predicates, native/fresh snapshot policies, receipts, strict protocol, owned real pipes, eight bounded-capture and primary/cleanup negative controls. Source invocation inventories are not executed counts."),
-        ("legacy.packaging-shared-linkage", "Packaging.Standalone.Tests.ps1 must load this complete StandaloneProcessJob implementation, not its embedded duplicate."),
-        ("legacy.uia-shared-linkage", "uia-live-gate.ps1 must load these complete UiaOwnedStreamCapture/StandaloneProcessJob implementations, including actual native membership."),
-        ("ui-process-tree.controlled-child", "Source 5945: actual gate registered held process/job must expose its controlled descendant."),
-        ("ui-process-tree.cleanup-complete", "Source 5947: actual gate Stop-UiaOwnedProcessTrees must finish retained root/job/readers before cleanup succeeds.")
+        ("legacy.mixed-multiproject", "Complete mixed source 1672-4245 remains mandatory: UI predicates, native/fresh snapshot policies, receipts, strict protocol, owned real pipes, eight bounded-capture and primary/cleanup negative controls. Source invocation inventories are not executed counts.")
     ];
 
     public string Id => "ownership";
@@ -313,6 +318,21 @@ public sealed class OwnershipSuite : IValidationSuite
                 "Live UNKNOWN observer missed split/EOF signal or treated substring/overlong output as authority.");
             return;
         }
+        if (id.StartsWith("raw-codec-", StringComparison.Ordinal))
+        {
+            bool withSignal = id == "raw-codec-retention-after-malformed";
+            byte[] bytes = withSignal ? [0xc3, 0x28, 10, .. Encoding.UTF8.GetBytes(OwnershipRetention.Sentinel + "\n")] : [0xc3, 0x28];
+            int signals = 0;
+            string path = Path.Combine(root, id + ".log");
+            using var memory = new MemoryStream(bytes);
+            var capture = new OwnedByteStreamCapture(memory, path, new UTF8Encoding(false, true),
+                new RetentionSignalObserver(() => signals++));
+            await capture.RawEof.ConfigureAwait(false);
+            await RejectAsync<DecoderFallbackException>(async () => { await capture.Text.ConfigureAwait(false); }).ConfigureAwait(false);
+            Require(capture.RawEof.IsCompletedSuccessfully && File.ReadAllBytes(path).SequenceEqual(bytes) &&
+                signals == (withSignal ? 1 : 0), "Strict decoding failure lost original bytes, independent raw EOF, or a later live retention marker.");
+            return;
+        }
         if (id.StartsWith("json-", StringComparison.Ordinal))
         {
             string text = id switch
@@ -452,6 +472,28 @@ public sealed class OwnershipSuite : IValidationSuite
     {
         string childRoot = Path.Combine(root, "native-" + id);
         Directory.CreateDirectory(childRoot);
+        if (id.StartsWith("bytes-", StringComparison.Ordinal))
+        {
+            var owned = OwnedChildSupervisor.Start(OwnedFixture.Command(id, childRoot), TimeSpan.FromSeconds(5), childRoot);
+            OwnedChildResult? result = null;
+            AggregateException? failure = null;
+            try { result = await owned.CompleteAsync(cancellationToken).ConfigureAwait(false); }
+            catch (AggregateException error) { failure = error; }
+            Require(result?.Cleanup.ResourcesClosed == true ||
+                failure?.Data["OwnedCleanupProof"] is OwnedCleanupProof { CanRelease: true, ResourcesClosed: true },
+                "Codec rejection did not independently prove raw EOF and safe owned cleanup.");
+            string rawPath = Path.Combine(childRoot, $"owned-{owned.ProcessId}-{owned.CreationFileTime}-stdout.log");
+            Require(File.ReadAllBytes(rawPath).SequenceEqual(OwnedFixture.BytesForMode(id)), "Original pipe bytes were normalized or lost.");
+            if (id == "bytes-utf8-bom")
+            {
+                Require(result != null && result.StandardOutput.StartsWith('\uFEFF'), "UTF-8 BOM was consumed by capture.");
+                Reject<InvalidDataException>(() => MultiProjectJson.Parse(result!.StandardOutput), "MULTIPROJECT_JSON");
+            }
+            else if (id is "bytes-utf16-bom" or "bytes-invalid-utf8")
+                Require(failure != null, "Non-UTF-8 pipe bytes were accepted by BOM autodetection or replacement.");
+            else Require(result?.StandardOutput == new string('a', 4095) + "\uD83D\uDE80tail", "Supplementary scalar crossing the 4096-byte read boundary changed.");
+            return;
+        }
         if (id == "real-pipe")
         {
             await RealPipeAsync(childRoot, alpha, beta, cancellationToken).ConfigureAwait(false);
@@ -600,8 +642,8 @@ public sealed class OwnershipSuite : IValidationSuite
     {
         public string Identity => "controlled-fake-held-authority; nativeCalls=0";
         public bool OwnershipUnproven { get; set; }
-        public Task<string>? StandardOutput { get; set; } = Task.FromResult("stdout");
-        public Task<string>? StandardError { get; set; } = Task.FromResult("stderr");
+        public Task? StandardOutput { get; set; } = Task.FromResult("stdout");
+        public Task? StandardError { get; set; } = Task.FromResult("stderr");
         public bool RootExited = true, JobEmpty = true, CloseFails, ConsumeDeadline, Retained;
         public int Terminations, JobWaits, RootWaits, Closes, RootRemainingMilliseconds;
         public Deadline? JobDeadline, RootDeadline;

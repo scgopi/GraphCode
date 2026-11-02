@@ -39,12 +39,21 @@ public static class OwnedFixture
         if (args.Length < 3) throw new ArgumentException("Owned fixture requires a mode and existing owned root.");
         string mode = args[1], root = Path.GetFullPath(args[2]);
         if (!Directory.Exists(root)) throw new DirectoryNotFoundException(root);
+        if (mode.StartsWith("bytes-", StringComparison.Ordinal))
+        {
+            byte[] bytes = BytesForMode(mode);
+            using Stream output = Console.OpenStandardOutput();
+            await output.WriteAsync(bytes).ConfigureAwait(false);
+            await output.FlushAsync().ConfigureAwait(false);
+            return 0;
+        }
         if (mode == "protocol")
         {
             if (args.Length != 6) throw new ArgumentException("Protocol fixture requires pipe name and both owner paths.");
             await ServeProtocolAsync(root, args[3], args[4], args[5]).ConfigureAwait(false);
             return 0;
         }
+
         if (mode == "descendant")
         {
             File.WriteAllText(Path.Combine(root, "descendant-ready"), "ready");
@@ -82,6 +91,19 @@ public static class OwnedFixture
         File.WriteAllText(Path.Combine(root, "ready"), "ready");
         if (mode is "timeout" or "inherited-timeout") await Task.Delay(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
         return mode == "abrupt" ? 23 : 0;
+    }
+
+    public static byte[] BytesForMode(string mode)
+    {
+        const string json = "{\"value\":\"owned\"}";
+        return mode switch
+        {
+            "bytes-utf8-bom" => [0xef, 0xbb, 0xbf, .. Encoding.UTF8.GetBytes(json)],
+            "bytes-utf16-bom" => [0xff, 0xfe, .. Encoding.Unicode.GetBytes(json)],
+            "bytes-invalid-utf8" => [0x7b, 0xc3, 0x28, 0x7d],
+            "bytes-utf8-supplementary" => Encoding.UTF8.GetBytes(new string('a', 4095) + "\uD83D\uDE80tail"),
+            _ => throw new ArgumentException("Unknown byte fixture mode.", nameof(mode))
+        };
     }
 
     private static ProcessStartInfo CommandForInheritedChild(string root)

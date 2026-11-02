@@ -16,7 +16,7 @@ CIM observations nor reopening a PID supplies termination authority.
 
 `StandaloneProcessJob` is the complete native job implementation, including
 membership, accounting, bounded census and packaging diagnostics.
-`UiaOwnedStreamCapture` uses it for native membership. Both must be linked by
+`UiaOwnedStreamCapture` uses it for native membership. Both are linked by
 the host-owned packaging and UIA adapters; merely compiling these files does
 not establish that integration. Streaming uses `AutoFlush`, which flushes bytes
 without prematurely flushing an encoder containing half a surrogate pair.
@@ -30,6 +30,13 @@ The cleanup coordinator refuses termination, proof waits and close on that
 latch; native kill/close boundaries also recheck it under the same lock.
 The host can therefore enter its terminal retention hold without waiting for
 the workload timeout to kill the very resources it is required to preserve.
+The supervisor's `OwnedByteStreamCapture` persists original pipe bytes before
+strict decoding and never autodetects or consumes a BOM. Raw EOF is a separate
+proof from successful text decoding: invalid UTF-8 is rejected only after the
+raw reader has continued to EOF and retained every byte. The live sentinel
+observer reads the raw ASCII line boundary independently, including after a
+decoder error. `UiaOwnedStreamCapture` remains the distinct production
+text-reader API; its re-encoded text logs are not original-byte evidence.
 
 `OwnedFixture.TryRunAsync(args)` must run before ordinary host argument parsing.
 It recognizes only `--ownership-fixture`. The compiled fixture tests native
@@ -45,7 +52,7 @@ and root-runner SHA-256
 `202D260A846670E314163F9D2565D07B1E0AD27A4D61F41EA99D67624FF6C869`.
 The old runner is never executed, embedded or extracted for execution.
 
-The 74 managed and seven controlled-native cases are individually registered
+The 76 managed and eleven controlled-native cases are individually registered
 with exact-count manifest guards. The typed peer implements the complete
 request/response/publication/control core from `Stub-Daemon.ps1:29-294`; it is
 the implementation used by the compiled real-pipe fixture, not a passing fake.
@@ -59,9 +66,8 @@ transport is the host's authoritative held-job supervisor. Scope, ScriptMethod,
 ErrorRecord identity, information streams and missing-versus-empty environment
 membership remain PowerShell assertions.
 
-The full mixed family, two production linkage obligations and two actual
-gate-owned controlled-tree obligations remain separately mandatory and
-`Incomplete`; they cannot be replaced by compiled helper tests.
+The full mixed family remains mandatory and `Incomplete`; it cannot be
+replaced by the compiled helper tests.
 `source-correspondence.json` records every one of
 the immutable mixed source's 126 invocation templates and 192 assertion
 commands, with stable source IDs and zero claimed execution. Those source
@@ -73,5 +79,16 @@ PowerShell source checks. Six newly reconciled startup/tree units also run:
 thirteen complete helper-presence checks (source evidence), three bounded file
 diagnostic cases, one retained report case, and the advisory PID-reuse
 negative control. These eighteen checks are not a native product startup
-walkthrough. The two actual gate-owned controlled-tree obligations remain
-mandatory until their linked-production integration runs.
+walkthrough. The two actual gate-owned controlled-tree obligations now run
+against the linked production gate, as do all eight original bounded-capture
+modes, including inherited writers, original timeout classification, and
+primary/cleanup-only persistence failures. Two separate source-and-loader
+checks establish packaging/UIA linkage without executing the packaging suite
+merely to obtain a type.
+
+The original-byte regression was first reproduced by two valid-BOM children:
+the old reader consumed UTF-8 BOM bytes and autodetected UTF-16. In-memory
+malformed-byte/raw-EOF separation was then established before executing the
+actual malformed child. The four controlled byte fixtures now assert exact
+original log bytes, strict UTF-8 rejection, positive owned cleanup, and a
+supplementary scalar straddling a 4096-byte read boundary.

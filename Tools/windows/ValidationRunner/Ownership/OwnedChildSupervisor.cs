@@ -77,7 +77,8 @@ public sealed class OwnedChildSupervisor
     private bool descendantUnknown, retentionRegistered;
     private IntPtr root, thread, job;
     private bool assigned, resumed, completed;
-    private StreamReader? stdoutReader, stderrReader;
+    private Stream? stdoutPipe, stderrPipe;
+    private OwnedByteStreamCapture? stdoutCapture, stderrCapture;
     private Task<string>? stdout, stderr;
     private long creationFileTime;
     public uint ProcessId { get; private set; }
@@ -206,13 +207,15 @@ public sealed class OwnedChildSupervisor
             StandaloneProcessJob.Assign(job, root);
             assigned = true;
             UiaOwnedStreamCapture.RequireJobMember(root, job);
-            stdoutReader = MakeReader(ref outRead, info.StandardOutputEncoding);
-            stderrReader = MakeReader(ref errRead, info.StandardErrorEncoding);
+            stdoutPipe = MakePipe(ref outRead);
+            stderrPipe = MakePipe(ref errRead);
             string stem = $"owned-{ProcessId}-{creationFileTime}";
-            stdout = UiaOwnedStreamCapture.Read(stdoutReader, Path.Combine(artifactRoot, stem + "-stdout.log"),
-                new RetentionSignalObserver(ObserveDescendantUnknown));
-            stderr = UiaOwnedStreamCapture.Read(stderrReader, Path.Combine(artifactRoot, stem + "-stderr.log"),
-                new RetentionSignalObserver(ObserveDescendantUnknown));
+            stdoutCapture = new OwnedByteStreamCapture(stdoutPipe, Path.Combine(artifactRoot, stem + "-stdout.log"),
+                info.StandardOutputEncoding, new RetentionSignalObserver(ObserveDescendantUnknown));
+            stdout = stdoutCapture.Text;
+            stderrCapture = new OwnedByteStreamCapture(stderrPipe, Path.Combine(artifactRoot, stem + "-stderr.log"),
+                info.StandardErrorEncoding, new RetentionSignalObserver(ObserveDescendantUnknown));
+            stderr = stderrCapture.Text;
             if (deadline.Expired) throw new TimeoutException("Owned launch original deadline exceeded before resume.");
             uint previous = ResumeThread(thread);
             if (previous == uint.MaxValue) throw new Win32Exception();
@@ -243,11 +246,11 @@ public sealed class OwnedChildSupervisor
         }
     }
 
-    private static StreamReader MakeReader(ref IntPtr handle, Encoding? encoding)
+    private static Stream MakePipe(ref IntPtr handle)
     {
         var safe = new SafeFileHandle(handle, true);
         handle = IntPtr.Zero;
-        try { return new StreamReader(new FileStream(safe, FileAccess.Read), encoding ?? new UTF8Encoding(false, true), true); }
+        try { return new FileStream(safe, FileAccess.Read); }
         catch { safe.Dispose(); throw; }
     }
 
@@ -341,11 +344,11 @@ public sealed class OwnedChildSupervisor
     {
         public string Identity => $"pid={owner.ProcessId}; creation={owner.creationFileTime}; job={owner.job}";
         public bool OwnershipUnproven { get { lock (owner.retentionGate) return owner.descendantUnknown; } }
-        public Task<string>? StandardOutput => owner.stdout;
-        public Task<string>? StandardError => owner.stderr;
+        public Task? StandardOutput => owner.stdoutCapture?.RawEof;
+        public Task? StandardError => owner.stderrCapture?.RawEof;
         public IReadOnlyList<Action> CloseActions =>
         [
-            () => CloseOwned(() => owner.stdoutReader?.Dispose()), () => CloseOwned(() => owner.stderrReader?.Dispose()),
+            () => CloseOwned(() => owner.stdoutPipe?.Dispose()), () => CloseOwned(() => owner.stderrPipe?.Dispose()),
             () => CloseOwned(() => Close(ref owner.thread)),
             () => CloseOwned(() => { if (owner.job != IntPtr.Zero) { StandaloneProcessJob.Close(owner.job); owner.job = IntPtr.Zero; } }),
             () => CloseOwned(() => Close(ref owner.root)), () => CloseOwned(owner.retentionCancellation.Dispose)

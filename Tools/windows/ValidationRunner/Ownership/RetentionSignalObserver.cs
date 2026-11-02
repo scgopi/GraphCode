@@ -28,6 +28,17 @@ public sealed class RetentionSignalObserver(Action observed) : IOwnedStreamObser
 
     public void OnEof() => FinishLine();
 
+    public void OnBytes(ReadOnlySpan<byte> bytes)
+    {
+        foreach (byte value in bytes)
+        {
+            if (value == (byte)'\n') { FinishLine(); continue; }
+            if (overlong) continue;
+            if (line.Length > Signal.Length) { overlong = true; line.Clear(); continue; }
+            line.Append((char)value);
+        }
+    }
+
     private void FinishLine()
     {
         if (!overlong)

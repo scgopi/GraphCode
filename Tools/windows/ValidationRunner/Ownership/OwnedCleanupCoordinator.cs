@@ -9,8 +9,8 @@ public interface IOwnedCleanupAuthority
 {
     string Identity { get; }
     bool OwnershipUnproven { get; }
-    Task<string>? StandardOutput { get; }
-    Task<string>? StandardError { get; }
+    Task? StandardOutput { get; }
+    Task? StandardError { get; }
     void Terminate();
     Task<bool> WaitForJobEmptyAsync(Deadline deadline);
     Task<bool> WaitForRootExitAsync(Deadline deadline);
@@ -30,7 +30,7 @@ public static class OwnedCleanupCoordinator
             var unknownProof = new OwnedCleanupProof(false, false,
                 authority.StandardOutput?.IsCompletedSuccessfully ?? true,
                 authority.StandardError?.IsCompletedSuccessfully ?? true, false);
-            foreach (Task<string>? reader in new[] { authority.StandardOutput, authority.StandardError })
+            foreach (Task? reader in new[] { authority.StandardOutput, authority.StandardError })
                 if (reader?.IsFaulted == true) failures.Add(reader.Exception!);
             var unknown = new AggregateException("OWNED_CLEANUP_UNPROVEN: live descendant retention signal; termination and close withheld.", failures);
             Exception reported = primary ?? unknown;
