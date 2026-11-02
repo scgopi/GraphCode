@@ -108,6 +108,23 @@ public static class HostSelfTests
         Check("console-invalid-id-isolation", () =>
             Assert(!ConsoleReport.Unit(passed with { Id = "\nVALIDATION_RUNNER_EXECUTED=1" }).Contains('\n'),
                 "invalid case ID injected a root line"));
+        Check("terminal-known-exit", () => Assert(TerminalSafety.ExitBarrier(0, false).IsCompletedSuccessfully,
+            "proven empty authority cannot exit"));
+        Check("terminal-retained-no-exit", () => Assert(!TerminalSafety.ExitBarrier(1, false).IsCompleted,
+            "retained kill-on-close authority was allowed to exit"));
+        Check("terminal-unknown-no-exit", () => Assert(!TerminalSafety.ExitBarrier(0, true).IsCompleted,
+            "UNKNOWN descendant authority was allowed to exit"));
+        Check("terminal-report-failure-no-exit", () =>
+        {
+            Task? barrier = null;
+            try
+            {
+                try { throw new IOException("controlled report writer failure"); }
+                finally { barrier = TerminalSafety.ExitBarrier(1, false); }
+            }
+            catch (IOException) { }
+            Assert(barrier is not null && !barrier.IsCompleted, "reporting exception bypassed terminal hold");
+        });
         foreach (var error in errors) Console.Error.WriteLine(error);
         Console.WriteLine($"HOST_SELF_TESTS executed={executed} passed={executed - errors.Count} failed={errors.Count} skipped=0");
         return errors.Count == 0 ? 0 : 1;

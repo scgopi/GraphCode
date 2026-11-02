@@ -5,17 +5,20 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-if ($RequiredType -cne "GraphCode.ValidationFixtureDirectoryNative" -and [Environment]::Version.Major -ne 10) {
-  throw "Compiled validation bindings require PowerShell on .NET 10 (PowerShell 7.6); observed $([Environment]::Version)"
+if ($RequiredType -cne "GraphCode.ValidationFixtureDirectoryNative" -and [Environment]::Version.Major -lt 8) {
+  throw "Compiled Windows bindings require PowerShell on .NET 8 or newer (PowerShell 7.4+); observed $([Environment]::Version)"
 }
 if (-not [IO.Path]::IsPathFullyQualified($AssemblyPath)) {
   throw "Compiled validation assembly must be an explicit absolute path"
 }
-$selected = (Resolve-Path -LiteralPath $AssemblyPath -ErrorAction Stop).Path
 $projectRoot = Join-Path $PSScriptRoot "ValidationRunner"
 $fileName = if ($RequiredType -ceq "GraphCode.ValidationFixtureDirectoryNative") {
   "ValidationFixtureBindings.dll"
-} else { "ValidationRunner.dll" }
+} else { "WindowsValidationBindings.dll" }
+if ([IO.Path]::GetFileName($AssemblyPath) -ceq "ValidationRunner.dll") {
+  $AssemblyPath = Join-Path ([IO.Path]::GetDirectoryName($AssemblyPath)) $fileName
+}
+$selected = (Resolve-Path -LiteralPath $AssemblyPath -ErrorAction Stop).Path
 $expected = @("Debug", "Release") | ForEach-Object {
   [IO.Path]::GetFullPath((Join-Path $projectRoot "bin\$_\net10.0-windows\$fileName"))
 }

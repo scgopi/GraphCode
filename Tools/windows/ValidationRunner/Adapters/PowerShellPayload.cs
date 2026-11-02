@@ -3,6 +3,7 @@ using System.IO;
 using System.Reflection;
 using System.Text;
 using GraphCode.Validation.Ownership;
+using GraphCode.Validation.Host;
 
 namespace GraphCode.Validation.Adapters;
 
@@ -48,6 +49,7 @@ public static class PowerShellPayload
             throw new InvalidOperationException($"{id}: owned child cleanup is UNKNOWN; artifacts retained: {artifacts}");
         if (result.StandardOutput.Contains("GRAPHCODE_VALIDATION_ROOT_RETENTION_REQUIRED=ownership_unproven", StringComparison.Ordinal))
         {
+            TerminalSafety.MarkUnknown();
             var failure = new InvalidOperationException($"{id}: descendant reported UNKNOWN ownership; artifacts retained: {artifacts}");
             failure.Data["GraphCodeValidationRootRetentionRequired"] = true;
             throw failure;

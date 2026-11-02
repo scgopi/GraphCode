@@ -6,6 +6,11 @@ using GraphCode.Validation.Host;
 using GraphCode.Validation.Ownership;
 using GraphCode.Validation.Adapters;
 
+try { return await RunAsync(args); }
+finally { await TerminalSafety.PreserveRetainedAuthorityAsync(OwnedChildSupervisor.RetainedLeaseCount); }
+
+static async Task<int> RunAsync(string[] args)
+{
 if (await OwnedFixture.TryRunAsync(args) is int fixtureExit) return fixtureExit;
 if (args.SequenceEqual(new[] { "--self-test" })) return HostSelfTests.Run();
 
@@ -82,3 +87,4 @@ if (!report.Complete) return 1;
 Console.WriteLine("CompiledValidationRunner: PASS");
 Console.WriteLine("VALIDATION_RUNNER_EXECUTED=1");
 return 0;
+}
