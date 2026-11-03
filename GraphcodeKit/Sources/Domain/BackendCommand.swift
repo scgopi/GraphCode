@@ -401,7 +401,8 @@ extension CLISessionBackendKind {
 
   /// A loop's title as one line a session picker can show, or `nil` when nothing is left.
   public static func sessionLabel(_ title: String) -> String? {
-    let line = title.components(separatedBy: .newlines).joined(separator: " ")
+    let line = title.components(separatedBy: CharacterSet.newlines.union(.controlCharacters))
+      .joined(separator: " ")
       .trimmingCharacters(in: .whitespaces)
     return line.isEmpty ? nil : line
   }
@@ -410,8 +411,14 @@ extension CLISessionBackendKind {
   /// `CopilotSessionLog` to find it again. Copilot refuses `--name` beside `--resume`, so
   /// a later rename of the loop can only reach a live session (`renameCommand`).
   public static func copilotSessionName(title: String, sessionName: String) -> String {
-    guard let label = sessionLabel(title) else { return sessionName }
-    return "\(label) · \(copilotNameSuffix(of: sessionName))"
+    // Copilot 1.0.96 rejects a name with a double quote or over 100 characters and keeps
+    // the old one.
+    let usable = title.filter { $0 != "\"" }
+    guard let label = sessionLabel(usable) else { return sessionName }
+    let suffix = " · \(copilotNameSuffix(of: sessionName))"
+    let fitted = label.prefix(copilotNameLimit - suffix.count)
+      .trimmingCharacters(in: .whitespaces)
+    return fitted + suffix
   }
 
   /// Whether `recorded`, a `name:` read back out of Copilot's `workspace.yaml`, belongs to
@@ -426,11 +433,13 @@ extension CLISessionBackendKind {
   }
 
   /// `isCopilotSessionName` for a remote host's shell, as a `grep` still to be given its
-  /// file. `.?` is YAML's closing quote, whichever one the writer picked: a literal one
-  /// would have to survive the single quotes every remote script is wrapped in.
+  /// file. The closing bracket's class is YAML's closing quote, whichever one the writer
+  /// picked.
   public static func copilotNameMatcher(for sessionName: String) -> String {
-    "grep -qE '^name: (\(sessionName)|.* · \(copilotNameSuffix(of: sessionName)).?)$'"
+    "grep -qE '^name: (\(sessionName)|.* · \(copilotNameSuffix(of: sessionName))[\"'\\'']?)$'"
   }
+
+  private static let copilotNameLimit = 100
 
   private static func copilotNameSuffix(of sessionName: String) -> String {
     let id =

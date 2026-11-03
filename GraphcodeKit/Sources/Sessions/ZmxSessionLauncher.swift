@@ -3085,6 +3085,34 @@ public enum ZmxSessionLauncher {
     }
   }
 
+  /// Holds a `/rename` until typing it can't collide with anything. The first pass types
+  /// outside `GraphStore`'s per-session chain, and its text would land in the name; a
+  /// question Copilot is waiting on would take the keystrokes as its answer
+  /// (`CopilotSessionLog.awaitingDecision`). `false` once the wait runs out: a name that
+  /// stays stale costs far less than either collision.
+  static func awaitRenameWindow(
+    of node: LoopNode, projectPath: String?, polls: Int = renameWindowPolls,
+    interval: Duration = renameWindowInterval
+  ) async -> Bool {
+    for poll in 0..<polls {
+      if poll > 0 { try? await Task.sleep(for: interval) }
+      if await !FirstPassTickets.shared.isClaimed(node.id),
+        await !CopilotSessionLog.awaitingDecision(of: node, projectPath: projectPath)
+      {
+        return true
+      }
+    }
+    DialLog.record(
+      session: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
+      dial: "rename", event: "window-closed")
+    return false
+  }
+
+  /// Eighteen reads over three minutes: longer than a whole first pass or a slow opening,
+  /// and few enough that a remote dialog nobody answers costs little.
+  static let renameWindowPolls = 18
+  static let renameWindowInterval: Duration = .seconds(10)
+
   /// The verification window per attempt is generous next to the instant write Copilot
   /// actually does, and the attempt count is small: three swallowed sends in a row means
   /// something structural, not something a fourth send fixes.
@@ -3144,6 +3172,7 @@ public enum ZmxSessionLauncher {
     private var claimed: Set<UUID> = []
     func claim(_ id: UUID) -> Bool { claimed.insert(id).inserted }
     func release(_ id: UUID) { claimed.remove(id) }
+    func isClaimed(_ id: UUID) -> Bool { claimed.contains(id) }
   }
 
   /// How long a resumed session has to still be there before its launch counts as taken.

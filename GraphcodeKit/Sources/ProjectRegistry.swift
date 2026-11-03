@@ -71,6 +71,7 @@ public actor ProjectRegistry {
   private let evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
   private let checkPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)?
   private let deliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)?
+  private let awaitRenameWindow: (@Sendable (LoopNode, String?) async -> Bool)?
   private let captureScript: (@Sendable (ShellPredicate) async -> String?)?
   private let readUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)?
   private let readGoalVerdict: (@Sendable (LoopNode, String?) async -> GoalVerdict?)?
@@ -135,6 +136,8 @@ public actor ProjectRegistry {
       ShellPredicateEvaluator.check,
     deliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)? =
       CLISessionBackend.deliverMessage,
+    awaitRenameWindow: (@Sendable (LoopNode, String?) async -> Bool)? =
+      CLISessionBackend.awaitRenameWindow,
     captureScript: (@Sendable (ShellPredicate) async -> String?)? = ShellPredicateEvaluator.capture,
     readUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)? =
       CLISessionBackend.readUsage,
@@ -183,6 +186,7 @@ public actor ProjectRegistry {
     self.evaluatePredicate = evaluatePredicate
     self.checkPredicate = checkPredicate
     self.deliverMessage = deliverMessage
+    self.awaitRenameWindow = awaitRenameWindow
     self.captureScript = captureScript
     self.readUsage = readUsage
     self.readGoalVerdict = readGoalVerdict
@@ -1296,6 +1300,7 @@ public actor ProjectRegistry {
       onEvaluatePredicate: evaluatePredicate,
       onCheckPredicate: checkPredicate,
       onDeliverMessage: deliverMessage,
+      onAwaitRenameWindow: awaitRenameWindow,
       onCaptureScript: captureScript,
       onReadUsage: readUsage,
       onReadActivity: readActivity,
