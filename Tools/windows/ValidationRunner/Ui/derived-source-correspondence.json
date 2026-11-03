@@ -1,0 +1,749 @@
+[
+  {
+    "id": "ui.root.source.line-5346",
+    "sourceLines": "5346-5348",
+    "diagnostic": "RED: shell validation does not exercise delayed correlated responses",
+    "owner": "Host",
+    "state": "Incomplete",
+    "adapterRationale": "Not a declared source resource: source"
+  },
+  {
+    "id": "ui.root.source.line-5366",
+    "sourceLines": "5366-5368",
+    "diagnostic": "RED: UIA live gate source does not parse",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5380",
+    "sourceLines": "5380-5382",
+    "diagnostic": "RED: multi-project observer lacks a focused source-supported chrome classifier",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: null",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5392",
+    "sourceLines": "5392-5394",
+    "diagnostic": "RED: multi-project observer rejects stable recovery control $identity",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: CommandAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5396",
+    "sourceLines": "5396-5398",
+    "diagnostic": "RED: multi-project observer weakens its census by accepting an unknown element",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: CommandAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5399",
+    "sourceLines": "5399-5401",
+    "diagnostic": "RED: multi-project observer accepts a foreign recovery control",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: CommandAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5407",
+    "sourceLines": "5407-5409",
+    "diagnostic": "RED: multi-project observer lacks a bounded workspace-marker reacquire",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: null",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5410",
+    "sourceLines": "5410-5413",
+    "diagnostic": "RED: workspace-marker reacquire replays navigation or input",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5432",
+    "sourceLines": "5432-5435",
+    "diagnostic": "RED: delayed exact workspace markers do not satisfy the bounded reacquire",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5449",
+    "sourceLines": "5449-5451",
+    "diagnostic": "RED: permanent or unknown workspace-marker absence no longer fails closed",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: permanentFailure",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5457",
+    "sourceLines": "5457-5459",
+    "diagnostic": "RED: multi-project loop activation lacks a recovery-control-safe card target",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: null",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5462",
+    "sourceLines": "5462-5464",
+    "diagnostic": "RED: card activation target does not retain the source-sized title strip",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Unsupported assertion operator: Join",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5470",
+    "sourceLines": "5470-5472",
+    "diagnostic": "RED: multi-project card activation still lands on an unwired recovery control",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: overlaps",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5477",
+    "sourceLines": "5477-5479",
+    "diagnostic": "RED: invalid multi-project card activation bounds no longer fail closed",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: invalidActivation",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5485",
+    "sourceLines": "5485-5488",
+    "diagnostic": "RED: live multi-project loop navigation still clicks the whole card rectangle",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: null",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5501",
+    "sourceLines": "5501-5503",
+    "diagnostic": "RED: lane caption gate does not bind the source-derived overview-project identity",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: laneCaptionStart",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5514",
+    "sourceLines": "5514-5516",
+    "diagnostic": "RED: lane caption gate lacks the no-summary caption/open-project contract: $required",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: laneCaptionSource",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5524",
+    "sourceLines": "5524-5526",
+    "diagnostic": "RED: lane caption gate retains obsolete summary/button contract: $obsolete",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: laneCaptionSource",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5537",
+    "sourceLines": "5537-5544",
+    "diagnostic": "RED: UIA prelaunch diagnostics omit process, desktop heap, window station, or session evidence",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: prelaunchDiagnostic",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5553",
+    "sourceLines": "5553-5555",
+    "diagnostic": "RED: UIA live gate no longer parses after startup diagnostic changes",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5561",
+    "sourceLines": "5561-5563",
+    "diagnostic": "RED: UIA live gate is missing its functional sidebar navigation snapshot oracle",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: null",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5569",
+    "sourceLines": "5569-5571",
+    "diagnostic": "RED: UIA live gate is missing its bounded sidebar scroll/reacquire proof",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: null",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5580",
+    "sourceLines": "5580-5583",
+    "diagnostic": "RED: UIA live gate retains mutable sidebar handles instead of freezing each reacquired capture",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: null",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5632",
+    "sourceLines": "5632-5641",
+    "diagnostic": "RED: Sidebar navigation oracle missed destination order, open owners, section names, or contained controls",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Unsupported assertion operator: Join",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5659",
+    "sourceLines": "5659-5662",
+    "diagnostic": "RED: Sidebar capture retained mutable UIA handles instead of point-in-time evidence",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5683",
+    "sourceLines": "5683-5687",
+    "diagnostic": "RED: Sidebar bounds proof rejected exact DPI192 identities observed across bounded viewport captures",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5696",
+    "sourceLines": "5696-5698",
+    "diagnostic": "RED: Sidebar bounds proof accepted a missing owned row",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5713",
+    "sourceLines": "5713-5715",
+    "diagnostic": "RED: Sidebar bounds proof accepted a foreign-process row",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5724",
+    "sourceLines": "5724-5726",
+    "diagnostic": "RED: Sidebar bounds proof accepted a duplicate owned row",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5739",
+    "sourceLines": "5739-5741",
+    "diagnostic": "RED: Sidebar bounds proof accepted wrong open-owner order",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5752",
+    "sourceLines": "5752-5754",
+    "diagnostic": "RED: Sidebar navigation oracle did not isolate local owner collapse",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Unsupported assertion operator: Join",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5761",
+    "sourceLines": "5761-5763",
+    "diagnostic": "RED: Sidebar navigation oracle did not isolate remote owner collapse",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Unsupported assertion operator: Join",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5773",
+    "sourceLines": "5773-5777",
+    "diagnostic": "RED: Sidebar navigation oracle accepted a temporary remote owner after fixture restore",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Unsupported assertion operator: Join",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5783",
+    "sourceLines": "5783-5785",
+    "diagnostic": "RED: Sidebar navigation oracle failed to detect a projected unopened recent folder",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5792",
+    "sourceLines": "5792-5794",
+    "diagnostic": "RED: Sidebar navigation oracle accepted a row control extending beyond its owner",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5807",
+    "sourceLines": "5807-5809",
+    "diagnostic": "RED: Sidebar navigation oracle failed to preserve the owner order evidence",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Unsupported assertion operator: Join",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5812",
+    "sourceLines": "5812-5814",
+    "diagnostic": "RED: Sidebar navigation fixture execution count changed unexpectedly",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: sidebarFixtureCount",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5838",
+    "sourceLines": "5838-5838",
+    "diagnostic": "RED: UIA startup capture helper is missing: $helperName",
+    "owner": "Ownership",
+    "state": "Incomplete",
+    "adapterRationale": "Not a declared source resource: null"
+  },
+  {
+    "id": "ui.root.source.line-5845",
+    "sourceLines": "5845-5850",
+    "diagnostic": "RED: UIA startup capture does not retain bounded, redacted child output",
+    "owner": "Ownership",
+    "state": "Incomplete",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst"
+  },
+  {
+    "id": "ui.root.source.line-5853",
+    "sourceLines": "5853-5856",
+    "diagnostic": "RED: UIA startup capture does not bound oversized diagnostics",
+    "owner": "Ownership",
+    "state": "Incomplete",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst"
+  },
+  {
+    "id": "ui.root.source.line-5859",
+    "sourceLines": "5859-5861",
+    "diagnostic": "RED: UIA startup capture does not distinguish a missing child log",
+    "owner": "Ownership",
+    "state": "Incomplete",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst"
+  },
+  {
+    "id": "ui.root.source.line-5882",
+    "sourceLines": "5882-5888",
+    "diagnostic": "RED: retained UIA startup report omits or exposes captured child and app output",
+    "owner": "Ownership",
+    "state": "Incomplete",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst"
+  },
+  {
+    "id": "ui.root.source.line-5897",
+    "sourceLines": "5897-5899",
+    "diagnostic": "RED: UIA host context native diagnostics type is missing",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: hostInfoClassAt",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5905",
+    "sourceLines": "5905-5908",
+    "diagnostic": "RED: UIA host context native diagnostics type is missing",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: hostInfoAddTypeAt",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5914",
+    "sourceLines": "5914-5916",
+    "diagnostic": "RED: UIA host context did not resolve the current Windows session",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Unsupported assertion operator: IsNot",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5918",
+    "sourceLines": "5918-5922",
+    "diagnostic": "RED: UIA host context diagnostics omitted explicit session or desktop-heap status",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-5945",
+    "sourceLines": "5945-5945",
+    "diagnostic": "RED: UIA owned-process traversal missed a controlled child",
+    "owner": "Ownership",
+    "state": "Incomplete",
+    "adapterRationale": "Not a declared source resource: treeObserved"
+  },
+  {
+    "id": "ui.root.source.line-5947",
+    "sourceLines": "5947-5949",
+    "diagnostic": "RED: UIA owned-process teardown returned before the controlled root exited",
+    "owner": "Ownership",
+    "state": "Incomplete",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst"
+  },
+  {
+    "id": "ui.root.source.line-5970",
+    "sourceLines": "5970-5972",
+    "diagnostic": "RED: UIA owned-process traversal adopts processes older than a reused parent PID: $($pidReuseAdopted -join ',')",
+    "owner": "Ownership",
+    "state": "Incomplete",
+    "adapterRationale": "Unsupported assertion operator: Join"
+  },
+  {
+    "id": "ui.root.source.line-6057",
+    "sourceLines": "6057-6061",
+    "diagnostic": "RED: UIA ingress commands and scene transitions are not bounded and attributable",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: CommandAst",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6093",
+    "sourceLines": "6093-6096",
+    "diagnostic": "RED: UIA owned-sheet acquisition throws on stale handles instead of retrying exact identity",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: CommandAst",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6157",
+    "sourceLines": "6157-6164",
+    "diagnostic": "RED: UIA Delete Loop invocation does not re-establish the stable fixture selection after Rename",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: CommandAst",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6182",
+    "sourceLines": "6182-6198",
+    "diagnostic": "RED: UIA gate does not verify dynamic Rename, custom Delete, or Edit Details sheet behavior",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Unsupported source observation",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6276",
+    "sourceLines": "6276-6276",
+    "diagnostic": "RED: multi-project live evidence lacks $required",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: required",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6292",
+    "sourceLines": "6292-6292",
+    "diagnostic": "RED: unfiltered multi-project observer roster lacks $required",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: required",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6298",
+    "sourceLines": "6298-6298",
+    "diagnostic": "RED: explicit complete overview taxonomy lacks $required",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: required",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6305",
+    "sourceLines": "6305-6307",
+    "diagnostic": "RED: multi-project fitted card geometry lacks denominator-derived rounding budget: $required",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: required",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6314",
+    "sourceLines": "6314-6321",
+    "diagnostic": "RED: new observer prefix/typed metadata/active-surface selection boundary remains unguarded or silently omitted",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: metadataObserver",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6326",
+    "sourceLines": "6326-6326",
+    "diagnostic": "RED: bounded multi-project capture lacks $required",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: required",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6352",
+    "sourceLines": "6352-6354",
+    "diagnostic": "RED: UIA foreground failure hides native return values and last-error diagnostics",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: CommandAst",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6412",
+    "sourceLines": "6412-6416",
+    "diagnostic": "RED: UIA live gate does not prove immediate Product Settings persistence, foreground focus, Return retention, and Escape close",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: CommandAst",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6467",
+    "sourceLines": "6467-6471",
+    "diagnostic": "RED: the shell cannot open a gate-requested context menu, or an abandoned popup can block its message loop forever",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: appSource",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6591",
+    "sourceLines": "6591-6596",
+    "diagnostic": "RED: retained New Loop request history cannot select the create after a later outcome command",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6654",
+    "sourceLines": "6654-6676",
+    "diagnostic": "RED: custody reopened path must select Turn once, type instruction, change backend and prove unchanged instruction",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: firstCustodyOpen",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6754",
+    "sourceLines": "6754-6756",
+    "diagnostic": "RED: UIA gate embedded C# type source is missing",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6770",
+    "sourceLines": "6770-6772",
+    "diagnostic": "RED: UIA gate calls undefined embedded C# member(s): $($uiaGateMissingMembers -join ', ')",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: MemberExpressionAst",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6853",
+    "sourceLines": "6853-6855",
+    "diagnostic": "RED: stable-but-wrong native text has no extracted retry-decision helper",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: edgeTextHelperAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6864",
+    "sourceLines": "6864-6864",
+    "diagnostic": "Unexpected edge text retry decision '$decision",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: decision",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6866",
+    "sourceLines": "6866-6868",
+    "diagnostic": "RED: stable empty text did not retry exactly once before the expected second attempt",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: edgeTextAttempts",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6870",
+    "sourceLines": "6870-6872",
+    "diagnostic": "RED: edge retry-decision helper lost exact expected-text verification",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: edgeTextHelperSource",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6877",
+    "sourceLines": "6877-6879",
+    "diagnostic": "RED: exact-match mutation negative did not find the expected helper branch",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: mutatedEdgeTextHelperSource",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6892",
+    "sourceLines": "6892-6894",
+    "diagnostic": "RED: removing exact expected-text comparison evaded the stable-wrong retry regression",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: mutationAttempts",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6905",
+    "sourceLines": "6905-6908",
+    "diagnostic": "RED: stable-wrong edge text did not exhaust and report exactly five attempts; calls=$edgeTextAttempts error=$($edgeTextExhaustion.Exception.Message)",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: edgeTextAttempts",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6921",
+    "sourceLines": "6921-6923",
+    "diagnostic": "RED: custody graph-card wait helper is not extractable",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: custodyCardWaitAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6925",
+    "sourceLines": "6925-6933",
+    "diagnostic": "RED: custody card wait lacks a positive baseline, unique UUID-bound observation, or action-free polling",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: custodyCardWaitSource",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6939",
+    "sourceLines": "6939-6941",
+    "diagnostic": "RED: source-derived sketch-card AutomationId helper is missing",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: sketchCardIdAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6958",
+    "sourceLines": "6958-6960",
+    "diagnostic": "RED: source-derived UIA card identity differs for $($expectedCard.NodeId)",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Nondeclarative assertion node: CommandAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-6967",
+    "sourceLines": "6967-6973",
+    "diagnostic": "RED: custody right-click can bypass fresh-fragment, unique-card, or hashed child-identity checks",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: openSketchMenuAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-7027",
+    "sourceLines": "7027-7041",
+    "diagnostic": "RED: connector evidence does not freeze exact physical-screen endpoints and clamp the target to its visible card intersection",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: compositeEvidenceIndex",
+    "implementation": "UiDerivedContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-7136",
+    "sourceLines": "7136-7138",
+    "diagnostic": "RED: connector-card selector is not extractable for named functional cases",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: connectorCardSelectorAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-7235",
+    "sourceLines": "7235-7239",
+    "diagnostic": "RED: edge connector functional case '$($case.Name)' failed: $($selectionError.Exception.Message)",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: null",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-7326",
+    "sourceLines": "7326-7328",
+    "diagnostic": "RED: NativeForms.zig node_labels table not found for node creation sheet label contract",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: nativeFormsSource",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-7337",
+    "sourceLines": "7337-7339",
+    "diagnostic": "RED: UIA live gate node creation sheet label map is missing",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Not a declared source resource: labelHashAst",
+    "implementation": "UiFunctionalContracts.ps1"
+  },
+  {
+    "id": "ui.root.source.line-7344",
+    "sourceLines": "7344-7346",
+    "diagnostic": "RED: UIA live gate node creation sheet label lookup for $labelId returned '$actualLabel', expected '$expectedLabel' from NativeForms.zig",
+    "owner": "Ui",
+    "state": "Implemented",
+    "adapterRationale": "Unsupported source observation",
+    "implementation": "UiFunctionalContracts.ps1"
+  }
+]

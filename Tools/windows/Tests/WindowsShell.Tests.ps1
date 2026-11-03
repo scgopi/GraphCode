@@ -340,7 +340,7 @@ Assert-Contract ($appSource -match
   '(?s)smoke_tick >= 16 and !app\.smoke_input_requested.*?if \(app\.workspace\) \|workspace\| \{\s*app\.smoke_input_requested = true;') `
   "smoke input must wait for its workspace instead of consuming the one-shot action early"
 Assert-Contract ($shellSource -match
-  '(?s)\$inputDeadline = .*?AddSeconds\(8\).*?\$inputApp = Start-Process.*?\$attachReady.*?pwsh.*?Write-OwnedResourceMetrics "windows-shell:large-paste".*?WaitForExit\(\$remainingMilliseconds\)') `
+  '(?s)\$inputDeadline = .*?AddSeconds\(8\).*?\$inputApp = Start-SmokeProcess.*?\$attachReady.*?pwsh.*?Write-OwnedResourceMetrics "windows-shell:large-paste".*?WaitForExit\(\$remainingMilliseconds\)') `
   "large-paste sampling must observe the owned attach within the shared eight-second deadline"
 Assert-Contract ($shellSource -match
   '(?s)while \(\[DateTime\]::UtcNow -lt \$inputDeadline.*?Write-OwnedResourceMetrics "windows-shell:large-paste".*?Start-Sleep -Milliseconds 50') `
@@ -442,7 +442,7 @@ Assert-Contract ($shellSource -match
 if ($shellSource -match '(?m)^\s*Write-OwnedResourceMetrics\s*$') {
   throw "Windows shell contract: empty resource metric phase"
 }
-Assert-Contract ($shellSource -match '(?s)\$inputApp\s*=\s*Start-Process.*?\$inputApp\.Id.*?Write-OwnedResourceMetrics "windows-shell:large-paste" @\(\$inputApp\.Id\)') `
+Assert-Contract ($shellSource -match '(?s)\$inputApp\s*=\s*Start-SmokeProcess.*?\$inputApp\.Id.*?Write-OwnedResourceMetrics "windows-shell:large-paste" @\(\$inputApp\.Id\)') `
   "large-paste metric is not tied to the recorded inputApp PID"
 Assert-Contract ($shellSource -match '(?s)GraphCode Windows shell restart smoke.*?Invoke-ShellProcess \$arguments "windows-shell:restart"') `
   "restart snapshot is not assigned the restart phase"
@@ -515,6 +515,18 @@ function Resolve-TestZig {
     }
   }
   throw "A working Zig executable is required for executable Windows shell tests."
+}
+
+Invoke-Native "Shell process ownership mock contracts" {
+  . (Join-Path $PSScriptRoot "..\Import-PinnedPester.ps1")
+  $ownershipResults = Invoke-Pester -Path (Join-Path $PSScriptRoot "ShellProcessOwnership.Tests.ps1") -PassThru
+  if ($ownershipResults.TotalCount -ne 70 -or
+      $ownershipResults.PassedCount -ne $ownershipResults.TotalCount -or
+      $ownershipResults.FailedCount -ne 0 -or $ownershipResults.SkippedCount -ne 0) {
+    throw "Shell process ownership mock contracts did not pass all 70 unskipped cases"
+  }
+  Write-Host "SHELL_PROCESS_OWNERSHIP_MOCK_CASES=$($ownershipResults.TotalCount)"
+  $global:LASTEXITCODE = 0
 }
 
 foreach ($path in @(
@@ -831,6 +843,21 @@ Invoke-Native "Onboarding executable tests" {
     & $zig test src\WindowsOnboarding.zig -target x86_64-windows-msvc `
       -lc -luser32 -lgdi32 "-I$include"
   } finally { Pop-Location }
+}
+Invoke-Native "Owned live process cleanup mock contracts" {
+  & (Join-Path $PSScriptRoot "OwnedLiveProcessCleanup.Tests.ps1")
+  $global:LASTEXITCODE = 0
+}
+Invoke-Native "Owned live caller and adapter mock integration" {
+  . (Join-Path $PSScriptRoot "..\Import-PinnedPester.ps1")
+  $adapterResults = Invoke-Pester -Path (Join-Path $PSScriptRoot "OwnedLiveAdapter.Tests.ps1") -PassThru
+  if ($adapterResults.TotalCount -ne 13 -or $adapterResults.PassedCount -ne 13 -or
+      $adapterResults.FailedCount -ne 0 -or $adapterResults.SkippedCount -ne 0 -or
+      $adapterResults.NotRunCount -ne 0) {
+    throw "Owned live caller and adapter mock integration did not pass all 13 cases"
+  }
+  Write-Host "OWNED_LIVE_ADAPTER_MOCK_CASES=$($adapterResults.PassedCount)"
+  $global:LASTEXITCODE = 0
 }
 Invoke-Native "GDI+ asynchronous startup live test" {
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")

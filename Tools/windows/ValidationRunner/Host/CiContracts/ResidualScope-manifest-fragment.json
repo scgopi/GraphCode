@@ -1,0 +1,10 @@
+{
+  "units": [
+    {
+      "id": "host.root-source-scope-mock-environment-error-streams",
+      "owner": "Host",
+      "minimumCount": 16,
+      "exactCount": 16
+    }
+  ]
+}

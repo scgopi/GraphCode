@@ -7,6 +7,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "..\OwnedLiveProcess.ps1")
+. (Join-Path $PSScriptRoot "ValidationFixtureDirectory.ps1")
+Import-Module (Join-Path $PSScriptRoot "..\ShellProcessOwnership.psm1") -Force
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 Add-Type @'
 using System;
@@ -106,27 +109,53 @@ function Wait-File([string] $path, [int] $seconds) {
   return $false
 }
 
-function Invoke-ScrubbedCli([string] $name, [string] $root, [string] $support, [string[]] $arguments) {
+function Invoke-ScrubbedCli($processScope, [string] $name, [string] $root, [string] $support, [string[]] $arguments) {
   $cliInfo = New-StartInfo $Cli $root
   $cliInfo.Environment["GRAPHCODE_SUPPORT_DIR"] = $support
   foreach ($argument in $arguments) { [void]$cliInfo.ArgumentList.Add($argument) }
   $cliInfo.RedirectStandardOutput = $true
   $cliInfo.RedirectStandardError = $true
-  $cliProcess = [Diagnostics.Process]::new()
-  $cliProcess.StartInfo = $cliInfo
+  $cliProcess = $null
+  $cliStarted = $false
+  $cliHandleHeld = $false
+  $cliError = $null
   try {
-    if (-not $cliProcess.Start()) { throw "$name CLI '$($arguments[0])' could not start" }
-    $stdout = $cliProcess.StandardOutput.ReadToEndAsync()
-    $stderr = $cliProcess.StandardError.ReadToEndAsync()
+    $cliProcess = Start-ShellOwnedProcess $processScope $cliInfo
+    $cliStarted = $true
+    [void]$cliProcess.Handle
+    $cliHandleHeld = $true
     if (-not $cliProcess.WaitForExit(10000)) { throw "$name CLI '$($arguments[0])' timed out" }
+    Complete-ShellOwnedProcess $processScope $cliProcess
     return [pscustomobject]@{
       ExitCode = $cliProcess.ExitCode
-      Output = $stdout.GetAwaiter().GetResult()
-      Error = $stderr.GetAwaiter().GetResult()
+      Output = Read-ShellOwnedOutput $processScope $cliProcess
+      Error = Read-ShellOwnedOutput $processScope $cliProcess -StandardError
     }
+  } catch {
+    $cliError = $_.Exception
+    throw
   } finally {
-    if (-not $cliProcess.HasExited) { $cliProcess.Kill() }
-    $cliProcess.Dispose()
+    $cleanupErrors = [Collections.Generic.List[Exception]]::new()
+    try {
+      if ($cliStarted) {
+        if (-not $cliHandleHeld) {
+          throw "The started CLI's original process handle was not acquired; no termination attempted."
+        }
+        Stop-OwnedLiveProcess -Process $cliProcess -Name "$name CLI"
+      }
+    } catch {
+      $cleanupErrors.Add($_.Exception)
+    } finally {
+      if ($cliProcess) {
+        try { $cliProcess.Dispose() } catch { $cleanupErrors.Add($_.Exception) }
+      }
+    }
+    if ($cleanupErrors.Count -gt 0) {
+      if ($cliError) { $cleanupErrors.Insert(0, $cliError) }
+      throw (New-OwnedLiveProcessCleanupError `
+        -Message "$name CLI cleanup could not be verified; fixture root: $root" `
+        -Errors ([Exception[]]$cleanupErrors.ToArray()) -RetainedRoots @($root))
+    }
   }
 }
 
@@ -160,6 +189,23 @@ function Invoke-Case(
   [string] $action
 ) {
   $root = Join-Path $ScratchRoot $name
+  if (Test-Path -LiteralPath $root) {
+    throw (New-OwnedLiveProcessCleanupError `
+      -Message "$name scratch already exists; ownership is unproven: $root" `
+      -Errors @([InvalidOperationException]::new("Existing scratch was not reused.")) `
+      -RetainedRoots @($root))
+  }
+  try {
+    $null = New-ValidationFixtureDirectory -Path $root
+  } catch {
+    $creationError = $_.Exception
+    if (Test-Path -LiteralPath $root) {
+      throw (New-OwnedLiveProcessCleanupError `
+        -Message "$name scratch appeared during admission; ownership is unproven: $root" `
+        -Errors @($creationError) -RetainedRoots @($root))
+    }
+    throw
+  }
   $profile = Join-Path $root "profile"
   $support = Join-Path $profile ".graphcode"
   New-Item -ItemType Directory -Force -Path `
@@ -176,34 +222,44 @@ function Invoke-Case(
     Set-Content -LiteralPath (Join-Path $projectPath "README.md") -Value "fixture" -NoNewline
   }
 
-  $daemonProcess = [Diagnostics.Process]::new()
+  $daemonProcess = $null
   $daemonInfo = New-StartInfo $Daemon $root
   $daemonInfo.Environment["GRAPHCODE_SUPPORT_DIR"] = $support
-  $daemonProcess.StartInfo = $daemonInfo
-  $shellProcess = [Diagnostics.Process]::new()
-  $shellProcess.StartInfo = New-StartInfo $Shell $root
+  $shellProcess = $null
+  $shellInfo = New-StartInfo $Shell $root
+  $processScope = $null
+  $daemonStarted = $false
+  $daemonHandleHeld = $false
+  $shellStarted = $false
+  $shellHandleHeld = $false
+  $caseError = $null
   try {
-    if (-not $daemonProcess.Start()) { throw "$name could not start the production daemon" }
+    $processScope = New-ShellProcessScope
+    $daemonProcess = Start-ShellOwnedProcess $processScope $daemonInfo
+    $daemonStarted = $true
+    [void]$daemonProcess.Handle
+    $daemonHandleHeld = $true
     if ($action -eq "project") {
       # Register through the production daemon before the shell starts, as the
       # native folder picker does, so the shell restores a real daemon graph.
       $deadline = [DateTime]::UtcNow.AddSeconds(15)
       do {
-        $status = Invoke-ScrubbedCli $name $root $support @("status", $projectPath)
+        $status = Invoke-ScrubbedCli $processScope $name $root $support @("status", $projectPath)
         if ($status.ExitCode -eq 0) { break }
         Start-Sleep -Milliseconds 250
       } while ([DateTime]::UtcNow -lt $deadline)
       if ($status.ExitCode -ne 0) { throw "$name could not register the project: $($status.Error)" }
     }
-    if (-not $shellProcess.Start()) { throw "$name could not start the production shell" }
-    [void]$daemonProcess.Handle
+    $shellProcess = Start-ShellOwnedProcess $processScope $shellInfo
+    $shellStarted = $true
     [void]$shellProcess.Handle
-    $keys = @($shellProcess.StartInfo.Environment.Keys | Sort-Object)
+    $shellHandleHeld = $true
+    $keys = @($shellInfo.Environment.Keys | Sort-Object)
     if (($keys -join "|") -cne (($allowedKeys | Sort-Object) -join "|")) {
       throw "$name environment keys differ: $($keys -join ',')"
     }
     foreach ($fragment in $forbiddenPathFragments) {
-      if ($shellProcess.StartInfo.Environment["PATH"].IndexOf(
+      if ($shellInfo.Environment["PATH"].IndexOf(
           $fragment, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
         throw "$name PATH contains forbidden developer fragment '$fragment'"
       }
@@ -265,7 +321,7 @@ function Invoke-Case(
     $log = if (Test-Path $logPath) { Get-Content $logPath -Raw } else { "" }
     if ($log -match 'event=fatal') { throw "$name logged a fatal startup event: $log" }
 
-    $projects = Invoke-ScrubbedCli $name $root $support @("projects")
+    $projects = Invoke-ScrubbedCli $processScope $name $root $support @("projects")
     if ($projects.ExitCode -ne 0) {
       throw "$name CLI endpoint rejected the request: $($projects.Error)"
     }
@@ -285,15 +341,52 @@ function Invoke-Case(
       environmentKeys = $keys
       fatalLogAbsent = $true
     }
+  } catch {
+    $caseError = $_.Exception
+    throw
   } finally {
-    foreach ($process in @($shellProcess,$daemonProcess)) {
-      if ($process -and -not $process.HasExited) {
-        Stop-Process -Id $process.Id -Force
-        [void]$process.WaitForExit(10000)
+    $cleanupErrors = [Collections.Generic.List[Exception]]::new()
+    foreach ($entry in @(
+        @{ Process = $shellProcess; Started = $shellStarted; HandleHeld = $shellHandleHeld; Name = "shell" },
+        @{ Process = $daemonProcess; Started = $daemonStarted; HandleHeld = $daemonHandleHeld; Name = "daemon" }
+      )) {
+      try {
+        if ($entry.Started) {
+          if (-not $entry.HandleHeld) {
+            throw "The started $($entry.Name)'s original process handle was not acquired; no termination attempted."
+          }
+          Stop-OwnedLiveProcess -Process $entry.Process -Name "$name $($entry.Name)"
+        }
+      } catch {
+        $cleanupErrors.Add($_.Exception)
+      } finally {
+        if ($entry.Process) {
+          try { $entry.Process.Dispose() } catch { $cleanupErrors.Add($_.Exception) }
+        }
       }
-      if ($process) { $process.Dispose() }
     }
-    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    if ($processScope) {
+      try { Close-ShellProcessScope $processScope } catch { $cleanupErrors.Add($_.Exception) }
+    }
+    if ($cleanupErrors.Count -gt 0) {
+      if ($caseError) { $cleanupErrors.Insert(0, $caseError) }
+      throw (New-OwnedLiveProcessCleanupError `
+        -Message "$name process cleanup could not be verified; fixture root: $root" `
+        -Errors ([Exception[]]$cleanupErrors.ToArray()) -RetainedRoots @($root))
+    }
+    if ($caseError -and (Test-OwnedLiveProcessRetentionRequired $caseError)) {
+      Write-Output "SCRUBBED_STARTUP_FIXTURE_RETENTION_REQUESTED=$root"
+    } else {
+      try {
+        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
+      } catch {
+        if ($caseError) {
+          throw [AggregateException]::new(
+            "$name fixture cleanup failed.", [Exception[]]@($caseError, $_.Exception))
+        }
+        throw
+      }
+    }
   }
 }
 

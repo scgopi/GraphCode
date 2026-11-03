@@ -17,6 +17,7 @@ $ErrorActionPreference = "Stop"
 # lines instead of PowerShell's high-overhead per-record rendering.
 $ProgressPreference = "SilentlyContinue"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
+. (Join-Path $PSScriptRoot "DotNetSdk.ps1")
 if (-not $ToolRoot) {
   $ToolRoot = Join-Path $repoRoot ".graphcode-tools"
 }
@@ -68,6 +69,7 @@ function Test-BootstrapPathBudget(
 
 Test-BootstrapPathBudget $repoRoot $ProviderRoot
 New-Item -ItemType Directory -Force $ToolRoot, $ProviderRoot | Out-Null
+$dotnet = Resolve-GraphCodeDotNetSdk -RepositoryRoot $repoRoot -ToolRoot $ToolRoot -InstallIfMissing
 
 function Format-ZigDownloadSize([long] $Bytes) {
   if ($Bytes -lt 1KB) {
@@ -506,6 +508,8 @@ if (-not $swift -and -not $SkipSwift) {
 }
 
 $values = [ordered]@{
+  GRAPHCODE_DOTNET10403 = $dotnet
+  DOTNET_ROOT = [IO.Path]::GetDirectoryName($dotnet)
   GRAPHCODE_ZIG0152 = $zig0152
   GRAPHCODE_ZIG0160 = $zig0160
   GRAPHCODE_WINGHOSTTY_ROOT = $winghosttyRoot

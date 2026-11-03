@@ -58,7 +58,7 @@ jobs:
     env:
       HARDENING_REQUIRED: ${{ github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.windows == 'true' }}
     runs-on: ${{ (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.windows == 'true') && matrix.os || 'ubuntu-latest' }}
-    timeout-minutes: 15
+    timeout-minutes: 40
     steps:
       - name: No Windows-relevant changes
         if: env.HARDENING_REQUIRED != 'true'
@@ -69,10 +69,100 @@ jobs:
         if: env.HARDENING_REQUIRED == 'true'
         shell: pwsh
         run: ./Tools/windows/validate.ps1 -Task hardening
-      - name: Verify runner contract
-        if: env.HARDENING_REQUIRED == 'true'
+      # Pull requests run the complete compiled host once in windows-spikes.
+      # Independent scheduled/manual runs retain one Windows 2022 fallback.
+      - name: Install pinned Swift for runner fallback
+        if: env.HARDENING_REQUIRED == 'true' && github.event_name != 'pull_request' && matrix.os == 'windows-2022'
+        uses: compnerd/gha-setup-swift@397094e75494a93fa8d81db0268dbc8f5d6cf7c6 # v0.4.1
+        timeout-minutes: 10
+        with:
+          swift-version: swift-6.3.3-release
+          swift-build: 6.3.3-RELEASE
+          cache: true
+      - name: Install pinned compiled validation SDK
+        if: env.HARDENING_REQUIRED == 'true' && github.event_name != 'pull_request' && matrix.os == 'windows-2022'
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        timeout-minutes: 10
+        with:
+          dotnet-version: 10.0.403
+      - name: Build compiled validation runner
+        if: env.HARDENING_REQUIRED == 'true' && github.event_name != 'pull_request' && matrix.os == 'windows-2022'
         shell: pwsh
-        run: ./Tools/windows/Tests/ValidationRunner.Tests.ps1
+        working-directory: Tools/windows/ValidationRunner
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = dotnet --version
+          if ($LASTEXITCODE -ne 0 -or $version -cne '10.0.403') {
+            throw 'Compiled validation requires SDK 10.0.403 selected by global.json.'
+          }
+          dotnet build -c Release
+          if ($LASTEXITCODE -ne 0) { throw "Compiled validation build failed: exit=$LASTEXITCODE" }
+      - name: Prepare owned Pester 5 prerequisite
+        if: env.HARDENING_REQUIRED == 'true' && github.event_name != 'pull_request' && matrix.os == 'windows-2022'
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pester5 = @(Get-Module -Name Pester | Where-Object { $_.Version.Major -eq 5 })
+          if ($pester5.Count -eq 0) {
+            $pester5 = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version.Major -eq 5 })
+          }
+          if ($pester5.Count -eq 0) {
+            $moduleRoot = Join-Path $PWD '.ci-modules'
+            $null = New-Item -ItemType Directory -Force -Path $moduleRoot
+            Save-Module -Name Pester -RequiredVersion 5.7.1 -Path $moduleRoot -ErrorAction Stop
+            $env:PSModulePath = $moduleRoot + [IO.Path]::PathSeparator + $env:PSModulePath
+            [IO.File]::AppendAllText($env:GITHUB_ENV, "PSModulePath=$env:PSModulePath`n", [Text.UTF8Encoding]::new($false))
+          }
+          . .\Tools\windows\Import-PinnedPester.ps1
+          $loaded = @(Get-Module -Name Pester | Where-Object { $_.Version.Major -eq 5 })
+          if ($loaded.Count -ne 1) { throw 'Compiled validation requires exactly one loaded Pester 5 module.' }
+      - name: Verify complete compiled validation runner contract
+        if: env.HARDENING_REQUIRED == 'true' && github.event_name != 'pull_request' && matrix.os == 'windows-2022'
+        shell: pwsh
+        # Normal full run measured 16m14s; allow 25m execution headroom.
+        timeout-minutes: 25
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path -LiteralPath .ci-validation-runner\coverage.json) {
+            throw 'Compiled validation requires a fresh coverage report; prior evidence was retained.'
+          }
+          $output = [Collections.Generic.List[string]]::new()
+          $exitCode = $null
+          & {
+            .\Tools\windows\ValidationRunner\bin\Release\net10.0-windows\ValidationRunner.exe --repository-root $PWD --artifact-root .ci-validation-runner
+            $script:exitCode = $LASTEXITCODE
+          } 2>&1 | ForEach-Object {
+            $line = "$_"
+            $output.Add($line)
+            Write-Host $line
+          }
+          if ($exitCode -ne 0) { throw "Compiled validation failed: exit=$exitCode" }
+          $report = Get-Content -LiteralPath .ci-validation-runner\coverage.json -Raw | ConvertFrom-Json
+          if ($report.runner -cne 'CompiledValidationRunner' -or
+              $report.complete -isnot [bool] -or -not $report.complete -or
+              -not ($report.requiredCount -is [int] -or $report.requiredCount -is [long]) -or
+              -not ($report.passedCount -is [int] -or $report.passedCount -is [long]) -or
+              $report.requiredCount -le 0 -or $report.passedCount -ne $report.requiredCount -or
+              @($report.units).Count -ne $report.requiredCount -or @($report.errors).Count -ne 0) {
+            throw 'Compiled validation did not report complete positive full coverage.'
+          }
+          $passMarkers = @($output | Where-Object { $_ -ceq 'CompiledValidationRunner: PASS' }).Count
+          $executedMarkers = @($output | Where-Object { $_ -ceq 'VALIDATION_RUNNER_EXECUTED=1' }).Count
+          if ($passMarkers -ne 1 -or $executedMarkers -ne 1) {
+            throw 'Compiled validation must report exactly one full PASS and one positive execution marker.'
+          }
+      - name: Retain compiled validation fallback evidence
+        if: ${{ always() && env.HARDENING_REQUIRED == 'true' && github.event_name != 'pull_request' && matrix.os == 'windows-2022' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        timeout-minutes: 5
+        with:
+          name: compiled-validation-hardening-${{ matrix.os }}-${{ github.run_attempt }}
+          path: .ci-validation-runner
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
       - name: Resolve capture contract failure diagnostics root
         id: capture_temp
         if: failure()

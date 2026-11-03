@@ -1,0 +1,894 @@
+{
+  "schemaVersion": 1,
+  "sourceManifestSha256": "CC8ED5141AE38CB425F4E41AB7F2E4EF1F07F5AE4CAD7FA969A68645B07A0A2F",
+  "rootSourceSha256": "202D260A846670E314163F9D2565D07B1E0AD27A4D61F41EA99D67624FF6C869",
+  "inventoryOnly": true,
+  "executedCount": 0,
+  "mixedSourceInvocationTemplates": 126,
+  "mixedSourceAssertionCommands": 192,
+  "mandatoryFamily": "ownership.legacy.mixed-multiproject",
+  "templates": [
+    {
+      "id": "ownership.legacy.mixed.source-line-1724",
+      "line": 1724,
+      "template": "\"DPI192 narrow New Tab overflow still proves both mounted stable tabs\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1733",
+      "line": 1733,
+      "template": "\"wide New Tab roster proves the same mounted stable tabs without overflow\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1749",
+      "line": 1749,
+      "template": "\"mounted tab refuses permanent $($case.name)\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1757",
+      "line": 1757,
+      "template": "\"selection event accepts exactly one stable owned source\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1769",
+      "line": 1769,
+      "template": "\"selection event refuses $($case.name)\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1777",
+      "line": 1777,
+      "template": "\"compact overview narrow client retains the Mac lane and requires real pan\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1789",
+      "line": 1789,
+      "template": "\"compact overview wide client and DPI preserve exact geometry\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1804",
+      "line": 1804,
+      "template": "\"compact overview fitted rounding retains source geometry\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1811",
+      "line": 1811,
+      "template": "\"compact overview rejects obsolete 220x86 card geometry\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1818",
+      "line": 1818,
+      "template": "\"compact overview rejects the obsolete 760-pixel lane floor\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1824",
+      "line": 1824,
+      "template": "\"dynamic Rename title uses the exact fixture title\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1837",
+      "line": 1837,
+      "template": "(\"dynamic Rename title rejects \" + ($titleMutation -replace \"`n\",\" newline \"))",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1843",
+      "line": 1843,
+      "template": "\"bounded Rename title pattern accepts one unavailable-fixture title\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1854",
+      "line": 1854,
+      "template": "(\"bounded Rename title pattern rejects malformed case \" + $titleMutation.Length)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1870",
+      "line": 1870,
+      "template": "\"Delete custom sheet accepts exact owned captionless identity\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1879",
+      "line": 1879,
+      "template": "(\"Delete custom sheet rejects \" + $identityMutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1917",
+      "line": 1917,
+      "template": "\"update banner click accepts owned foreground target after Later\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1924",
+      "line": 1924,
+      "template": "(\"update banner click rejects wrong \" + $targetMutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-1951",
+      "line": 1951,
+      "template": "\"actual caption Open assignment consumes the exported caption snapshot\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2060",
+      "line": 2060,
+      "template": "\"canonical owned startup event retained without changing primary\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2068",
+      "line": 2068,
+      "template": "\"canonical startup event absence is explicitly unknown\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2074",
+      "line": 2074,
+      "template": "\"owned canonical event missing module fields retains explicit unavailability\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2083",
+      "line": 2083,
+      "template": "\"actual query no-match error remains unknown while startup primary survives\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2101",
+      "line": 2101,
+      "template": "(\"startup event refuses \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2109",
+      "line": 2109,
+      "template": "(\"startup query refuses invalid held \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2126",
+      "line": 2126,
+      "template": "(\"startup retains typed secondary writer failures \" + $faults)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2137",
+      "line": 2137,
+      "template": "\"startup refuses event transport exceeding eight results\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2143",
+      "line": 2143,
+      "template": "\"startup refuses duplicate actual record identity\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2149",
+      "line": 2149,
+      "template": "\"startup default transport refuses non-hosted execution without event query\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2165",
+      "line": 2165,
+      "template": "\"startup query escapes exact executable XPath and XML\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2173",
+      "line": 2173,
+      "template": "\"actual first startup failure branch invokes diagnostic once\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2193",
+      "line": 2193,
+      "template": "\"actual new caller streams all five records before unchanged fifth guard\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2221",
+      "line": 2221,
+      "template": "(\"streamed actual Edge-TypeText transport \" + $scenario)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2305",
+      "line": 2305,
+      "template": "(\"stream preserves primary and explicit sink diagnostics \" + $failureMode)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2342",
+      "line": 2342,
+      "template": "\"stream rethrows identical primary exception object\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2359",
+      "line": 2359,
+      "template": "(\"production stream catch preserves primary through \" + $faults)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2411",
+      "line": 2411,
+      "template": "\"complete actual accepted whole peer receipt preserves bytes and all state\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2439",
+      "line": 2439,
+      "template": "\"whole peer receipt accepts a correlated nonmutating session open\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2445",
+      "line": 2445,
+      "template": "\"whole peer receipt rejects a session open for a foreign owner's node\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2460",
+      "line": 2460,
+      "template": "(\"complete peer receipt rejects \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2520",
+      "line": 2520,
+      "template": "(\"retained complete receipt reader rejects \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2706",
+      "line": 2706,
+      "template": "(\"single sequenced entry exact target \" + $expected.Length + \":\" + $expected.Trim())",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2724",
+      "line": 2724,
+      "template": "\"prompt viewport resolved edit preserves actual FocusMouse ownership guard\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2732",
+      "line": 2732,
+      "template": "(\"prompt viewport actual FocusMouse refuses \" + $viewportMiss)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2742",
+      "line": 2742,
+      "template": "\"already owned GUI edit focus uses zero focus input\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2751",
+      "line": 2751,
+      "template": "(\"bounded focus and pre-input phase rejects \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2785",
+      "line": 2785,
+      "template": "(\"actual production FocusMouse refuses late \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2808",
+      "line": 2808,
+      "template": "(\"single sequenced edit rejects \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2845",
+      "line": 2845,
+      "template": "\"new sequenced native declaration compile only\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2850",
+      "line": 2850,
+      "template": "\"sequenced entry rejects unknown empty expected prefill before any input\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2857",
+      "line": 2857,
+      "template": "\"sequenced refusal diagnostic failure preserves exact primary\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2871",
+      "line": 2871,
+      "template": "(\"actual new Rename caller uses native \" + $(if ($cancelRoute) { \"Cancel9808\" } else { \"OK9800\" }))",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2897",
+      "line": 2897,
+      "template": "\"Rename clips actual button to modal client and work rectangles\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2906",
+      "line": 2906,
+      "template": "\"Rename uses measured uncovered point without reading covering captions\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-2924",
+      "line": 2924,
+      "template": "(\"Rename native guard rejects \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3013",
+      "line": 3013,
+      "template": "(\"Rename actual input receipt rejects \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3024",
+      "line": 3024,
+      "template": "(\"production Rename Click rejects final \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3040",
+      "line": 3040,
+      "template": "\"Rename stale native read retains exact error and unavailable actual fields\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3057",
+      "line": 3057,
+      "template": "\"Rename production native bindings compile without native invocation\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3129",
+      "line": 3129,
+      "template": "\"fresh cached capture verifies owned metadata before and after content\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3138",
+      "line": 3138,
+      "template": "\"fresh snapshot distinguishes unsupported property from zero default\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3154",
+      "line": 3154,
+      "template": "(\"fresh capture rejects \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3202",
+      "line": 3202,
+      "template": "\"unknown cache error is not converted to retryable metadata\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3214",
+      "line": 3214,
+      "template": "\"retired snapshot retains typed availability error before content\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3224",
+      "line": 3224,
+      "template": "\"other COM failure is not a retirement-shaped fallback\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3237",
+      "line": 3237,
+      "template": "(\"whole observation reacquisition \" + $scenario)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3268",
+      "line": 3268,
+      "template": "\"whole capture collection rejects later provider runtime replacement\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3278",
+      "line": 3278,
+      "template": "\"guarded prefix handles null without pretending metadata is ready\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3283",
+      "line": 3283,
+      "template": "\"owned available semantic metadata reads PID first and again\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3291",
+      "line": 3291,
+      "template": "\"owned source-supported static chrome is classified explicitly\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3296",
+      "line": 3296,
+      "template": "\"owned restart session chrome remains in the complete workspace metadata batch\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3314",
+      "line": 3314,
+      "template": "(\"restart metadata rejects \" + $case.name)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3331",
+      "line": 3331,
+      "template": "(\"metadata batch rejects \" + $case.name)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3341",
+      "line": 3341,
+      "template": "\"foreign semantic fragment stays counted and fails strict roster\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3353",
+      "line": 3353,
+      "template": "\"two exact positive owner publications\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3368",
+      "line": 3368,
+      "template": "\"whole typed correlated rename receipt\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3373",
+      "line": 3373,
+      "template": "\"one-shot interleaved event with synthetic selection\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3383",
+      "line": 3383,
+      "template": "\"unchanged title still dispatches\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3392",
+      "line": 3392,
+      "template": "\"hash identity is owner and surface scoped\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3423",
+      "line": 3423,
+      "template": "\"retained hosted identities with current compact geometry\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3443",
+      "line": 3443,
+      "template": "\"source summary identity independent fixture and hosted goldens\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3458",
+      "line": 3458,
+      "template": "\"workspace marker independent prefix and row-key goldens\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3469",
+      "line": 3469,
+      "template": "\"unknown automation kind rejected\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3482",
+      "line": 3482,
+      "template": "\"workspace projection requires both positively owned source markers\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3487",
+      "line": 3487,
+      "template": "\"classified restart chrome alone cannot prove workspace owner identity\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3497",
+      "line": 3497,
+      "template": "(\"workspace projection rejects \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3524",
+      "line": 3524,
+      "template": "\"project request rejects actual workspace chrome\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3530",
+      "line": 3530,
+      "template": "\"matching project surface selects its parent and selected loop\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3535",
+      "line": 3535,
+      "template": "\"other project owner stays unselected on project surface\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3540",
+      "line": 3540,
+      "template": "\"workspace keeps selected loop without parent-project selection\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3545",
+      "line": 3545,
+      "template": "\"overview keeps selected loop without parent-project selection\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3550",
+      "line": 3550,
+      "template": "\"Quick Chats keeps selected loop without parent-project selection\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3555",
+      "line": 3555,
+      "template": "\"workspace rejects selected parent project row\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3560",
+      "line": 3560,
+      "template": "\"project surface rejects missing selected parent row\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3565",
+      "line": 3565,
+      "template": "\"overview rejects stale selected parent project row\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3570",
+      "line": 3570,
+      "template": "\"Quick Chats rejects stale selected parent project row\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3575",
+      "line": 3575,
+      "template": "\"workspace rejects loss of selected loop owner\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3596",
+      "line": 3596,
+      "template": "\"unfiltered ordinary overview roster exactly two owners and cards\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3601",
+      "line": 3601,
+      "template": "\"compact overview roster rejects obsolete card dimensions\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3608",
+      "line": 3608,
+      "template": "\"compact overview roster rejects obsolete narrow caption position\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3625",
+      "line": 3625,
+      "template": "\"fresh owned content cannot bless an overview missing its peer card\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3635",
+      "line": 3635,
+      "template": "\"project roster retains two owners and exactly one selected project card\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3732",
+      "line": 3732,
+      "template": "(\"unfiltered roster rejects \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3755",
+      "line": 3755,
+      "template": "\"project caption classification keeps full four distinct from two nodes\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3763",
+      "line": 3763,
+      "template": "\"source project caption geometry is separate from node geometry\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3771",
+      "line": 3771,
+      "template": "(\"classified roster rejects \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3792",
+      "line": 3792,
+      "template": "\"literal lane geometry and DPI scaling\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3816",
+      "line": 3816,
+      "template": "\"DPI192 fitted destinations retain shared source lane geometry\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3846",
+      "line": 3846,
+      "template": "(\"DPI192 normalized lane rejects \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3889",
+      "line": 3889,
+      "template": "\"live target clipped to viewport\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3894",
+      "line": 3894,
+      "template": "\"offscreen target rejected\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3897",
+      "line": 3897,
+      "template": "\"resumeSession acknowledges an exact fixture owner without changing its graph\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3908",
+      "line": 3908,
+      "template": "\"resumeSession refuses a node belonging to another project\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3930",
+      "line": 3930,
+      "template": "(\"request \" + $entry.Key)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3941",
+      "line": 3941,
+      "template": "(\"JSON \" + $json)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3943",
+      "line": 3943,
+      "template": "\"duplicate request\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3948",
+      "line": 3948,
+      "template": "\"unanswered publication\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3954",
+      "line": 3954,
+      "template": "(\"control \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3973",
+      "line": 3973,
+      "template": "(\"response \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-3988",
+      "line": 3988,
+      "template": "(\"receipt rejects \" + $mutation)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-4053",
+      "line": 4053,
+      "template": "\"owned real pipe hello\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-4056",
+      "line": 4056,
+      "template": "\"fragmented real two-owner frames\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-4063",
+      "line": 4063,
+      "template": "\"real rename application response publication\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-4072",
+      "line": 4072,
+      "template": "\"idle real pipe publication control\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-4093",
+      "line": 4093,
+      "template": "\"default fixture unchanged over real pipe\"",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    },
+    {
+      "id": "ownership.legacy.mixed.source-line-4152",
+      "line": 4152,
+      "template": "(\"bounded capture \" + $mode)",
+      "executedCount": 0,
+      "disposition": "Mandatory; not replaced by standalone compiled peer cases"
+    }
+  ]
+}
