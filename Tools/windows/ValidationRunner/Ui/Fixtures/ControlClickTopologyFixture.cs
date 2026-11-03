@@ -8,6 +8,7 @@ namespace GraphCode.Validation.Ui.Fixtures;
 
 internal sealed class ControlClickTopologyFixture : IDisposable
 {
+    internal const string HostTitle = "Owned control click fixture";
     private readonly Thread thread;
     private readonly ManualResetEventSlim ready = new(false);
     private Exception? startupFailure;
@@ -25,7 +26,6 @@ internal sealed class ControlClickTopologyFixture : IDisposable
     internal int[] Bounds { get; private set; } = Array.Empty<int>();
     internal int ClickCount;
 
-    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] internal static extern IntPtr GetDesktopWindow();
     [DllImport("user32.dll")] private static extern bool GetCursorPos(out NativePoint point);
@@ -40,7 +40,7 @@ internal sealed class ControlClickTopologyFixture : IDisposable
         {
             try
             {
-                window = new Form { Text = "Owned control click fixture", StartPosition = FormStartPosition.Manual,
+                window = new Form { Text = HostTitle, StartPosition = FormStartPosition.Manual,
                     Left = 120, Top = 120, Width = 480, Height = 360, ShowInTaskbar = false };
                 unrelated = new Form { Text = "Unrelated owned root fixture", StartPosition = FormStartPosition.Manual,
                     Left = 650, Top = 120, Width = 160, Height = 120, ShowInTaskbar = false };
@@ -83,15 +83,15 @@ internal sealed class ControlClickTopologyFixture : IDisposable
 
     internal void Foreground()
     {
-        cursorSaved = GetCursorPos(out initialCursor);
-        var deadline = Stopwatch.StartNew();
-        while (deadline.ElapsedMilliseconds < 2000)
-        {
-            Run(() => { window!.Activate(); return GraphCodeUiaGateState.ActivateWindow(Root); });
-            if (GetForegroundWindow() == Root) return;
-            Thread.Sleep(25);
-        }
-        throw new InvalidOperationException($"Owned fixture could not acquire exact foreground; {GraphCodeUiaGateState.LastActivationDiagnostic}");
+        Run(() => GraphCodeUiaGateState.ActivateWindow(Root));
+        if (GetForegroundWindow() != Root)
+            throw new InvalidOperationException($"Owned fixture could not acquire exact foreground; {GraphCodeUiaGateState.LastActivationDiagnostic}");
+    }
+
+    internal void BeginInput()
+    {
+        if (!GetCursorPos(out initialCursor)) throw new InvalidOperationException("Could not retain the fixture's original cursor position");
+        cursorSaved = true;
     }
 
     internal void ExpectClick()

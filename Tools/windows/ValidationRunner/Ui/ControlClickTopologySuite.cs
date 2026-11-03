@@ -85,6 +85,7 @@ public sealed class ControlClickTopologySuite : IValidationSuite
         foreach (bool nested in new[] { false, true })
         {
             using var fixture = new ControlClickTopologyFixture(nested);
+            Console.WriteLine($"CONTROL_CLICK_FIXTURE_HOST_TITLE={ControlClickTopologyFixture.HostTitle} ROOT={fixture.Root} TOPOLOGY={(nested ? "nested" : "flat")}");
             fixture.Foreground();
             if (nested)
             {
@@ -98,6 +99,7 @@ public sealed class ControlClickTopologySuite : IValidationSuite
                     !Resolve(ControlClickTopologyFixture.GetDesktopWindow()) && fixture.ClickCount == 0,
                     "Unrelated root or mismatched parent was accepted before any input");
             }
+            fixture.BeginInput();
             var result = fixture.Run(() => GraphCodeUiaGateState.ClickScreenPoint(fixture.Target));
             ActivationCases.Require(result is not null && result.HitTarget && result.SameTopLevel,
                 "Actual control click did not preserve the owned target/root hit");
