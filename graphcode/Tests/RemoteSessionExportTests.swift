@@ -67,7 +67,8 @@ struct RemoteSessionExportTests {
     // Banked id first, then the same `workspace.yaml` walk the ensure's bank fragment
     // does — Copilot has no hook to bank its own id, so a session may be unbanked.
     let bank = try #require(script.range(of: "cat \"$HOME/.graphcode/sessions\""))
-    let walk = try #require(script.range(of: "grep -qx 'name: \(name)'"))
+    let walk = try #require(
+      script.range(of: CLISessionBackendKind.copilotNameMatcher(for: name)))
     #expect(bank.lowerBound < walk.lowerBound)
     #expect(script.contains("/.copilot/session-state/$d/workspace.yaml"))
     #expect(script.hasSuffix("exec tar -cf - -C \"$HOME/.copilot/session-state\" \"$S\""))

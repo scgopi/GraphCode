@@ -226,11 +226,95 @@ struct SessionNamingTests {
     #expect(await typedAfterRenaming(.claudeCode, state: state).typed == ["/rename Fix login"])
   }
 
+  /// Copilot 1.0.96 applies a typed `/rename` idle and mid-turn, and the short id has to
+  /// survive it: the name is how `CopilotSessionLog` finds the session afterwards.
   @Test
-  func aRenameReachesNoSessionItCannotName() async {
-    #expect(await typedAfterRenaming(.claudeCode, ramp: false).typed.isEmpty)
-    #expect(await typedAfterRenaming(.copilotCLI).typed.isEmpty)
+  func aRenamedCopilotLoopKeepsItsLookupKey() async throws {
+    let result = await typedAfterRenaming(.copilotCLI)
+    #expect(result.typed == ["/rename Fix login · 11111111"])
+    #expect(result.memory.isEmpty)
+    let name = try #require(result.typed.first?.dropFirst("/rename ".count))
+    #expect(CLISessionBackendKind.isCopilotSessionName(String(name), for: sessionName))
+  }
+
+  @Test(arguments: [LoopState.succeeded, .failed])
+  func aFinishedCopilotLoopsOpenSessionIsRenamedToo(_ state: LoopState) async {
     #expect(
-      await typedAfterRenaming(.claudeCode, to: NodeDraft.untitledFallback).typed.isEmpty)
+      await typedAfterRenaming(.copilotCLI, state: state).typed
+        == ["/rename Fix login · 11111111"])
+  }
+
+  @Test(arguments: [CLISessionBackendKind.claudeCode, .copilotCLI])
+  func aRenameWaitsForTheRampAndARealTitle(_ backend: CLISessionBackendKind) async {
+    #expect(await typedAfterRenaming(backend, ramp: false).typed.isEmpty)
+    #expect(await typedAfterRenaming(backend, to: NodeDraft.untitledFallback).typed.isEmpty)
+  }
+
+  @Test(arguments: [CLISessionBackendKind.codex, .openCode, .pi, .nod])
+  func aRenameReachesNoSessionItCannotName(_ backend: CLISessionBackendKind) async {
+    #expect(await typedAfterRenaming(backend).typed.isEmpty)
+  }
+
+  /// Every name Copilot can record for a node, in the spellings its YAML writer picks, as
+  /// the remote walk reads them — a titled session it cannot find has no banked id, and a
+  /// remote loop with no banked id restarts from scratch.
+  @Test(arguments: [
+    (locale: "en_US.UTF-8", name: "graphcode-11111111-2222-3333-4444-555555555555"),
+    (locale: "en_US.UTF-8", name: "Fix login · 11111111"),
+    (locale: "en_US.UTF-8", name: "'Fix: login · 11111111'"),
+    (locale: "en_US.UTF-8", name: "\"Fix: login · 11111111\""),
+    (locale: "C", name: "Fix login · 11111111"),
+    (locale: "C", name: "'Fix: login · 11111111'"),
+  ])
+  func theRemoteWalkFindsEveryNameOfTheNode(locale: String, name: String) throws {
+    let workspace = "client_name: github/cli\nname: \(name)\n"
+    #expect(try bankedID(recording: workspace, locale: locale) != nil)
+  }
+
+  @Test(arguments: [
+    "name: Fix login · 99999999",
+    "name: Fix login",
+    "name: graphcode-99999999-2222-3333-4444-555555555555",
+    "client_name: Fix login · 11111111",
+  ])
+  func theRemoteWalkFindsNoOtherSession(line: String) throws {
+    #expect(try bankedID(recording: "\(line)\n", locale: "en_US.UTF-8") == nil)
+  }
+
+  /// The pattern's quotes, `$` and `·` have to arrive intact through the one wrapper every
+  /// remote script rides in.
+  @Test
+  func theRemoteWalkSurvivesTheLoginShellQuoting() throws {
+    let location = RemoteProjectLocation(host: "box", remotePath: "/srv/widget")
+    let workspace = "name: 'Fix: login · 11111111'\n"
+    #expect(
+      try bankedID(
+        recording: workspace, locale: "en_US.UTF-8", wrap: location.remoteLoginShellCommand)
+        != nil)
+  }
+
+  /// Runs the ensure's bank fragment under `/bin/sh` against a fake home, and reads back
+  /// the id it banked.
+  private func bankedID(
+    recording workspace: String, locale: String, wrap: (String) -> String = { $0 }
+  ) throws -> String? {
+    let home = URL(fileURLWithPath: NSTemporaryDirectory())
+      .appendingPathComponent("copilot-walk-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    let session = home.appendingPathComponent(".copilot/session-state/the-session")
+    try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+    try workspace.write(
+      to: session.appendingPathComponent("workspace.yaml"), atomically: true, encoding: .utf8)
+
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = ["-c", wrap(CopilotSessionLog.remoteIDBankFragment(forNodeID: nodeID))]
+    process.environment = ["HOME": home.path, "PATH": "/usr/bin:/bin", "LC_ALL": locale]
+    try process.run()
+    process.waitUntilExit()
+    #expect(process.terminationStatus == 0)
+    let banked = home.appendingPathComponent(
+      ".graphcode/sessions/\(nodeID.uuidString).id")
+    return try? String(contentsOf: banked, encoding: .utf8)
   }
 }

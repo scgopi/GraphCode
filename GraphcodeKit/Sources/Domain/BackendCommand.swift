@@ -374,6 +374,18 @@ extension CLISessionBackendKind {
     }
   }
 
+  /// What to type into a live session to show a loop's new title, for the backends that
+  /// apply it mid-turn without interrupting. `nil` when the session can't be renamed.
+  public func renameCommand(displayName: String?, sessionName: String) -> String? {
+    guard let name = displayName.flatMap(Self.sessionLabel) else { return nil }
+    switch self {
+    case .claudeCode: return "/rename \(name)"
+    case .copilotCLI:
+      return "/rename \(Self.copilotSessionName(title: name, sessionName: sessionName))"
+    case .codex, .openCode, .pi, .nod: return nil
+    }
+  }
+
   /// OpenCode's TUI has no title flag (`--title` is `opencode run`'s alone), so the title
   /// rides to graphcode's plugin, which sets it when the session is created
   /// (`OpenCodePresencePlugin`). A resumed session keeps the title it already has.
@@ -396,7 +408,7 @@ extension CLISessionBackendKind {
 
   /// Copilot's name for a titled session: the title, then enough of the node's id for
   /// `CopilotSessionLog` to find it again. Copilot refuses `--name` beside `--resume`, so
-  /// this is fixed at first launch and outlives any later rename of the loop.
+  /// a later rename of the loop can only reach a live session (`renameCommand`).
   public static func copilotSessionName(title: String, sessionName: String) -> String {
     guard let label = sessionLabel(title) else { return sessionName }
     return "\(label) · \(copilotNameSuffix(of: sessionName))"
@@ -411,6 +423,13 @@ extension CLISessionBackendKind {
         && (recorded.first == "\"" || recorded.first == "'")
       ? String(recorded.dropFirst().dropLast()) : recorded
     return unquoted.hasSuffix(" · \(copilotNameSuffix(of: sessionName))")
+  }
+
+  /// `isCopilotSessionName` for a remote host's shell, as a `grep` still to be given its
+  /// file. `.?` is YAML's closing quote, whichever one the writer picked: a literal one
+  /// would have to survive the single quotes every remote script is wrapped in.
+  public static func copilotNameMatcher(for sessionName: String) -> String {
+    "grep -qE '^name: (\(sessionName)|.* · \(copilotNameSuffix(of: sessionName)).?)$'"
   }
 
   private static func copilotNameSuffix(of sessionName: String) -> String {

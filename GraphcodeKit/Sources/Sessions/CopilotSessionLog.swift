@@ -312,7 +312,8 @@ public enum CopilotSessionLog {
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     let find =
       "F=''; for d in $(ls -t \"$HOME/.copilot/session-state/\" 2>/dev/null); do "
-      + "if grep -qx 'name: \(name)' \"$HOME/.copilot/session-state/$d/workspace.yaml\" 2>/dev/null; "
+      + "if \(CLISessionBackendKind.copilotNameMatcher(for: name)) "
+      + "\"$HOME/.copilot/session-state/$d/workspace.yaml\" 2>/dev/null; "
       + "then F=\"$HOME/.copilot/session-state/$d/events.jsonl\"; break; fi; done"
     let keep =
       "grep -aE '\"type\":\"(user\\.message|assistant\\.message|tool\\.execution_start"
@@ -433,7 +434,7 @@ public enum CopilotSessionLog {
     let logged = DialLog.fragment(session: name, dial: "bank", event: "copilot-id")
     return "{ [ -s \(idFile) ] || { gc_sid=''; "
       + "for gc_d in $(ls -t \"$HOME/.copilot/session-state/\" 2>/dev/null); do "
-      + "if grep -qx 'name: \(name)' "
+      + "if \(CLISessionBackendKind.copilotNameMatcher(for: name)) "
       + "\"$HOME/.copilot/session-state/$gc_d/workspace.yaml\" 2>/dev/null; then "
       + "gc_sid=\"$gc_d\"; break; fi; done; "
       + "if [ -n \"$gc_sid\" ]; then mkdir -p \(sessions); "
@@ -450,7 +451,8 @@ public enum CopilotSessionLog {
 
     let findDir =
       "D=''; for d in $(ls -t \"$HOME/.copilot/session-state/\" 2>/dev/null); do "
-      + "if grep -qx 'name: \(name)' \"$HOME/.copilot/session-state/$d/workspace.yaml\" 2>/dev/null; then "
+      + "if \(CLISessionBackendKind.copilotNameMatcher(for: name)) "
+      + "\"$HOME/.copilot/session-state/$d/workspace.yaml\" 2>/dev/null; then "
       + "D=\"$HOME/.copilot/session-state/$d\"; break; fi; done"
 
     // The keep-list carries `lifecycleBoundaries` as well as the mapped events, so
