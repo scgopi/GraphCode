@@ -43,6 +43,8 @@ public static class StandaloneSuites
             "HOST_CASE_RESULT=", ["host.legacy-ownership.shell-scope"], ["-Contract", "shell-scope"]),
         new CaseScriptSuite("host.legacy-ownership.live-adapter", "Tools\\windows\\ValidationRunner\\Adapters\\LegacyOwnership.Contracts.ps1",
             "HOST_CASE_RESULT=", ["host.legacy-ownership.live-adapter"], ["-Contract", "live-adapter"]),
+        new CaseScriptSuite("host.compiled-assembly-environment", "Tools\\windows\\ValidationRunner\\Adapters\\LegacyOwnership.Contracts.ps1",
+            "HOST_CASE_RESULT=", ["host.compiled-assembly-environment"], ["-Contract", "compiled-environment"]),
         new CaseScriptSuite("host.legacy-ownership.live-cleanup", "Tools\\windows\\ValidationRunner\\Adapters\\LegacyOwnership.Contracts.ps1",
             "HOST_CASE_RESULT=", ["host.legacy-ownership.live-cleanup"], ["-Contract", "live-cleanup"]),
         new CaseScriptSuite("host.sdk-prerequisites", "Tools\\windows\\ValidationRunner\\Adapters\\LegacyOwnership.Contracts.ps1",

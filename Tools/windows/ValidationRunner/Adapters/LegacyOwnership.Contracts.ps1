@@ -2,7 +2,7 @@ param(
   [Parameter(Mandatory)][string] $RepositoryRoot,
   [Parameter(Mandatory)][string] $ArtifactRoot,
   [Parameter(Mandatory)][string] $AssemblyPath,
-  [Parameter(Mandatory)][ValidateSet("shell-scope", "live-adapter", "live-cleanup", "sdk-prerequisites")][string] $Contract
+  [Parameter(Mandatory)][ValidateSet("shell-scope", "live-adapter", "live-cleanup", "sdk-prerequisites", "compiled-environment")][string] $Contract
 )
 $ErrorActionPreference = "Stop"
 $tests = Join-Path $RepositoryRoot "Tools\windows\Tests"
@@ -22,6 +22,7 @@ try {
     . (Join-Path $RepositoryRoot "Tools\windows\Import-PinnedPester.ps1")
     $files = if ($Contract -ceq "shell-scope") { @("ShellProcessOwnership.Tests.ps1") } `
       elseif ($Contract -ceq "sdk-prerequisites") { @("DotNetSdk.Tests.ps1", "Bootstrap.Tests.ps1") } `
+      elseif ($Contract -ceq "compiled-environment") { @("CompiledValidationEnvironment.Tests.ps1") } `
       else { @("OwnedLiveAdapter.Tests.ps1") }
     $paths = @($files | ForEach-Object { Join-Path $tests $_ })
     $output = @(Invoke-Pester -Path $paths -PassThru -Output None 6>&1 3>&1 4>&1 5>&1)
@@ -58,9 +59,13 @@ if ($Contract -ceq "live-cleanup") {
   }
   $count = $run.TotalCount
 }
-$id = if ($Contract -ceq "sdk-prerequisites") { "host.sdk-prerequisites" } else { "host.legacy-ownership.$Contract" }
+$id = if ($Contract -ceq "sdk-prerequisites") { "host.sdk-prerequisites" } `
+  elseif ($Contract -ceq "compiled-environment") { "host.compiled-assembly-environment" } `
+  else { "host.legacy-ownership.$Contract" }
 $description = if ($Contract -ceq "sdk-prerequisites") {
   "SDK prerequisites: actual installed-SDK probe plus controlled bootstrap/dependency cases"
+} elseif ($Contract -ceq "compiled-environment") {
+  "Actual scoped caller publication, supplied/empty/missing state, failure identity and native child environment controls"
 } else { "Actual original $Contract mock-only suite" }
 $row = [ordered]@{
   id = $id; status = "Passed"; executedCount = $count

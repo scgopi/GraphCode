@@ -829,6 +829,38 @@ function Invoke-ProviderBuild([object] $roots) {
   }
 }
 
+function Invoke-WithCompiledValidationAssembly(
+  [Parameter(Mandatory)][scriptblock] $Action,
+  [string] $WorkspaceRoot = $repoRoot
+) {
+  $variable = "GRAPHCODE_VALIDATION_ASSEMBLY"
+  $present = [Environment]::GetEnvironmentVariables("Process").Contains($variable)
+  $published = $false
+  try {
+    $assembly = if ($present) {
+      [Environment]::GetEnvironmentVariable($variable, "Process")
+    } else {
+      & (Join-Path $WorkspaceRoot "Tools\windows\Build-CompiledValidationRunner.ps1")
+    }
+    if ($assembly -isnot [string] -or [string]::IsNullOrEmpty($assembly) -or
+        -not [IO.Path]::IsPathFullyQualified($assembly) -or
+        -not (Test-Path -LiteralPath $assembly -PathType Leaf)) {
+      throw "GRAPHCODE_VALIDATION_ASSEMBLY must identify an existing current-worktree compiled assembly; an explicitly empty value is not a bootstrap request"
+    }
+    & (Join-Path $WorkspaceRoot "Tools\windows\Import-CompiledValidationAssembly.ps1") `
+      -AssemblyPath $assembly -RequiredType "ShellOwnedLaunch" | Out-Null
+    if (-not $present) {
+      [Environment]::SetEnvironmentVariable($variable, $assembly, "Process")
+      $published = $true
+    }
+    & $Action
+  } finally {
+    if ($published -and [Environment]::GetEnvironmentVariables("Process").Contains($variable)) {
+      Remove-Item -LiteralPath "Env:\$variable" -ErrorAction Stop
+    }
+  }
+}
+
 function Invoke-Task([string] $name) {
   if ($DryRun) {
     $detail = ""
@@ -1195,7 +1227,10 @@ function Invoke-Task([string] $name) {
       Write-Host "==> Windows shell validation isolation contract"
       . (Join-Path $repoRoot "Tools\windows\Import-PinnedPester.ps1")
       $isolationResults = Invoke-Pester `
-        -Path (Join-Path $repoRoot "Tools\windows\Tests\ValidationIsolation.Tests.ps1") `
+        -Path @(
+          (Join-Path $repoRoot "Tools\windows\Tests\ValidationIsolation.Tests.ps1"),
+          (Join-Path $repoRoot "Tools\windows\Tests\CompiledValidationEnvironment.Tests.ps1")
+        ) `
         -PassThru
       if ($isolationResults.TotalCount -le 0 -or
           $isolationResults.PassedCount -ne $isolationResults.TotalCount -or
@@ -1415,7 +1450,9 @@ try {
   foreach ($name in $selected) {
     if ($name -eq "windows-shell" -and -not $DryRun) {
       Invoke-WindowsShellValidationIsolation -ValidationRootParent $ShellValidationRoot -Action {
-        Invoke-Task "windows-shell"
+        Invoke-WithCompiledValidationAssembly -WorkspaceRoot $repoRoot -Action {
+          Invoke-Task "windows-shell"
+        }
       }
     } else {
       Invoke-Task $name

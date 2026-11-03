@@ -152,6 +152,12 @@ owned `-ShellValidationRoot` for UIA lease paths. Keep Zig caches in stable owne
 directories outside per-invocation `LOCALAPPDATA`, which isolation removes after
 a successful run.
 
+The real `windows-shell` task builds and validates the current compiled helper
+assembly once when `GRAPHCODE_VALIDATION_ASSEMBLY` is absent, publishes it to its
+child callers, and removes that process-only publication on exit. A supplied
+assembly remains subject to current-worktree provenance; an explicitly empty
+entry is refused rather than treated as a bootstrap request.
+
 `windows-spikes` no longer re-runs `windows-shell`, `packaging` or `hardening`.
 Those tasks already run in the `windows-shell` and `Deterministic hardening`
 required checks on every Windows-relevant pull request.
