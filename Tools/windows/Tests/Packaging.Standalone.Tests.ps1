@@ -175,7 +175,7 @@ function Invoke-Setup(
   $primaryError = $null
   $clock = [Diagnostics.Stopwatch]::StartNew()
   try {
-    $job = [StandaloneProcessJob]::Create()
+    $job = [GraphCode.Validation.Ownership.StandaloneProcessJob]::Create()
     $report.ControllerStage = "process-start"
     $started = $process.Start()
     if (-not $started) { throw "Could not start standalone setup host" }
@@ -184,7 +184,7 @@ function Invoke-Setup(
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
     $report.ControllerStage = "job-assign"
-    [StandaloneProcessJob]::Assign($job, $process.Handle)
+    [GraphCode.Validation.Ownership.StandaloneProcessJob]::Assign($job, $process.Handle)
     $assigned = $true
     $report.ControllerStage = "gate-release"
     [IO.File]::WriteAllText($gate, "assigned")
@@ -231,9 +231,9 @@ function Invoke-Setup(
         if ($process.HasExited) { $report.ExitCode = $process.ExitCode }
       }
       if ($assigned) {
-        $report.ActiveBeforeTeardown = [StandaloneProcessJob]::Active($job)
-        $report.JobBeforeTeardown = [StandaloneProcessJob]::Summary($job)
-        $report.OwnedProcessesBeforeTeardown = [StandaloneProcessJob]::Processes($job)
+        $report.ActiveBeforeTeardown = [GraphCode.Validation.Ownership.StandaloneProcessJob]::Active($job)
+        $report.JobBeforeTeardown = [GraphCode.Validation.Ownership.StandaloneProcessJob]::Summary($job)
+        $report.OwnedProcessesBeforeTeardown = [GraphCode.Validation.Ownership.StandaloneProcessJob]::Processes($job)
       }
       # ReadToEndAsync cannot expose partial pipes; distinguish pending capture from empty output.
       $report.StdoutBeforeTeardown = if ($stdout -and $stdout.IsCompletedSuccessfully) {
@@ -253,16 +253,16 @@ function Invoke-Setup(
     } catch { $cleanupErrors.Add("capturing standalone stage evidence: $($_.Exception.Message)") }
     try {
       if ($assigned) {
-        [StandaloneProcessJob]::Terminate($job)
-        [StandaloneProcessJob]::WaitForEmpty($job, 5000)
-        $report.ActiveAfterTeardown = [StandaloneProcessJob]::Active($job)
+        [GraphCode.Validation.Ownership.StandaloneProcessJob]::Terminate($job)
+        [GraphCode.Validation.Ownership.StandaloneProcessJob]::WaitForEmpty($job, 5000)
+        $report.ActiveAfterTeardown = [GraphCode.Validation.Ownership.StandaloneProcessJob]::Active($job)
       } elseif ($started -and -not $process.HasExited) {
         $process.Kill($true)
       }
       if ($started -and -not $process.WaitForExit(5000)) { throw "Standalone host survived termination" }
     } catch { $cleanupErrors.Add("owned process termination: $($_.Exception.Message)") }
     try {
-      if ($job -ne [IntPtr]::Zero) { [StandaloneProcessJob]::Close($job) }
+      if ($job -ne [IntPtr]::Zero) { [GraphCode.Validation.Ownership.StandaloneProcessJob]::Close($job) }
     } catch { $cleanupErrors.Add("closing owned job: $($_.Exception.Message)") }
     try {
       if ($stdout -and $stderr) {
@@ -315,100 +315,12 @@ function Invoke-StandaloneFixture {
   }
 }
 
-if (-not ("StandaloneProcessJob" -as [type])) {
-  Add-Type @'
-using System;
-using System.ComponentModel;
-using System.Diagnostics;
-using System.Runtime.InteropServices;
-public static class StandaloneProcessJob {
-    [StructLayout(LayoutKind.Sequential)]
-    struct BasicLimits { public long ProcessTime, JobTime; public uint Flags; public UIntPtr Min, Max; public uint Active; public UIntPtr Affinity; public uint Priority, Scheduling; }
-    [StructLayout(LayoutKind.Sequential)]
-    struct IoCounters { public ulong ReadOps, WriteOps, OtherOps, ReadBytes, WriteBytes, OtherBytes; }
-    [StructLayout(LayoutKind.Sequential)]
-    struct Limits { public BasicLimits Basic; public IoCounters Io; public UIntPtr ProcessMemory, JobMemory, PeakProcessMemory, PeakJobMemory; }
-    [StructLayout(LayoutKind.Sequential)]
-    struct Accounting { public long User, Kernel, PeriodUser, PeriodKernel; public uint Faults, Total, Active, Terminated; }
-    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr CreateJobObjectW(IntPtr attributes, IntPtr name);
-    [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetInformationJobObject(IntPtr job, int info, ref Limits limits, uint size);
-    [DllImport("kernel32.dll", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job, int info, out Accounting accounting, uint size, IntPtr length);
-    [DllImport("kernel32.dll", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job, int info, IntPtr buffer, uint size, IntPtr length);
-    [DllImport("kernel32.dll", SetLastError=true)] static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
-    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
-    [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetProcessTimes(IntPtr process, out long creation, out long exit, out long kernel, out long user);
-    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, System.Text.StringBuilder name, ref uint size);
-    [DllImport("kernel32.dll", SetLastError=true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
-    [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateJobObject(IntPtr job, uint code);
-    [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
-    public static IntPtr Create() {
-        var job = CreateJobObjectW(IntPtr.Zero, IntPtr.Zero);
-        if (job == IntPtr.Zero) throw new Win32Exception();
-        var limits = new Limits(); limits.Basic.Flags = 0x2000; // KILL_ON_JOB_CLOSE
-        if (!SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf<Limits>())) {
-            var error = new Win32Exception(); CloseHandle(job); throw error;
-        }
-        return job;
-    }
-    public static void Assign(IntPtr job, IntPtr process) { if (!AssignProcessToJobObject(job, process)) throw new Win32Exception(); }
-    public static uint Active(IntPtr job) {
-        Accounting value;
-        if (!QueryInformationJobObject(job, 1, out value, (uint)Marshal.SizeOf<Accounting>(), IntPtr.Zero)) throw new Win32Exception();
-        return value.Active;
-    }
-    public static string Summary(IntPtr job) {
-        Accounting value;
-        if (!QueryInformationJobObject(job, 1, out value, (uint)Marshal.SizeOf<Accounting>(), IntPtr.Zero)) throw new Win32Exception();
-        return String.Format("total={0}; active={1}; terminated={2}; user100ns={3}; kernel100ns={4}",
-            value.Total, value.Active, value.Terminated, value.User, value.Kernel);
-    }
-    public static string Processes(IntPtr job) {
-        const int capacity = 1024;
-        int size = 8 + capacity * IntPtr.Size;
-        var buffer = Marshal.AllocHGlobal(size);
-        try {
-            if (!QueryInformationJobObject(job, 3, buffer, (uint)size, IntPtr.Zero)) throw new Win32Exception();
-            int count = Marshal.ReadInt32(buffer, 4);
-            if (count < 0 || count > capacity) throw new InvalidOperationException("Owned process snapshot exceeds capacity");
-            var identities = new System.Collections.Generic.List<string>();
-            for (int i = 0; i < count; i++) {
-                int pid = checked((int)Marshal.ReadIntPtr(buffer, 8 + i * IntPtr.Size).ToInt64());
-                var process = OpenProcess(0x1000, false, (uint)pid); // QUERY_LIMITED_INFORMATION
-                if (process == IntPtr.Zero) {
-                    identities.Add("pid=" + pid + "; unavailable-win32=" + Marshal.GetLastWin32Error());
-                    continue;
-                }
-                try {
-                    bool owned;
-                    if (!IsProcessInJob(process, job, out owned)) throw new Win32Exception();
-                    if (!owned) { identities.Add("pid=" + pid + "; no-longer-owned"); continue; }
-                    long creation, exit, kernel, user;
-                    uint length = 32768;
-                    var name = new System.Text.StringBuilder((int)length);
-                    if (!GetProcessTimes(process, out creation, out exit, out kernel, out user) ||
-                        !QueryFullProcessImageNameW(process, 0, name, ref length)) {
-                        identities.Add("pid=" + pid + "; identity-unavailable-win32=" + Marshal.GetLastWin32Error());
-                        continue;
-                    }
-                    identities.Add(String.Format("pid={0}; creationUtcTicks={1}; name={2}",
-                        pid, DateTime.FromFileTimeUtc(creation).Ticks, System.IO.Path.GetFileNameWithoutExtension(name.ToString())));
-                } finally { if (!CloseHandle(process)) throw new Win32Exception(); }
-            }
-            return String.Join(" | ", identities);
-        } finally { Marshal.FreeHGlobal(buffer); }
-    }
-    public static void Terminate(IntPtr job) { if (!TerminateJobObject(job, 124)) throw new Win32Exception(); }
-    public static void WaitForEmpty(IntPtr job, int milliseconds) {
-        var clock = Stopwatch.StartNew();
-        while (Active(job) != 0) {
-            if (clock.ElapsedMilliseconds >= milliseconds) throw new TimeoutException("Owned standalone job still has active processes");
-            System.Threading.Thread.Sleep(10);
-        }
-    }
-    public static void Close(IntPtr job) { if (!CloseHandle(job)) throw new Win32Exception(); }
+$validationAssemblyPath = $env:GRAPHCODE_VALIDATION_ASSEMBLY
+if (-not $validationAssemblyPath) {
+  $validationAssemblyPath = & (Join-Path $PSScriptRoot "..\Build-CompiledValidationRunner.ps1")
 }
-'@
-}
+& (Join-Path $PSScriptRoot "..\Import-CompiledValidationAssembly.ps1") `
+  -AssemblyPath $validationAssemblyPath -RequiredType "GraphCode.Validation.Ownership.StandaloneProcessJob" | Out-Null
 
 function Test-StandaloneHarness([switch] $diagnosticOnly, [switch] $launcherOnly) {
   $hostPath = (Get-Command pwsh).Source
@@ -694,7 +606,7 @@ Write-Output "CASE PASS: $case"
     }
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $start
-    $job = [StandaloneProcessJob]::Create()
+    $job = [GraphCode.Validation.Ownership.StandaloneProcessJob]::Create()
     $started = $false
     $assigned = $false
     try {
@@ -702,16 +614,16 @@ Write-Output "CASE PASS: $case"
       if (-not $started) { throw "Could not start harness self-test worker" }
       $stdout = $process.StandardOutput.ReadToEndAsync()
       $stderr = $process.StandardError.ReadToEndAsync()
-      [StandaloneProcessJob]::Assign($job, $process.Handle)
+      [GraphCode.Validation.Ownership.StandaloneProcessJob]::Assign($job, $process.Handle)
       $assigned = $true
       [IO.File]::WriteAllText($gate, "assigned")
       $workerBudget = if ($case -like "diagnostic-*" -or $case -like "launcher-*") { 70000 } else { 12000 }
       $finished = $process.WaitForExit($workerBudget)
       $settle = [Diagnostics.Stopwatch]::StartNew()
-      while ($finished -and [StandaloneProcessJob]::Active($job) -ne 0 -and $settle.ElapsedMilliseconds -lt 250) {
+      while ($finished -and [GraphCode.Validation.Ownership.StandaloneProcessJob]::Active($job) -ne 0 -and $settle.ElapsedMilliseconds -lt 250) {
         Start-Sleep -Milliseconds 10
       }
-      $activeBeforeTeardown = [StandaloneProcessJob]::Active($job)
+      $activeBeforeTeardown = [GraphCode.Validation.Ownership.StandaloneProcessJob]::Active($job)
       if (-not $finished) {
         foreach ($role in @("root", "descendant")) {
           $identityPath = Join-Path $caseRoot "$role-identity"
@@ -724,8 +636,8 @@ Write-Output "CASE PASS: $case"
         }
         Write-Output "Watchdog readiness: descendantReady=$(Test-Path (Join-Path $caseRoot 'descendant-ready')); markerWritten=$(Test-Path (Join-Path $caseRoot 'marker-written'))"
       }
-      [StandaloneProcessJob]::Terminate($job)
-      [StandaloneProcessJob]::WaitForEmpty($job, 5000)
+      [GraphCode.Validation.Ownership.StandaloneProcessJob]::Terminate($job)
+      [GraphCode.Validation.Ownership.StandaloneProcessJob]::WaitForEmpty($job, 5000)
       if (-not $process.WaitForExit(5000)) { throw "Self-test worker survived owned job termination" }
       if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]] @($stdout, $stderr), 5000)) {
         throw "Self-test output capture exceeded its deadline"
@@ -734,26 +646,26 @@ Write-Output "CASE PASS: $case"
       Write-Output $output
       if (-not $finished -or $process.ExitCode -ne 0 -or $activeBeforeTeardown -ne 0 -or $output -notmatch "CASE PASS: $case") {
         $failures++
-        Write-Output "CASE FAIL: $caseId; finished=$finished; exit=$($process.ExitCode); activeBeforeTeardown=$activeBeforeTeardown; activeAfterTeardown=$([StandaloneProcessJob]::Active($job))"
+        Write-Output "CASE FAIL: $caseId; finished=$finished; exit=$($process.ExitCode); activeBeforeTeardown=$activeBeforeTeardown; activeAfterTeardown=$([GraphCode.Validation.Ownership.StandaloneProcessJob]::Active($job))"
         if (-not $finished -or $activeBeforeTeardown -ne 0 -or
             $output -match "Standalone setup (?:output capture )?timed out") {
           throw "Stopped standalone harness at unexpected timeout or ownership failure: $caseId"
         }
       } else {
         $passed++
-        Write-Output "Owned worker job: activeBeforeTeardown=$activeBeforeTeardown; activeAfterTeardown=$([StandaloneProcessJob]::Active($job))"
+        Write-Output "Owned worker job: activeBeforeTeardown=$activeBeforeTeardown; activeAfterTeardown=$([GraphCode.Validation.Ownership.StandaloneProcessJob]::Active($job))"
       }
     } finally {
       try {
         if ($assigned) {
-          [StandaloneProcessJob]::Terminate($job)
-          [StandaloneProcessJob]::WaitForEmpty($job, 5000)
+          [GraphCode.Validation.Ownership.StandaloneProcessJob]::Terminate($job)
+          [GraphCode.Validation.Ownership.StandaloneProcessJob]::WaitForEmpty($job, 5000)
         } elseif ($started -and -not $process.HasExited) {
           $process.Kill($true)
           if (-not $process.WaitForExit(5000)) { throw "Unassigned self-test worker survived termination" }
         }
       } finally {
-        try { [StandaloneProcessJob]::Close($job) } finally { $process.Dispose() }
+        try { [GraphCode.Validation.Ownership.StandaloneProcessJob]::Close($job) } finally { $process.Dispose() }
       }
     }
   }

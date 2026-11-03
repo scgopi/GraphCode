@@ -1,0 +1,893 @@
+{
+  "templates": [
+    {
+      "sourceId": "line-1724",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1724"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-1733",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1733"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-1749",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1749"
+      ],
+      "expectedCount": 6
+    },
+    {
+      "sourceId": "line-1757",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1757"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-1769",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1769"
+      ],
+      "expectedCount": 4
+    },
+    {
+      "sourceId": "line-1777",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1777"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-1789",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1789"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-1804",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1804"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-1811",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1811"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-1818",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1818"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-1824",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1824"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-1837",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1837"
+      ],
+      "expectedCount": 5
+    },
+    {
+      "sourceId": "line-1843",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1843"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-1854",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1854"
+      ],
+      "expectedCount": 4
+    },
+    {
+      "sourceId": "line-1870",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1870"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-1879",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1879"
+      ],
+      "expectedCount": 8
+    },
+    {
+      "sourceId": "line-1917",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1917"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-1924",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1924"
+      ],
+      "expectedCount": 4
+    },
+    {
+      "sourceId": "line-1951",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-1951"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2060",
+      "unitIds": [
+        "ownership.mixed-startup.source-line-2060"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2068",
+      "unitIds": [
+        "ownership.mixed-startup.source-line-2068"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2074",
+      "unitIds": [
+        "ownership.mixed-startup.source-line-2074"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2083",
+      "unitIds": [
+        "ownership.mixed-startup.source-line-2083"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2101",
+      "unitIds": [
+        "ownership.mixed-startup.source-line-2101"
+      ],
+      "expectedCount": 14
+    },
+    {
+      "sourceId": "line-2109",
+      "unitIds": [
+        "ownership.mixed-startup.source-line-2109"
+      ],
+      "expectedCount": 6
+    },
+    {
+      "sourceId": "line-2126",
+      "unitIds": [
+        "ownership.mixed-startup.source-line-2126"
+      ],
+      "expectedCount": 4
+    },
+    {
+      "sourceId": "line-2137",
+      "unitIds": [
+        "ownership.mixed-startup.source-line-2137"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2143",
+      "unitIds": [
+        "ownership.mixed-startup.source-line-2143"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2149",
+      "unitIds": [
+        "ownership.mixed-startup.source-line-2149"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2165",
+      "unitIds": [
+        "ownership.mixed-startup.source-line-2165"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2173",
+      "unitIds": [
+        "ownership.mixed-startup.source-line-2173"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2193",
+      "unitIds": [
+        "ownership.mixed-stream.source-line-2193"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2221",
+      "unitIds": [
+        "ownership.mixed-stream.source-line-2221"
+      ],
+      "expectedCount": 7
+    },
+    {
+      "sourceId": "line-2305",
+      "unitIds": [
+        "ownership.mixed-stream.source-line-2305"
+      ],
+      "expectedCount": 3
+    },
+    {
+      "sourceId": "line-2342",
+      "unitIds": [
+        "ownership.mixed-stream.source-line-2342"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2359",
+      "unitIds": [
+        "ownership.mixed-stream.source-line-2359"
+      ],
+      "expectedCount": 6
+    },
+    {
+      "sourceId": "line-2411",
+      "unitIds": [
+        "ownership.mixed-receipt.source-line-2411"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2439",
+      "unitIds": [
+        "ownership.mixed-receipt.source-line-2439"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2445",
+      "unitIds": [
+        "ownership.mixed-receipt.source-line-2445"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2460",
+      "unitIds": [
+        "ownership.mixed-receipt.source-line-2460"
+      ],
+      "expectedCount": 51
+    },
+    {
+      "sourceId": "line-2520",
+      "unitIds": [
+        "ownership.mixed-receipt.source-line-2520"
+      ],
+      "expectedCount": 11
+    },
+    {
+      "sourceId": "line-2706",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-2706"
+      ],
+      "expectedCount": 3
+    },
+    {
+      "sourceId": "line-2724",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-2724"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2732",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-2732"
+      ],
+      "expectedCount": 2
+    },
+    {
+      "sourceId": "line-2742",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-2742"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2751",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-2751"
+      ],
+      "expectedCount": 10
+    },
+    {
+      "sourceId": "line-2785",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-2785"
+      ],
+      "expectedCount": 8
+    },
+    {
+      "sourceId": "line-2808",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-2808"
+      ],
+      "expectedCount": 22
+    },
+    {
+      "sourceId": "line-2845",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-2845"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2850",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-2850"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2857",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-2857"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2871",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-2871"
+      ],
+      "expectedCount": 2
+    },
+    {
+      "sourceId": "line-2897",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-2897"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2906",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-2906"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-2924",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-2924"
+      ],
+      "expectedCount": 59
+    },
+    {
+      "sourceId": "line-3013",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3013"
+      ],
+      "expectedCount": 2
+    },
+    {
+      "sourceId": "line-3024",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3024"
+      ],
+      "expectedCount": 3
+    },
+    {
+      "sourceId": "line-3040",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3040"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3057",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3057"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3129",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3129"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3138",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3138"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3154",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3154"
+      ],
+      "expectedCount": 29
+    },
+    {
+      "sourceId": "line-3202",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3202"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3214",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3214"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3224",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3224"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3237",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3237"
+      ],
+      "expectedCount": 3
+    },
+    {
+      "sourceId": "line-3268",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3268"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3278",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3278"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3283",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3283"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3291",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3291"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3296",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3296"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3314",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3314"
+      ],
+      "expectedCount": 8
+    },
+    {
+      "sourceId": "line-3331",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3331"
+      ],
+      "expectedCount": 7
+    },
+    {
+      "sourceId": "line-3341",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3341"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3353",
+      "unitIds": [
+        "ownership.mixed-protocol.source-line-3353"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3368",
+      "unitIds": [
+        "ownership.mixed-protocol.source-line-3368"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3373",
+      "unitIds": [
+        "ownership.mixed-protocol.source-line-3373"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3383",
+      "unitIds": [
+        "ownership.mixed-protocol.source-line-3383"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3392",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3392"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3423",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3423"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3443",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3443"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3458",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3458"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3469",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3469"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3482",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3482"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3487",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3487"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3497",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3497"
+      ],
+      "expectedCount": 17
+    },
+    {
+      "sourceId": "line-3524",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3524"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3530",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3530"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3535",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3535"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3540",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3540"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3545",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3545"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3550",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3550"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3555",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3555"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3560",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3560"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3565",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3565"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3570",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3570"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3575",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3575"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3596",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3596"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3601",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3601"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3608",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3608"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3625",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3625"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3635",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3635"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3732",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3732"
+      ],
+      "expectedCount": 8
+    },
+    {
+      "sourceId": "line-3755",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3755"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3763",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3763"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3771",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3771"
+      ],
+      "expectedCount": 9
+    },
+    {
+      "sourceId": "line-3792",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3792"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3816",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3816"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3846",
+      "unitIds": [
+        "ownership.mixed-ui.source-line-3846"
+      ],
+      "expectedCount": 11
+    },
+    {
+      "sourceId": "line-3889",
+      "unitIds": [
+        "ownership.mixed-protocol.source-line-3889"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3894",
+      "unitIds": [
+        "ownership.mixed-protocol.source-line-3894"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3897",
+      "unitIds": [
+        "ownership.mixed-protocol.source-line-3897"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3908",
+      "unitIds": [
+        "ownership.mixed-protocol.source-line-3908"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3930",
+      "unitIds": [
+        "ownership.mixed-protocol.source-line-3930"
+      ],
+      "expectedCount": 9
+    },
+    {
+      "sourceId": "line-3941",
+      "unitIds": [
+        "ownership.mixed-protocol.source-line-3941"
+      ],
+      "expectedCount": 3
+    },
+    {
+      "sourceId": "line-3943",
+      "unitIds": [
+        "ownership.mixed-protocol.source-line-3943"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3948",
+      "unitIds": [
+        "ownership.mixed-protocol.source-line-3948"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-3954",
+      "unitIds": [
+        "ownership.mixed-protocol.source-line-3954"
+      ],
+      "expectedCount": 6
+    },
+    {
+      "sourceId": "line-3973",
+      "unitIds": [
+        "ownership.mixed-protocol.source-line-3973"
+      ],
+      "expectedCount": 4
+    },
+    {
+      "sourceId": "line-3988",
+      "unitIds": [
+        "ownership.mixed-protocol.source-line-3988"
+      ],
+      "expectedCount": 10
+    },
+    {
+      "sourceId": "line-4053",
+      "unitIds": [
+        "ownership.mixed-pipe.source-line-4053"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-4056",
+      "unitIds": [
+        "ownership.mixed-pipe.source-line-4056"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-4063",
+      "unitIds": [
+        "ownership.mixed-pipe.source-line-4063"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-4072",
+      "unitIds": [
+        "ownership.mixed-pipe.source-line-4072"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-4093",
+      "unitIds": [
+        "ownership.mixed-pipe.source-line-4093"
+      ],
+      "expectedCount": 1
+    },
+    {
+      "sourceId": "line-4152",
+      "unitIds": [
+        "ownership.mixed-capture.normal",
+        "ownership.mixed-capture.stop",
+        "ownership.mixed-capture.inherited",
+        "ownership.mixed-capture.abrupt",
+        "ownership.mixed-capture.timeout",
+        "ownership.mixed-capture.inherited-timeout",
+        "ownership.mixed-capture.primary-secondary",
+        "ownership.mixed-capture.cleanup-only"
+      ],
+      "expectedCount": 8
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+<Project>
+  <Target Name="RecordValidationBuildInputs" BeforeTargets="GetAssemblyAttributes" DependsOnTargets="ResolveReferences">
+    <ItemGroup>
+      <_ValidationInput Include="@(Compile)" Exclude="$(BaseIntermediateOutputPath)**" />
+      <_ValidationInput Include="@(ReferencePath)" />
+      <_ValidationInput Include="$(MSBuildProjectFullPath);$(MSBuildThisFileFullPath);$(MSBuildThisFileDirectory)global.json" />
+    </ItemGroup>
+    <RemoveDuplicates Inputs="@(_ValidationInput)">
+      <Output TaskParameter="Filtered" ItemName="_DistinctValidationInput" />
+    </RemoveDuplicates>
+    <GetFileHash Files="@(_DistinctValidationInput)" Algorithm="SHA256">
+      <Output TaskParameter="Items" ItemName="_ValidationInputHash" />
+    </GetFileHash>
+    <ItemGroup>
+      <AssemblyMetadata Include="GraphCode.Validation.Input"
+                        Value="%(_ValidationInputHash.FullPath)|%(_ValidationInputHash.FileHash)" />
+    </ItemGroup>
+  </Target>
+</Project>

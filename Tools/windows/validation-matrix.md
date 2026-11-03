@@ -7,7 +7,7 @@ The Windows port must have runnable commands before implementation fleets begin.
 | Surface | Command |
 |---|---|
 | Windows investigation spikes | `pwsh Tools/windows/validate.ps1 -Task all` |
-| Validation runner contract | `pwsh Tools/windows/Tests/ValidationRunner.Tests.ps1` |
+| Compiled validation runner contract | `pwsh -NoProfile -File Tools\windows\Invoke-ValidationRunnerContract.ps1` (builds and runs the normal full C# entry; see [runner documentation](ValidationRunner/README.md)) |
 | Isolated 30-key process environment boundary | `pwsh -NoProfile -File Tools\windows\Tests\IsolatedProcessEnvironment.Contracts.Tests.ps1 -Phase REGRESSION` |
 | Deterministic visual baseline | `pwsh Tools/windows/validate.ps1 -Task visual-baseline` |
 | TDD evidence contract | `pwsh Tools/tdd/Tests/TddEvidence.Tests.ps1` |
@@ -83,7 +83,8 @@ helper and preserve its existing source/IL/reference policy.
 The macOS shared-regression, Windows shell, Windows port, and Windows hardening
 workflows run on every pull request, including documentation-only changes.
 Workflow-level path/branch filters must not prevent their required check contexts
-from being reported. `ValidationRunner.Tests.ps1` guards the unfiltered triggers.
+from being reported. The compiled runner's CI contracts guard the unfiltered
+triggers and require positive full coverage from the normal executable.
 This deliberately trades additional CI usage for reliable branch protection.
 
 Full-pinned and owned-environment hardening remain dispatch/schedule-gated as
@@ -136,6 +137,26 @@ part.
 | `windows-spikes` | Swift spikes, production, format | `validate.ps1 -Task swift-portable,swift-contracts,swift-production,swift-paths,swift-process,swift-named-pipe,swift-format` |
 | `windows-spikes` | remaining tasks | `validate.ps1 -Task all -SkipTrayLive -SkipWslRemoteE2E -SkipTask <the Swift tasks>,windows-shell,packaging,hardening` |
 | `Deterministic hardening (...)` | hardening | `validate.ps1 -Task hardening` |
+
+The integration part also requires six native smoke-exit controls: failing
+nonreading-daemon smoke must emit its transport diagnostic and exit nonzero
+through both the original stderr-file producer and owned capture; successful
+requested smoke exits must remain zero through both producers. Requested
+workspace actions must refuse when activation or the focus effect is missing.
+All controls run
+inside assigned owned jobs and retain evidence under the validation scratch root.
+
+Run local GUI, keyboard, and pointer gates serially on one desktop; CI runs the
+shards and integration job on separate VM desktops. Use a short, exclusively
+owned `-ShellValidationRoot` for UIA lease paths. Keep Zig caches in stable owned
+directories outside per-invocation `LOCALAPPDATA`, which isolation removes after
+a successful run.
+
+The real `windows-shell` task builds and validates the current compiled helper
+assembly once when `GRAPHCODE_VALIDATION_ASSEMBLY` is absent, publishes it to its
+child callers, and removes that process-only publication on exit. A supplied
+assembly remains subject to current-worktree provenance; an explicitly empty
+entry is refused rather than treated as a bootstrap request.
 
 `windows-spikes` no longer re-runs `windows-shell`, `packaging` or `hardening`.
 Those tasks already run in the `windows-shell` and `Deterministic hardening`
