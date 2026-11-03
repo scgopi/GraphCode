@@ -64,7 +64,27 @@ internal static class UiAdapterCases
         "ui.delete.select.invalid-boolean",
         "ui.delete.select.nonfinite-bounds",
         "ui.delete.select.exception-chain",
-        "ui.delete.select.foreign-parent"
+        "ui.delete.select.foreign-parent",
+        "ui.delete.restore.source-order",
+        "ui.delete.restore.owned-navigation",
+        "ui.delete.restore.foreground-refused",
+        "ui.delete.restore.missing-route",
+        "ui.delete.restore.foreign-route",
+        "ui.delete.restore.offscreen-route",
+        "ui.delete.restore.missing-card",
+        "ui.delete.restore.wrong-card-id",
+        "ui.delete.restore.foreign-card",
+        "ui.delete.restore.wrong-fit-id",
+        "ui.delete.restore.foreign-fit",
+        "ui.delete.restore.retained-workspace",
+        "ui.delete.restore.wrong-final-id",
+        "ui.delete.restore.foreign-final-card",
+        "ui.delete.restore.offscreen-final-card",
+        "ui.delete.restore.foreign-final-graph",
+        "ui.delete.restore.lost-selection",
+        "ui.delete.cleanup.source-order",
+        "ui.delete.cleanup.success-clears",
+        "ui.delete.cleanup.failed-removal-retains"
     };
     internal static readonly string[] RootSourceIds =
     {

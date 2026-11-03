@@ -284,6 +284,205 @@ foreach ($case in $selectCases) {
   }
 }
 Assert-Delete ($visibilityCases.Count -eq 9 -and $selectCases.Count -eq 21 -and $results.Count -eq 30) 'Wrong positive case count'
+Invoke-DeleteCase 'ui.delete.restore.source-order' {
+  $restoreDefinitions = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Restore-DeleteLoopCanvas'
+  }, $true))
+  Assert-Delete ($restoreDefinitions.Count -eq 1) 'Expected one actual Delete canvas restoration helper'
+  $selection = $source.IndexOf('$deleteTargetSelection.Select()', [StringComparison]::Ordinal)
+  $selected = $source.IndexOf('Require $deleteTargetSelection.Current.IsSelected', $selection, [StringComparison]::Ordinal)
+  $restore = $source.IndexOf('Restore-DeleteLoopCanvas $process $root $shellWindow', $selected, [StringComparison]::Ordinal)
+  $menu = $source.IndexOf('$deleteLoopPopup = Open-CanvasCardContextMenu', $selected, [StringComparison]::Ordinal)
+  Assert-Delete ($selection -ge 0 -and $selected -gt $selection -and $restore -gt $selected -and $menu -gt $restore) `
+    'Delete must restore the canvas after the unchanged Select assertion and before the owned pointer route'
+  $calls = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Restore-DeleteLoopCanvas'
+  }, $true))
+  Assert-Delete ($calls.Count -eq 1 -and $calls[0].Extent.Text -match '\$renameGraphIdentity \$rawWalker') `
+    'Delete restoration must bind the same renamed card identity and walker exactly once'
+}
+$restoreCases = @(
+  @{ name = 'owned-navigation'; failure = $null; order = 'foreground,wait-route,show,reconnect,lookup:canvas-card-owned,lookup:fit-canvas,fit,wait-card,selected,reconnect' },
+  @{ name = 'foreground-refused'; failure = 'Delete Loop could not acquire its owned foreground before Show in Graph'; order = 'foreground' },
+  @{ name = 'missing-route'; failure = 'controlled route publication missing'; order = 'foreground,wait-route' },
+  @{ name = 'foreign-route'; failure = 'Delete Loop omitted its visible owned Show in Graph action'; order = 'foreground,wait-route' },
+  @{ name = 'offscreen-route'; failure = 'Delete Loop omitted its visible owned Show in Graph action'; order = 'foreground,wait-route' },
+  @{ name = 'missing-card'; failure = 'Delete Loop lost its same owned card after Show in Graph'; order = 'foreground,wait-route,show,reconnect,lookup:canvas-card-owned' },
+  @{ name = 'wrong-card-id'; failure = 'Delete Loop lost its same owned card after Show in Graph'; order = 'foreground,wait-route,show,reconnect,lookup:canvas-card-owned' },
+  @{ name = 'foreign-card'; failure = 'Delete Loop lost its same owned card after Show in Graph'; order = 'foreground,wait-route,show,reconnect,lookup:canvas-card-owned' },
+  @{ name = 'wrong-fit-id'; failure = 'Delete Loop graph reentry omitted the exact owned Fit Canvas action'; order = 'foreground,wait-route,show,reconnect,lookup:canvas-card-owned,lookup:fit-canvas' },
+  @{ name = 'foreign-fit'; failure = 'Delete Loop graph reentry omitted the exact owned Fit Canvas action'; order = 'foreground,wait-route,show,reconnect,lookup:canvas-card-owned,lookup:fit-canvas' },
+  @{ name = 'retained-workspace'; failure = 'controlled restored card publication missing'; order = 'foreground,wait-route,show,reconnect,lookup:canvas-card-owned,lookup:fit-canvas,fit,wait-card' },
+  @{ name = 'wrong-final-id'; failure = 'controlled restored card publication missing'; order = 'foreground,wait-route,show,reconnect,lookup:canvas-card-owned,lookup:fit-canvas,fit,wait-card' },
+  @{ name = 'foreign-final-card'; failure = 'controlled restored card publication missing'; order = 'foreground,wait-route,show,reconnect,lookup:canvas-card-owned,lookup:fit-canvas,fit,wait-card' },
+  @{ name = 'offscreen-final-card'; failure = 'controlled restored card publication missing'; order = 'foreground,wait-route,show,reconnect,lookup:canvas-card-owned,lookup:fit-canvas,fit,wait-card' },
+  @{ name = 'foreign-final-graph'; failure = 'Delete Loop same card did not return to its visible canvas after Show in Graph and Fit Canvas'; order = 'foreground,wait-route,show,reconnect,lookup:canvas-card-owned,lookup:fit-canvas,fit,wait-card' },
+  @{ name = 'lost-selection'; failure = 'Delete Loop Show in Graph changed the selected card identity'; order = 'foreground,wait-route,show,reconnect,lookup:canvas-card-owned,lookup:fit-canvas,fit,wait-card,selected' }
+)
+foreach ($test in $restoreCases) {
+  Invoke-DeleteCase "ui.delete.restore.$($test.name)" {
+    $definition = @($ast.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Restore-DeleteLoopCanvas'
+    }, $true))
+    Assert-Delete ($definition.Count -eq 1) 'Expected one actual Delete canvas restoration helper'
+    & (Join-Path $RepositoryRoot 'Tools\windows\Import-CompiledValidationAssembly.ps1') `
+      -AssemblyPath $AssemblyPath -RequiredType 'GraphCodeUiaGateState' | Out-Null
+    Assert-Delete ($definition[0].Extent.Text -notmatch '\[GraphCode[^\]]*\]::|SendInput|PostMouse|Start-Process|Add-Type') `
+      'Restoration fixture must exercise the production route without direct native effects'
+    . ([scriptblock]::Create($definition[0].Extent.Text))
+    $state = @{ name = $test.name; order = [Collections.Generic.List[string]]::new(); waits = 0; reconnects = 0 }
+    $process = [pscustomobject]@{ Id = 4242 }
+    $initialRoot = [pscustomobject]@{ label = 'workspace-root' }
+    $restoredRoot = [pscustomobject]@{ label = 'restored-root' }
+    $finalRoot = [pscustomobject]@{ label = 'final-root' }
+    $ownedWalker = [pscustomobject]@{ fixture = 'owned-walker' }
+    function Require([bool] $condition, [string] $message) { if (-not $condition) { throw [InvalidOperationException]::new($message) } }
+    function New-RestoreElement([string] $Kind) {
+      $id = switch ($Kind) { route { 'workspace-show-graph-owned' } fit { 'fit-canvas' } graph { 'graph' } default { 'canvas-card-owned' } }
+      if (($Kind -ceq 'card' -and $state.name -ceq 'wrong-card-id') -or
+          ($Kind -ceq 'final-card' -and $state.name -ceq 'wrong-final-id')) { $id = 'canvas-card-foreign' }
+      if ($Kind -ceq 'fit' -and $state.name -ceq 'wrong-fit-id') { $id = 'fit-foreign' }
+      $owner = if (($Kind -ceq 'route' -and $state.name -ceq 'foreign-route') -or
+        ($Kind -ceq 'card' -and $state.name -ceq 'foreign-card') -or
+        ($Kind -ceq 'fit' -and $state.name -ceq 'foreign-fit') -or
+        ($Kind -ceq 'final-card' -and $state.name -ceq 'foreign-final-card') -or
+        ($Kind -ceq 'graph' -and $state.name -ceq 'foreign-final-graph')) { 7777 } else { 4242 }
+      $label = switch ($Kind) { route { 'Show in Graph' } fit { 'Fit canvas' } default { 'fixture' } }
+      $element = [pscustomobject]@{
+        Kind = $Kind; State = $state
+        Current = [pscustomobject]@{
+          AutomationId = $id; Name = $label; ProcessId = $owner
+          IsOffscreen = ($Kind -ceq 'route' -and $state.name -ceq 'offscreen-route') -or
+            ($Kind -ceq 'final-card' -and $state.name -ceq 'offscreen-final-card')
+        }
+      }
+      $element | Add-Member ScriptMethod GetCurrentPattern {
+        param($pattern)
+        if ($this.Kind -cin @('route','fit')) {
+          if ($pattern -ne [System.Windows.Automation.InvokePattern]::Pattern) { throw 'Unexpected route pattern' }
+          $invoke = [pscustomobject]@{ Kind = $this.Kind; State = $this.State }
+          $invoke | Add-Member ScriptMethod Invoke {
+            $this.State.order.Add($(if ($this.Kind -ceq 'route') { 'show' } else { 'fit' }))
+          }
+          return $invoke
+        }
+        if ($pattern -ne [System.Windows.Automation.SelectionItemPattern]::Pattern -or $this.Kind -cne 'final-card') {
+          throw 'Unexpected selection pattern'
+        }
+        $this.State.order.Add('selected')
+        return [pscustomobject]@{ Current = [pscustomobject]@{ IsSelected = $this.State.name -cne 'lost-selection' } }
+      }
+      return $element
+    }
+    function Ensure-ShellForeground($Owner, $Label) {
+      Assert-Delete ($Owner -eq [IntPtr]42 -and $Label -ceq 'Delete Loop Show in Graph') 'Wrong foreground authority'
+      $state.order.Add('foreground')
+      return $state.name -cne 'foreground-refused'
+    }
+    function Wait-ForRootReconnect($Process, $Walkers) {
+      Assert-Delete ($Process.Id -eq 4242 -and $Walkers.Count -eq 1 -and [object]::ReferenceEquals($Walkers[0],$ownedWalker)) 'Wrong reconnect authority'
+      $state.order.Add('reconnect'); $state.reconnects++
+      if ($state.reconnects -eq 1) { return $restoredRoot }
+      return $finalRoot
+    }
+    function Find-FragmentByIdWithRetry($Root, [string] $Id, $Walker) {
+      Assert-Delete ([object]::ReferenceEquals($Root,$restoredRoot) -and [object]::ReferenceEquals($Walker,$ownedWalker)) 'Lookup used a stale workspace root'
+      $state.order.Add("lookup:$Id")
+      if ($Id -ceq 'canvas-card-owned') {
+        if ($state.name -ceq 'missing-card') { return $null }
+        return New-RestoreElement card
+      }
+      Assert-Delete ($Id -ceq 'fit-canvas') 'Lookup changed the selected card identity'
+      return New-RestoreElement fit
+    }
+    function Wait-ForGraphChildren($Root, $Walker, [scriptblock] $Filter, [scriptblock] $Ready) {
+      Assert-Delete ([object]::ReferenceEquals($Walker,$ownedWalker)) 'Graph wait changed walker'
+      $state.waits++
+      if ($state.waits -eq 1) {
+        Assert-Delete ([object]::ReferenceEquals($Root,$initialRoot)) 'Route wait did not use selected workspace root'
+        $state.order.Add('wait-route')
+        $children = if ($state.name -ceq 'missing-route') { @() } else { @(New-RestoreElement route) }
+        $items = @($children | Where-Object $Filter)
+        if (-not (& $Ready $items)) { throw [InvalidOperationException]::new('controlled route publication missing') }
+      } else {
+        Assert-Delete ($state.waits -eq 2 -and [object]::ReferenceEquals($Root,$restoredRoot)) 'Card wait did not use reconnected graph root'
+        $state.order.Add('wait-card')
+        $children = @(New-RestoreElement final-card)
+        if ($state.name -ceq 'retained-workspace') { $children += New-RestoreElement route }
+        $items = @($children | Where-Object $Filter)
+        if (-not (& $Ready $items)) { throw [InvalidOperationException]::new('controlled restored card publication missing') }
+      }
+      return [pscustomobject]@{ Graph = (New-RestoreElement graph); Items = $items; Children = $children }
+    }
+    $caught = $null
+    $actualRoot = $null
+    try { $actualRoot = Restore-DeleteLoopCanvas $process $initialRoot ([IntPtr]42) 'canvas-card-owned' $ownedWalker }
+    catch { $caught = $_ }
+    Assert-Delete (($state.order -join ',') -ceq $test.order) "Restoration observation/action order differs: $($state.order -join ',')"
+    if ($null -eq $test.failure) {
+      Assert-Delete ($null -eq $caught -and [object]::ReferenceEquals($actualRoot,$finalRoot)) 'Restoration did not return the final freshly reconnected root'
+    } else {
+      Assert-Delete ($caught -and $caught.Exception.Message -ceq $test.failure -and $null -eq $actualRoot) `
+        "Restoration refusal changed: $($caught.Exception.Message)"
+    }
+  }
+}
+$stressRemoval = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Remove-Job' -and
+    @($node.CommandElements | Where-Object { $_.Extent.Text -ceq '$stressJob' }).Count -eq 1
+}, $true) | Sort-Object { $_.Extent.StartOffset })
+function Get-StressReleaseStatements {
+  Assert-Delete ($stressRemoval.Count -eq 2) 'Expected primary and final owned stress-job removal'
+  $remove = $stressRemoval[0].Parent
+  while ($remove.Parent -isnot [Management.Automation.Language.StatementBlockAst]) { $remove = $remove.Parent }
+  $siblings = @($remove.Parent.Statements)
+  $position = [Array]::IndexOf($siblings, $remove)
+  Assert-Delete ($position -ge 0 -and $position + 1 -lt $siblings.Count) 'Primary stress removal has no following ownership update'
+  $clear = $siblings[$position + 1]
+  Assert-Delete ($clear -is [Management.Automation.Language.AssignmentStatementAst] -and
+    $clear.Left.Extent.Text -ceq '$stressJob' -and $clear.Right.Extent.Text -ceq '$null') `
+    'Successful stress removal must immediately clear its retained job reference'
+  return @($remove, $clear)
+}
+Invoke-DeleteCase 'ui.delete.cleanup.source-order' {
+  $statements = @(Get-StressReleaseStatements)
+  $guard = $stressRemoval[1].Parent
+  while ($null -ne $guard -and $guard -isnot [Management.Automation.Language.IfStatementAst]) { $guard = $guard.Parent }
+  Assert-Delete ($stressRemoval[1].Extent.Text -match '-ErrorAction Stop' -and
+    $null -ne $guard -and $guard.Clauses.Count -eq 1 -and
+    $guard.Clauses[0].Item1.Extent.Text -ceq '$stressJob') 'Final cleanup must retain its live-reference guard and terminating removal'
+  Assert-Delete ($statements.Count -eq 2) 'Stress release source statement count changed'
+}
+foreach ($removalFails in @($false, $true)) {
+  $id = if ($removalFails) { 'ui.delete.cleanup.failed-removal-retains' } else { 'ui.delete.cleanup.success-clears' }
+  Invoke-DeleteCase $id {
+    $statements = @(Get-StressReleaseStatements)
+    $state = @{ calls = 0; fail = $removalFails; original = [IO.IOException]::new('controlled stress removal failure') }
+    $ownedJob = [pscustomobject]@{ fixture = 'owned-stress-job' }
+    $stressJob = $ownedJob
+    function Remove-Job {
+      param($Job, [switch] $Force)
+      Assert-Delete ([object]::ReferenceEquals($Job, $ownedJob) -and $Force) 'Removal did not target the retained owned job'
+      $state.calls++
+      if ($state.fail) { throw $state.original }
+    }
+    $caught = $null
+    try { . ([scriptblock]::Create(($statements | ForEach-Object { $_.Extent.Text }) -join "`n")) } catch { $caught = $_ }
+    Assert-Delete ($state.calls -eq 1) 'Stress removal replayed or was skipped'
+    if ($removalFails) {
+      Assert-Delete ($caught -and [object]::ReferenceEquals($caught.Exception, $state.original) -and
+        [object]::ReferenceEquals($stressJob, $ownedJob)) 'Failed stress removal cleared authority or replaced its original failure'
+    } else {
+      Assert-Delete ($null -eq $caught -and $null -eq $stressJob) 'Successful stress removal left a stale reference'
+    }
+  }
+}
+Assert-Delete ($restoreCases.Count -eq 16 -and $results.Count -eq 50) `
+  "Delete restoration and cleanup require twenty additional cases without replacing the original thirty: scenarios=$($restoreCases.Count) results=$($results.Count)"
 [IO.File]::WriteAllText((Join-Path $ArtifactRoot 'ui-delete-results.json'), ($results | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
 foreach ($result in $results) { Write-Output ('UI_CASE_RESULT=' + ($result | ConvertTo-Json -Compress -Depth 8)) }
 if (@($results | Where-Object status -cne 'Passed').Count -ne 0) { exit 1 }
