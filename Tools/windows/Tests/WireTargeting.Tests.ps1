@@ -56,8 +56,24 @@ public static class WireFixture {
   [DllImport("user32.dll")] public static extern bool DestroyWindow(IntPtr window);
   [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
   [DllImport("user32.dll")] public static extern IntPtr GetThreadDpiAwarenessContext();
+  [StructLayout(LayoutKind.Sequential)] struct Point { public int X,Y; }
+  [StructLayout(LayoutKind.Sequential)] struct Message {
+    public IntPtr Window; public uint Id; public UIntPtr WParam; public IntPtr LParam;
+    public uint Time; public Point Point; public uint Private;
+  }
+  [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window,out uint processId);
+  [DllImport("user32.dll")] static extern bool PeekMessageW(out Message message,IntPtr window,uint first,uint last,uint remove);
+  public static IntPtr AtPoint(int x,int y) { return WindowFromPoint(new Point { X=x,Y=y }); }
+  public static bool HasPointerMessage(IntPtr window) {
+    Message message; return PeekMessageW(out message,window,0x0200,0x0202,0);
+  }
+  public static uint OwnerProcess(IntPtr window) {
+    uint processId; GetWindowThreadProcessId(window,out processId); return processId;
+  }
   public static IntPtr Create(IntPtr parent, bool child, string name) {
-    IntPtr result=CreateWindowExW(0x08000000,child ? "WireTargetFixtureContent" : "WireTargetFixture",
+    // Isolate only owned top-level fixtures without taking keyboard focus.
+    IntPtr result=CreateWindowExW(child ? 0x08000000u : 0x08000008u,child ? "WireTargetFixtureContent" : "WireTargetFixture",
       name,child ? 0x50000000u : 0x90000000u,
       20,20,250,96,parent,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
     if(result==IntPtr.Zero) throw new Exception("Fixture CreateWindow failed.");
@@ -229,8 +245,41 @@ try {
             }
             Reject-WireCase "reject sheet $fault" {Resolve-CapOwnedSheet $rows 1 $PID} $message
         }
+        Test-WireCase 'native unrelated topmost fixture refuses a pointer before posting' {
+            $b=@($nativeRows|Where-Object Handle -EQ $hostWindow.ToInt64())[0].Bounds
+            $overlay=[IntPtr]::Zero
+            $previous=[WireFixture]::SetThreadDpiAwarenessContext([IntPtr](-4))
+            Assert-WireCase ($previous -ne [IntPtr]::Zero) 'Overlay PMv2 setup failed.'
+            try {
+                $overlay=[WireFixture]::Create([IntPtr]::Zero,$false,'wire fixture unrelated overlay')
+                Assert-WireCase ([WireFixture]::AtPoint(($b[0]+10),($b[1]+10)) -eq $overlay -and
+                    [WireFixture]::OwnerProcess($overlay) -eq $PID) 'Controlled unrelated overlay is not the actual recipient.'
+                Assert-WireCase (-not [WireFixture]::HasPointerMessage($hostWindow) -and
+                    -not [WireFixture]::HasPointerMessage($overlay)) 'Pointer message was already queued before the refusal control.'
+                $failure=$null
+                try {[CapNative]::PostPointerClickScreen($hostWindow,($b[0]+10),($b[1]+10))|Out-Null}
+                catch {$failure=$_}
+                Assert-WireCase ($null -ne $failure -and
+                    $failure.Exception.Message.Contains('Pointer recipient differs from intended owned HWND')) `
+                    'Unrelated same-process HWND was not refused by the actual recipient guard.'
+                Assert-WireCase (-not [WireFixture]::HasPointerMessage($hostWindow) -and
+                    -not [WireFixture]::HasPointerMessage($overlay)) 'Recipient refusal posted a pointer message.'
+            } finally {
+                try {
+                    if ($overlay -ne [IntPtr]::Zero -and -not [WireFixture]::DestroyWindow($overlay)) {
+                        throw 'Controlled overlay destruction failed.'
+                    }
+                } finally {$null=[WireFixture]::SetThreadDpiAwarenessContext($previous)}
+            }
+        }
         Test-WireCase 'native PMv2 conversion dispatch persists coordinates and restores caller awareness' {
             $b=@($nativeRows|Where-Object Handle -EQ $hostWindow.ToInt64())[0].Bounds
+            $preflight=[WireFixture]::SetThreadDpiAwarenessContext([IntPtr](-4))
+            Assert-WireCase ($preflight -ne [IntPtr]::Zero) 'Owned pointer fixture PMv2 preflight failed.'
+            try {
+                Assert-WireCase ([WireFixture]::AtPoint(($b[0]+10),($b[1]+10)) -eq $hostWindow -and
+                    [WireFixture]::OwnerProcess($hostWindow) -eq $PID) 'Owned pointer fixture recipient preflight refused.'
+            } finally {$null=[WireFixture]::SetThreadDpiAwarenessContext($preflight)}
             $previous=[WireFixture]::SetThreadDpiAwarenessContext([IntPtr](-1))
             try {
                 $before=[WireFixture]::GetThreadDpiAwarenessContext()
@@ -301,4 +350,4 @@ $report|ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $ScratchR
 [pscustomobject]$report|Select-Object suite,executed,passed,failed,skipped|ConvertTo-Json -Compress
 foreach ($result in @($results|Where-Object passed -EQ $false)) {$result|ConvertTo-Json -Compress|Write-Host}
 if ($failed -gt 0) {throw "$failed behavioral wire targeting contracts failed."}
-if ($results.Count -ne $(if ($LegacyBehavior) {2} else {56})) {throw 'Wire targeting executed count differs.'}
+if ($results.Count -ne $(if ($LegacyBehavior) {2} else {57})) {throw 'Wire targeting executed count differs.'}

@@ -138,6 +138,20 @@ part.
 | `windows-spikes` | remaining tasks | `validate.ps1 -Task all -SkipTrayLive -SkipWslRemoteE2E -SkipTask <the Swift tasks>,windows-shell,packaging,hardening` |
 | `Deterministic hardening (...)` | hardening | `validate.ps1 -Task hardening` |
 
+The integration part also requires six native smoke-exit controls: failing
+nonreading-daemon smoke must emit its transport diagnostic and exit nonzero
+through both the original stderr-file producer and owned capture; successful
+requested smoke exits must remain zero through both producers. Requested
+workspace actions must refuse when activation or the focus effect is missing.
+All controls run
+inside assigned owned jobs and retain evidence under the validation scratch root.
+
+Run local GUI, keyboard, and pointer gates serially on one desktop; CI runs the
+shards and integration job on separate VM desktops. Use a short, exclusively
+owned `-ShellValidationRoot` for UIA lease paths. Keep Zig caches in stable owned
+directories outside per-invocation `LOCALAPPDATA`, which isolation removes after
+a successful run.
+
 `windows-spikes` no longer re-runs `windows-shell`, `packaging` or `hardening`.
 Those tasks already run in the `windows-shell` and `Deterministic hardening`
 required checks on every Windows-relevant pull request.

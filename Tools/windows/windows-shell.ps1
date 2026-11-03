@@ -11,6 +11,8 @@ param(
   [switch] $SkipTrayLive,
   [switch] $Stress,
   [switch] $UseStubDaemon,
+  [ValidateNotNullOrEmpty()]
+  [string] $WorkspaceActions = "1",
   [ValidateRange(0, 1000)]
   [int] $StubResponseDelayMilliseconds = 0,
   [string] $Version
@@ -84,7 +86,6 @@ function Start-SmokeProcess([string] $file, [string[]] $arguments, [string] $dir
   $start.FileName = (Get-Command $file -ErrorAction Stop).Source
   $start.UseShellExecute = $false
   $start.CreateNoWindow = $true
-  $start.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
   $start.WorkingDirectory = if ($directory) { $directory } else { [string]$repoRoot }
   $start.RedirectStandardOutput = $CaptureOutput
   $start.RedirectStandardError = $CaptureError
@@ -539,7 +540,7 @@ try {
   }
   $env:GRAPHCODE_ZMX = Join-Path $ZmxRoot "zig-out\bin\zmx.exe"
   $env:GRAPHCODE_GATE_CWD = $repoRoot
-  $env:GRAPHCODE_SHELL_WORKSPACE_ACTIONS = "1"
+  $env:GRAPHCODE_SHELL_WORKSPACE_ACTIONS = $WorkspaceActions
   New-SmokeZmxRoot $smokeZmxDir
   $env:ZMX_DIR = $smokeZmxDir
   $env:GRAPHCODE_WORKSPACE_LAYOUT = $workspaceLayoutBase

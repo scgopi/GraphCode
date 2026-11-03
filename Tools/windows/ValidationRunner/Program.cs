@@ -86,6 +86,7 @@ static async Task<int> RunAsync(string[] args)
             catch (Exception error)
             {
                 errors.Add($"{suite.Id}: {error}");
+                Console.Error.WriteLine(ConsoleReport.SuiteFailure(suite.Id, error.GetType().FullName ?? error.GetType().Name));
                 break;
             }
         }

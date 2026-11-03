@@ -2066,7 +2066,21 @@ pub const App = struct {
             self.client.connect();
         }
         try self.window.messageLoop();
-        if (self.exit_requested) std.process.exit(0);
+        if (self.smoke_failure or
+            (self.smoke and self.require_smoke_contract and self.smoke_workspace_actions.len > 0))
+        {
+            std.debug.print("Smoke contract {s}: scripted={} failed={} create={} split={} select={} focus={} close={} restart={}\n", .{
+                if (self.smoke_failure) "failed" else "passed",
+                self.smoke_workspace_actions_ran,
+                self.smoke_workspace_action_failed,
+                self.smoke_workspace_create_observed,
+                self.smoke_workspace_split_observed,
+                self.smoke_workspace_select_observed,
+                self.smoke_workspace_focus_observed,
+                self.smoke_workspace_close_observed,
+                self.smoke_workspace_restart_observed,
+            });
+        }
         if (self.smoke_failure) {
             if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_EXPECT_TRANSPORT_ERROR")) |value| {
                 defer self.allocator.free(value);
@@ -2074,8 +2088,10 @@ pub const App = struct {
                     std.debug.print("Smoke daemon status: {s}\n", .{self.client.statusText()});
                 }
             } else |_| {}
+            if (self.exit_requested) std.process.exit(1);
             return error.SmokeContractFailed;
         }
+        if (self.exit_requested) std.process.exit(0);
     }
 
     pub fn configureArgs(self: *App, args: []const []const u8) void {
@@ -26687,7 +26703,12 @@ test "Worktrees reclaim action returns before owned provider removal completes" 
 fn runSmokeWorkspaceActions(self: *App) void {
     const script = self.smoke_workspace_actions;
     if (script.len == 0) return;
+    if (self.workspace) |workspace| {
+        if (workspace.collapsed) self.openSelectedNode();
+    }
     const workspace = if (self.workspace) |value| value else return;
+    if (workspace.collapsed or
+        (self.surface != .workspace and !self.workspace_controls.panel_visible)) return;
     if (workspace.firstLiveSurface() == null) return;
     const default_script = "create,split,select,focus,close,restart";
     const actions = if (std.mem.eql(u8, script, "1")) default_script else script;
@@ -26776,6 +26797,7 @@ fn workspacePaneCount(workspace: anytype) usize {
 
 fn smokeContractPassed(self: *const App) bool {
     const scripted_actions = self.smoke_workspace_actions_ran;
+    if (self.smoke_workspace_actions.len > 0 and !scripted_actions) return false;
     if (!scripted_actions and self.client.connectionState() != .connected) return false;
     if (scripted_actions) {
         return !self.smoke_workspace_action_failed and

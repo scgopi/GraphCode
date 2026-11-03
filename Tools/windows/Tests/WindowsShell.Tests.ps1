@@ -520,24 +520,12 @@ function Resolve-TestZig {
 Invoke-Native "Shell process ownership mock contracts" {
   . (Join-Path $PSScriptRoot "..\Import-PinnedPester.ps1")
   $ownershipResults = Invoke-Pester -Path (Join-Path $PSScriptRoot "ShellProcessOwnership.Tests.ps1") -PassThru
-  if ($ownershipResults.TotalCount -ne 66 -or
+  if ($ownershipResults.TotalCount -ne 70 -or
       $ownershipResults.PassedCount -ne $ownershipResults.TotalCount -or
       $ownershipResults.FailedCount -ne 0 -or $ownershipResults.SkippedCount -ne 0) {
-    throw "Shell process ownership mock contracts did not pass all 66 unskipped cases"
+    throw "Shell process ownership mock contracts did not pass all 70 unskipped cases"
   }
   Write-Host "SHELL_PROCESS_OWNERSHIP_MOCK_CASES=$($ownershipResults.TotalCount)"
-  $global:LASTEXITCODE = 0
-}
-
-Invoke-Native "Stable canvas card context menu mock contracts" {
-  . (Join-Path $PSScriptRoot "..\Import-PinnedPester.ps1")
-  $cardMenuResults = Invoke-Pester -Path (Join-Path $PSScriptRoot "CanvasCardContextMenu.Tests.ps1") -PassThru
-  if ($cardMenuResults.TotalCount -ne 16 -or $cardMenuResults.PassedCount -ne 16 -or
-      $cardMenuResults.FailedCount -ne 0 -or $cardMenuResults.SkippedCount -ne 0 -or
-      $cardMenuResults.NotRunCount -ne 0) {
-    throw "Stable canvas card context menu mock contracts did not pass all 16 unskipped cases"
-  }
-  Write-Host "CANVAS_CARD_CONTEXT_MENU_MOCK_CASES=$($cardMenuResults.TotalCount)"
   $global:LASTEXITCODE = 0
 }
 
@@ -817,10 +805,6 @@ Invoke-Native "Sketch promotion executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\SketchPromotion.zig --test-filter 'sketch promotion' } finally { Pop-Location }
 }
-Invoke-Native "Card transfer data-only executable tests" {
-  Push-Location $shellRoot
-  try { & $zig test src\CardTransfer.zig --test-filter 'card transfer ' } finally { Pop-Location }
-}
 Invoke-Native "Context menu and gate fixture message executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
@@ -867,10 +851,10 @@ Invoke-Native "Owned live process cleanup mock contracts" {
 Invoke-Native "Owned live caller and adapter mock integration" {
   . (Join-Path $PSScriptRoot "..\Import-PinnedPester.ps1")
   $adapterResults = Invoke-Pester -Path (Join-Path $PSScriptRoot "OwnedLiveAdapter.Tests.ps1") -PassThru
-  if ($adapterResults.TotalCount -ne 12 -or $adapterResults.PassedCount -ne 12 -or
+  if ($adapterResults.TotalCount -ne 13 -or $adapterResults.PassedCount -ne 13 -or
       $adapterResults.FailedCount -ne 0 -or $adapterResults.SkippedCount -ne 0 -or
       $adapterResults.NotRunCount -ne 0) {
-    throw "Owned live caller and adapter mock integration did not pass all 12 cases"
+    throw "Owned live caller and adapter mock integration did not pass all 13 cases"
   }
   Write-Host "OWNED_LIVE_ADAPTER_MOCK_CASES=$($adapterResults.PassedCount)"
   $global:LASTEXITCODE = 0

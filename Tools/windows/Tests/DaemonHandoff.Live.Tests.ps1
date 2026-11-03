@@ -121,7 +121,6 @@ function Stop-ShellNormally([Diagnostics.Process] $process, [string] $role) {
       if (-not $process.WaitForExit(7000)) {
         throw "$role shell did not exit normally"
       }
-      Complete-ShellOwnedProcess $processScope $process
       return
     }
     Start-Sleep -Milliseconds 100
@@ -145,6 +144,7 @@ function Assert-EndpointReachable {
     if (-not $process.WaitForExit(7000)) {
       throw "daemon endpoint was not reachable through graphcode.exe"
     }
+    Complete-ShellOwnedProcess $processScope $process
     $stderr = Read-ShellOwnedOutput $processScope $process -StandardError
     if ($process.ExitCode -ne 0) {
       throw "daemon endpoint rejected graphcode.exe: $stderr"
@@ -307,11 +307,13 @@ try {
   if ($daemonProcess.HasExited) {
     throw "non-owning shell exit stopped the externally owned daemon"
   }
+  Complete-ShellOwnedProcess $processScope $contender
 
   Stop-ShellNormally $owner "owning"
   if (-not $daemonProcess.WaitForExit(7000)) {
     throw "owning shell exit did not stop its graphcoded child"
   }
+  Complete-ShellOwnedProcess $processScope $owner
 } catch {
   $primaryFailure = $_
   throw

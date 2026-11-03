@@ -1297,6 +1297,13 @@ function Invoke-Task([string] $name) {
           -SkipTrayLive:$SkipTrayLive `
           -Stress
       }
+      Invoke-Native "Native shell smoke exit regression" {
+        & pwsh -NoProfile -File `
+          (Join-Path $repoRoot "Tools\windows\Tests\ShellSmokeExit.Live.Tests.ps1") `
+          -AppPath (Join-Path $repoRoot "graphcode-windows\zig-out\bin\graphcode-windows.exe") `
+          -WinghosttyRoot $winghosttyRoot -ZmxRoot $zmxRoot -Zig0152 $zig0152 -Zig0160 $zig0160 `
+          -ArtifactRoot (Join-Path $env:TEMP "shell-smoke-exit")
+      }
       Invoke-Native "Scrubbed production shell startup" {
         & pwsh -NoProfile -File `
           (Join-Path $repoRoot "Tools\windows\Tests\ScrubbedShellStartup.Live.Tests.ps1") `

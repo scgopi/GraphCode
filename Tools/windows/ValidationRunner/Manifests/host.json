@@ -1,9 +1,9 @@
 {
   "units": [
     { "id": "host.sdk-prerequisites", "owner": "Host", "minimumCount": 49, "exactCount": 49 },
-    { "id": "host.admission-guards", "owner": "Host", "minimumCount": 64, "exactCount": 64 },
-    { "id": "host.legacy-ownership.shell-scope", "owner": "Host", "minimumCount": 66, "exactCount": 66 },
-    { "id": "host.legacy-ownership.live-adapter", "owner": "Host", "minimumCount": 12, "exactCount": 12 },
+    { "id": "host.admission-guards", "owner": "Host", "minimumCount": 65, "exactCount": 65 },
+    { "id": "host.legacy-ownership.shell-scope", "owner": "Host", "minimumCount": 70, "exactCount": 70 },
+    { "id": "host.legacy-ownership.live-adapter", "owner": "Host", "minimumCount": 13, "exactCount": 13 },
     { "id": "host.legacy-ownership.live-cleanup", "owner": "Host", "minimumCount": 84, "exactCount": 84 },
     { "id": "host.provenance.current-source", "owner": "Host", "minimumCount": 1 },
     { "id": "host.provenance.source-changed", "owner": "Host", "minimumCount": 1 },
@@ -17,7 +17,7 @@
     { "id": "host.shell-prerequisite", "owner": "Host", "minimumCount": 4, "exactCount": 4 },
     { "id": "host.ci-partition", "owner": "Host", "minimumCount": 17, "exactCount": 17 },
     { "id": "host.ci-aggregate", "owner": "Host", "minimumCount": 17, "exactCount": 17 },
-    { "id": "host.ci-topology", "owner": "Host", "minimumCount": 36, "exactCount": 36 },
+    { "id": "host.ci-topology", "owner": "Host", "minimumCount": 39, "exactCount": 39 },
     { "id": "host.provider-task-boundary", "owner": "Host", "minimumCount": 5, "exactCount": 5 },
     { "id": "ui.root.source.line-5346", "owner": "Host", "minimumCount": 2, "exactCount": 2 },
     { "id": "host.provider-cache-seeding", "owner": "Host", "minimumCount": 1 },
@@ -51,7 +51,7 @@
     { "id": "ps.action-worker", "owner": "Host", "minimumCount": 18, "exactCount": 18 },
     { "id": "ps.action-identity", "owner": "Host", "minimumCount": 62, "exactCount": 62 },
     { "id": "ps.action-topology", "owner": "Host", "minimumCount": 16, "exactCount": 16 },
-    { "id": "ps.wire-targeting", "owner": "Host", "minimumCount": 56, "exactCount": 56 },
+    { "id": "ps.wire-targeting", "owner": "Host", "minimumCount": 57, "exactCount": 57 },
     { "id": "ps.agent-command", "owner": "Host", "minimumCount": 6, "exactCount": 6 }
   ]
 }

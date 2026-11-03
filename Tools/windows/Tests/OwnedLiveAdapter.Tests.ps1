@@ -23,6 +23,7 @@ Describe "Owned live callers and shell adapter with mocked native operations" {
       . (Join-Path $moduleRoot "OwnedLiveProcess.ps1")
       foreach ($item in @(
           @{ File = "ScrubbedShellStartup.Live.Tests.ps1"; Name = "Invoke-ScrubbedCli" },
+          @{ File = "DaemonHandoff.Live.Tests.ps1"; Name = "Assert-EndpointReachable" },
           @{ File = "DaemonRoundTrip.Live.Tests.ps1"; Name = "Start-OwnedDaemon" },
           @{ File = "DaemonRoundTrip.Live.Tests.ps1"; Name = "Stop-OwnedDaemon" })) {
         $errors = $null
@@ -159,6 +160,38 @@ Describe "Owned live callers and shell adapter with mocked native operations" {
       ($script:events -join ",") | Should -BeExactly (
         "suspended,Assign:200,Create:,Assign:300,resume:command,wait-root:command," +
         "require-exited:command,Terminate:300,Wait:300,Active:300,drain:command,Close:300")
+      Close-ShellProcessScope $script:scope
+      $script:scope.Closed | Should -BeTrue
+    }
+
+    It "finalizes the handoff endpoint probe before reading or disposing it" {
+      $run = New-ControlledLaunch "endpoint"
+      $run.Process.ExitCode = 0
+      $script:cliExecutable = "C:\mock\graphcode.exe"
+      $script:Executable = "C:\mock\graphcode-windows.exe"
+      $script:supportDirectory = "C:\mock\support"
+      $script:daemonPipe = "\\.\pipe\controlled-endpoint"
+      Assert-EndpointReachable
+      $run.Finalized | Should -BeTrue
+      ($script:events -join ",") | Should -BeExactly (
+        "suspended,Assign:200,Create:,Assign:300,resume:endpoint,wait-root:endpoint," +
+        "require-exited:endpoint,Terminate:300,Wait:300,Active:300,drain:endpoint,Close:300,dispose:endpoint")
+      $handoffPath = Join-Path $moduleRoot 'Tests\DaemonHandoff.Live.Tests.ps1'
+      $handoff = [Management.Automation.Language.Parser]::ParseFile($handoffPath, [ref]$null, [ref]$null)
+      $normalStop = $handoff.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Stop-ShellNormally'
+      }, $true)
+      @($normalStop.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+          $node.GetCommandName() -eq 'Complete-ShellOwnedProcess'
+      }, $true)).Count | Should -Be 0
+      $source = [IO.File]::ReadAllText($handoffPath)
+      $ownerObservation = $source.IndexOf('$daemonProcess.WaitForExit(7000)', [StringComparison]::Ordinal)
+      $ownerFinalization = $source.IndexOf('Complete-ShellOwnedProcess $processScope $owner', [StringComparison]::Ordinal)
+      $ownerObservation | Should -BeGreaterThan 0
+      $ownerFinalization | Should -BeGreaterThan $ownerObservation
       Close-ShellProcessScope $script:scope
       $script:scope.Closed | Should -BeTrue
     }

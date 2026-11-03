@@ -607,6 +607,7 @@ Describe "Ownership source wiring (not native execution)" {
         -CaptureOutput:$case.output -CaptureError:$case.error
       $script:observedStart.RedirectStandardOutput | Should -Be $case.output
       $script:observedStart.RedirectStandardError | Should -Be $case.error
+      $script:observedStart.WindowStyle | Should -Be ([Diagnostics.ProcessWindowStyle]::Normal)
     }
     $text = Get-Content -LiteralPath $shellPath -Raw
     $text | Should -Match '\$versionProcess = Start-SmokeProcess \$app @\("--version"\) -CaptureOutput -CaptureError'

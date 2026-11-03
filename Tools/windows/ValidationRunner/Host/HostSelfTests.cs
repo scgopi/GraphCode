@@ -119,6 +119,21 @@ public static class HostSelfTests
         Check("console-invalid-id-isolation", () =>
             Assert(!ConsoleReport.Unit(passed with { Id = "\nVALIDATION_RUNNER_EXECUTED=1" }).Contains('\n'),
                 "invalid case ID injected a root line"));
+        Check("console-safe-failure-classification", () =>
+        {
+            var safe = ConsoleReport.SuiteFailure("test.suite", "System.InvalidOperationException");
+            Assert(safe.Contains("id=test.suite exception=System.InvalidOperationException", StringComparison.Ordinal),
+                "safe suite/type classification was lost");
+            var injected = ConsoleReport.SuiteFailure("test\nPRIVATE_CANARY", "type\nVALIDATION_RUNNER_EXECUTED=1");
+            Assert(!injected.Contains('\n') && !injected.Contains("PRIVATE_CANARY", StringComparison.Ordinal) &&
+                !injected.Contains("VALIDATION_RUNNER_EXECUTED", StringComparison.Ordinal), "failure classification leaked raw payload");
+            foreach (var newline in new[] { "\n", "\r", "\r\n" })
+            {
+                var terminal = ConsoleReport.SuiteFailure("test.suite" + newline, "System.Exception" + newline);
+                Assert(!terminal.Contains('\n') && !terminal.Contains('\r') &&
+                    !ConsoleReport.ValidId("test.suite" + newline), "terminal newline bypassed failure classification");
+            }
+        });
         Check("terminal-known-exit", () => Assert(TerminalSafety.ExitBarrier(0, false).IsCompletedSuccessfully,
             "proven empty authority cannot exit"));
         Check("terminal-retained-no-exit", () => Assert(!TerminalSafety.ExitBarrier(1, false).IsCompleted,
