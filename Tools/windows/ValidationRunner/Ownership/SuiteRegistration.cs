@@ -24,6 +24,7 @@ public static class SuiteRegistration
     public static IReadOnlyList<IValidationSuite> CreateSuites() =>
     [
         new OwnershipSuite(),
+        new ShellScopeNativeSuite(),
         new Adapters.StandaloneSuites.CaseScriptSuite("ownership.receipts", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\Receipt.Contracts.ps1",
             "OWNERSHIP_CASE_RESULT=", ["ownership.legacy.ownership-receipts"]),
         new Adapters.StandaloneSuites.CaseScriptSuite("ownership.tree-provider", "Tools\\windows\\ValidationRunner\\Ownership\\Adapters\\TreeProvider.Contracts.ps1",

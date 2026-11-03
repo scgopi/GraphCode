@@ -14,8 +14,8 @@ $script:CompiledOwnershipAssemblyPath = $null
 # flags stay quiet. Child stdio still uses pipes/NUL, not console equivalence.
 # Failed diagnostic transports remain attached to the original tagged exception;
 # a failed sentinel does not prevent the independent receipt attempt.
-# ShellProcessOwnership.Tests.ps1 covers mocks, receipt files and compilation
-# only. Actual suspended launch/job containment still requires native validation.
+# ShellProcessOwnership.Tests.ps1 also exercises controlled native suspended
+# launches and job/root/reader teardown; it is not a product walkthrough.
 
 function Initialize-ShellProcessOwnership {
   $assemblyPath = $env:GRAPHCODE_VALIDATION_ASSEMBLY
@@ -32,13 +32,13 @@ function Initialize-ShellProcessOwnership {
 }
 
 function Invoke-ShellJob([string] $Operation, [IntPtr] $Job = [IntPtr]::Zero,
-    [IntPtr] $Handle = [IntPtr]::Zero) {
+    [IntPtr] $Handle = [IntPtr]::Zero, [ValidateRange(0, 5000)][int] $TimeoutMilliseconds = 5000) {
   switch ($Operation) {
     "Create" { [GraphCode.Validation.Ownership.StandaloneProcessJob]::Create() }
     "Assign" { [GraphCode.Validation.Ownership.StandaloneProcessJob]::Assign($Job, $Handle) }
     "Contains" { [GraphCode.Validation.Ownership.StandaloneProcessJob]::Contains($Job, $Handle) }
     "Terminate" { [GraphCode.Validation.Ownership.StandaloneProcessJob]::Terminate($Job) }
-    "Wait" { [GraphCode.Validation.Ownership.StandaloneProcessJob]::WaitForEmpty($Job, 5000) }
+    "Wait" { [GraphCode.Validation.Ownership.StandaloneProcessJob]::WaitForEmpty($Job, $TimeoutMilliseconds) }
     "Active" { [GraphCode.Validation.Ownership.StandaloneProcessJob]::Active($Job) }
     "Close" { [GraphCode.Validation.Ownership.StandaloneProcessJob]::Close($Job) }
     default { throw "Unknown owned-job operation: $Operation" }
@@ -246,12 +246,19 @@ function Complete-ShellOwnedProcess($Scope, [Diagnostics.Process] $Process) {
 
 function Close-ShellProcessScope($Scope) {
   if ($Scope.Closed) { return }
+  $exitClock = [Diagnostics.Stopwatch]::StartNew()
   try {
     Invoke-ShellJob "Terminate" $Scope.Job
-    Invoke-ShellJob "Wait" $Scope.Job
+    Invoke-ShellJob "Wait" $Scope.Job -TimeoutMilliseconds ([Math]::Max(0, 5000 - [int]$exitClock.ElapsedMilliseconds))
     if ((Invoke-ShellJob "Active" $Scope.Job) -ne 0) { throw "OWNED_CLEANUP_UNPROVEN: job not empty" }
+    # Job accounting can reach zero before the original process objects signal.
+    # Prove every held root within the same termination deadline before closing any.
     foreach ($run in $Scope.Runs) {
+      if ($run.Finalized) { continue }
       if (-not $run.ScopeAssigned) { $run.Stop() }
+      $run.RequireExited([Math]::Max(0, 5000 - [int]$exitClock.ElapsedMilliseconds))
+    }
+    foreach ($run in $Scope.Runs) {
       Complete-ShellLaunch $run
       $run.Close()
     }

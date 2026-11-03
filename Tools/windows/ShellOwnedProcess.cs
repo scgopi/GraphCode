@@ -247,8 +247,17 @@ public sealed class ShellOwnedLaunch {
     if (WaitForSingleObject(Handle, 5000) != 0) throw new InvalidOperationException("Owned process did not exit.");
   }
   public void RequireExited() {
-    if (Handle == IntPtr.Zero || WaitForSingleObject(Handle, 0) != 0)
+    RequireExited(0);
+  }
+  public void RequireExited(int timeoutMilliseconds) {
+    if (timeoutMilliseconds < 0) throw new ArgumentOutOfRangeException(nameof(timeoutMilliseconds));
+    if (Handle == IntPtr.Zero)
       throw new InvalidOperationException("Original owned root is still live or its exit is unproved.");
+    uint state = WaitForSingleObject(Handle, (uint)timeoutMilliseconds);
+    if (state == 0) return;
+    if (state == 258)
+      throw new InvalidOperationException("Original owned root is still live or its exit is unproved.");
+    throw new Win32Exception();
   }
   public string TakeOutput(int maximumCharacters) {
     if (outputCapture == null) throw new InvalidOperationException("Owned stdout capture is unavailable.");

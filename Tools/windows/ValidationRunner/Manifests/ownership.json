@@ -1,5 +1,7 @@
 {
   "units": [
+    { "id": "ownership.shell-scope-native", "owner": "Ownership", "minimumCount": 44, "exactCount": 44,
+      "requiredGroups": ["controlled-native", "held-root-exit", "job-empty-not-process-signal"] },
     {
       "id": "ownership.managed.quote-empty",
       "owner": "Ownership",

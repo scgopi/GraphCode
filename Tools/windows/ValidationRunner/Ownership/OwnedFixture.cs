@@ -39,6 +39,8 @@ public static class OwnedFixture
         if (args.Length < 3) throw new ArgumentException("Owned fixture requires a mode and existing owned root.");
         string mode = args[1], root = Path.GetFullPath(args[2]);
         if (!Directory.Exists(root)) throw new DirectoryNotFoundException(root);
+        if (await ShellScopeNativeFixture.TryRunAsync(mode, root).ConfigureAwait(false) is int scopeExit)
+            return scopeExit;
         if (mode.StartsWith("bytes-", StringComparison.Ordinal))
         {
             byte[] bytes = BytesForMode(mode);

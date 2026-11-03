@@ -133,7 +133,7 @@ Describe "Owned shell scope mock-only lifecycle" {
     It "waits for an empty job before closing launch and job handles" {
       $script:scope.Runs.Add($script:run)
       Close-ShellProcessScope $script:scope
-      ($script:events -join ",") | Should -Be "Terminate,Wait,Active,root-exited,Terminate,Wait,Active,drain,Close,close-launch,Close"
+      ($script:events -join ",") | Should -Be "Terminate,Wait,Active,root-exited,root-exited,Terminate,Wait,Active,drain,Close,close-launch,Close"
       $script:scope.Closed | Should -BeTrue
       Should -Invoke Write-Host -Times 1 -Exactly
     }
@@ -144,6 +144,62 @@ Describe "Owned shell scope mock-only lifecycle" {
       $script:scope.Closed | Should -BeFalse
       $script:events | Should -Not -Contain "close-launch"
       Should -Invoke Write-Host -Times 0 -Exactly -ParameterFilter { $Object -like "SHELL_OWNED_JOB_CLEANUP=*" }
+    }
+    It "shares the original scope termination deadline across all held-root waits" {
+      $script:budgets = [Collections.Generic.List[int]]::new()
+      $script:run | Add-Member ScriptMethod RequireExited {
+        param($milliseconds)
+        if ($null -ne $milliseconds) {
+          $script:budgets.Add($milliseconds)
+          [Threading.Thread]::Sleep(60)
+        }
+      } -Force
+      $other = [pscustomobject]@{
+        Process = $script:process; ScopeAssigned = $true; Finalized = $false
+        LaunchJob = [IntPtr]678; LaunchJobClosed = $false
+      }
+      $other | Add-Member ScriptMethod RequireExited {
+        param($milliseconds)
+        if ($null -ne $milliseconds) { $script:budgets.Add($milliseconds) }
+      }
+      $other | Add-Member ScriptMethod Drain {}
+      $other | Add-Member ScriptMethod Close {}
+      $script:scope.Runs.Add($script:run)
+      $script:scope.Runs.Add($other)
+      Close-ShellProcessScope $script:scope
+      $script:budgets.Count | Should -Be 2
+      $script:budgets[0] | Should -BeGreaterThan 0
+      $script:budgets[0] | Should -BeLessOrEqual 5000
+      $script:budgets[1] | Should -BeLessThan $script:budgets[0]
+      $script:scope.Closed | Should -BeTrue
+    }
+    It "does not drain or release authority when the bounded held-root wait refuses" {
+      $script:run | Add-Member ScriptMethod RequireExited {
+        param($milliseconds)
+        $script:events.Add("held-root-wait:$milliseconds")
+        throw "controlled held root did not signal within its original deadline"
+      } -Force
+      $script:scope.Runs.Add($script:run)
+      $failure = $null
+      try { Close-ShellProcessScope $script:scope } catch { $failure = $_ }
+      Test-ShellOwnershipUnproven $failure | Should -BeTrue
+      $script:scope.Closed | Should -BeFalse
+      $script:run.Finalized | Should -BeFalse
+      $script:events | Should -Not -Contain "drain"
+      $script:events | Should -Not -Contain "Close"
+      $script:events | Should -Not -Contain "close-launch"
+    }
+    It "proves every original root before closing a previously signalled sibling" {
+      $other = [pscustomobject]@{ Process = $script:process; ScopeAssigned = $true; Finalized = $false }
+      $other | Add-Member ScriptMethod RequireExited { param($milliseconds) throw "later held root is unproved" }
+      $script:scope.Runs.Add($script:run)
+      $script:scope.Runs.Add($other)
+      { Close-ShellProcessScope $script:scope } | Should -Throw "*later held root is unproved*"
+      $script:scope.Closed | Should -BeFalse
+      $script:run.Finalized | Should -BeFalse
+      $script:events | Should -Not -Contain "drain"
+      $script:events | Should -Not -Contain "Close"
+      $script:events | Should -Not -Contain "close-launch"
     }
     It "does not claim cleanup when output drainage fails" {
       $script:run | Add-Member ScriptMethod Drain { throw "output EOF unproved" } -Force
@@ -303,6 +359,64 @@ Describe "Owned shell scope mock-only lifecycle" {
       Test-ShellOwnershipUnproven $failure | Should -BeTrue
       $script:events.Count | Should -Be 0
     }
+  }
+}
+
+Describe "Original held-root signalling after real native job termination" {
+  It "closes actual shared-helper scopes only after all original root objects signal and both readers reach EOF" {
+    $assemblyPath = $env:GRAPHCODE_VALIDATION_ASSEMBLY
+    $executable = [IO.Path]::ChangeExtension($assemblyPath, '.exe')
+    Test-Path -LiteralPath $executable -PathType Leaf | Should -BeTrue
+    $executed = 0
+    foreach ($iteration in 1..10) {
+      $scope = New-ShellProcessScope
+      try {
+        foreach ($index in 1..4) {
+          $start = [Diagnostics.ProcessStartInfo]::new($executable)
+          $start.UseShellExecute = $false
+          $start.CreateNoWindow = $true
+          $start.RedirectStandardOutput = $true
+          $start.RedirectStandardError = $true
+          foreach ($argument in @('--ownership-fixture', 'shell-scope-child', $TestDrive)) {
+            $start.ArgumentList.Add($argument)
+          }
+          $null = Start-ShellOwnedProcess $scope $start
+        }
+        $ready = [Collections.Generic.HashSet[int]]::new()
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        while ($ready.Count -ne 4) {
+          foreach ($run in $scope.Runs) {
+            if ($ready.Contains($run.Process.Id)) { continue }
+            $chunk = Receive-ShellOwnedOutput $scope $run.Process
+            if ($chunk.Output.Contains('shell-scope-ready')) { $null = $ready.Add($run.Process.Id) }
+          }
+          if ($clock.ElapsedMilliseconds -gt 5000) { throw 'Controlled held roots did not all become ready.' }
+          [Threading.Thread]::Sleep(5)
+        }
+        Close-ShellProcessScope $scope
+        $scope.Closed | Should -BeTrue
+        foreach ($run in $scope.Runs) {
+          $run.Finalized | Should -BeTrue
+          $run.LaunchJobClosed | Should -BeTrue
+          $run.Handle | Should -Be ([IntPtr]::Zero)
+          $run.Output.IsCompletedSuccessfully | Should -BeTrue
+          $run.Error.IsCompletedSuccessfully | Should -BeTrue
+          $run.Output.Result | Should -Match 'shell-scope-ready'
+          $run.Error.Result | Should -Match 'shell-scope-stderr'
+          $executed++
+        }
+        Close-ShellProcessScope $scope
+      } finally {
+        if (-not $scope.Closed) {
+          try { Close-ShellProcessScope $scope } catch {
+            try { [Console]::Out.WriteLine('GRAPHCODE_VALIDATION_ROOT_RETENTION_REQUIRED=ownership_unproven'); [Console]::Out.Flush() }
+            finally { [Threading.Thread]::Sleep([Threading.Timeout]::Infinite) }
+          }
+        }
+      }
+    }
+    $executed | Should -Be 40
+    Write-Host "SHELL_SCOPE_NATIVE_EXECUTED=40 PASSED=40 FAILED=0 scopes=10"
   }
 }
 
