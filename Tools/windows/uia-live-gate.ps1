@@ -709,6 +709,52 @@ function ConvertTo-PopupMenuEvidence($items) {
   })
 }
 
+function Restore-DeleteLoopCanvas(
+  $process,
+  $root,
+  [IntPtr] $ownerWindow,
+  [string] $automationId,
+  $walker
+) {
+  Require (Ensure-ShellForeground $ownerWindow "Delete Loop Show in Graph") `
+    "Delete Loop could not acquire its owned foreground before Show in Graph"
+  $workspace = Wait-ForGraphChildren $root $walker `
+    { $_.Current.AutomationId -match '^workspace-show-graph-' } `
+    { param($items) @($items).Count -eq 1 }
+  $showGraph = @($workspace.Items | Where-Object {
+    $_.Current.AutomationId -match '^workspace-show-graph-' -and
+    $_.Current.Name -ceq "Show in Graph" -and
+    $_.Current.ProcessId -eq $process.Id -and -not $_.Current.IsOffscreen
+  })
+  Require ($showGraph.Count -eq 1) "Delete Loop omitted its visible owned Show in Graph action"
+  $showGraph[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $root = Wait-ForRootReconnect $process @($walker)
+  $card = Find-FragmentByIdWithRetry $root $automationId $walker
+  Require ($null -ne $card -and $card.Current.AutomationId -ceq $automationId -and
+    $card.Current.ProcessId -eq $process.Id) "Delete Loop lost its same owned card after Show in Graph"
+  $fit = Find-FragmentByIdWithRetry $root "fit-canvas" $walker
+  Require ($null -ne $fit -and $fit.Current.AutomationId -ceq "fit-canvas" -and
+    $fit.Current.Name -ceq "Fit canvas" -and $fit.Current.ProcessId -eq $process.Id) `
+    "Delete Loop graph reentry omitted the exact owned Fit Canvas action"
+  $fit.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $visible = Wait-ForGraphChildren $root $walker `
+    { $_.Current.AutomationId -ceq $automationId -or $_.Current.AutomationId -match '^workspace-show-graph-' } `
+    { param($items)
+      @($items | Where-Object { $_.Current.AutomationId -match '^workspace-show-graph-' }).Count -eq 0 -and
+      @($items | Where-Object { $_.Current.AutomationId -ceq $automationId -and
+        $_.Current.ProcessId -eq $process.Id -and -not $_.Current.IsOffscreen }).Count -eq 1 }
+  $visibleCard = @($visible.Items | Where-Object { $_.Current.AutomationId -ceq $automationId })
+  Require ($null -ne $visible.Graph -and $visible.Graph.Current.ProcessId -eq $process.Id -and
+    $visibleCard.Count -eq 1 -and $visibleCard[0].Current.AutomationId -ceq $automationId -and
+    $visibleCard[0].Current.ProcessId -eq $process.Id -and -not $visibleCard[0].Current.IsOffscreen -and
+    @($visible.Items | Where-Object { $_.Current.AutomationId -match '^workspace-show-graph-' }).Count -eq 0) `
+    "Delete Loop same card did not return to its visible canvas after Show in Graph and Fit Canvas"
+  Require ($visibleCard[0].GetCurrentPattern(
+    [System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected) `
+    "Delete Loop Show in Graph changed the selected card identity"
+  return (Wait-ForRootReconnect $process @($walker))
+}
+
 function Open-CanvasCardContextMenu(
   $process,
   $root,
@@ -7697,6 +7743,7 @@ try {
   Require ($concurrencyStressEvidence.completedReads -eq $concurrencyStressEvidence.requestedReads) `
     "UIA read stress completed $($concurrencyStressEvidence.completedReads) of $($concurrencyStressEvidence.requestedReads) reads during fixture reorder/removal"
   Remove-Job -Job $stressJob -Force
+  $stressJob = $null
   $remainingRows = @(Get-DirectChildren $worktrees $rawWalker)
   $remainingRowIds = @($remainingRows | ForEach-Object { $_.Current.AutomationId })
   Assert-Ids $remainingRowIds @($unsafeRow.Current.AutomationId) "removed Worktrees"
@@ -7862,6 +7909,7 @@ try {
     "Delete Loop could not select the fixture loop before invoking the selection-dependent command"
   Write-Host ("UIA_DELETE_LOOP_TARGET automationId='$($deleteTarget.Current.AutomationId)' " +
     "name='$($deleteTarget.Current.Name)' selected=$($deleteTargetSelection.Current.IsSelected)")
+  $root = Restore-DeleteLoopCanvas $process $root $shellWindow $renameGraphIdentity $rawWalker
   $deleteLoopPopup = Open-CanvasCardContextMenu $process $root $shellWindow `
     $renameGraphIdentity $rawWalker "Delete Loop"
   $deleteLoopItems = @(Get-PopupMenuItems $deleteLoopPopup)
