@@ -859,11 +859,33 @@ public static class GraphCodeUiaGateState {
     return RealChildWindowFromPoint(dialog, clientPoint);
   }
   private static bool ResolvesToControl(IntPtr target, IntPtr dialog, ScreenPoint point) {
+    IntPtr parent = GetAncestor(target, 1);
+    IntPtr root = GetAncestor(target, 2);
+    uint processId = WindowProcessId(target);
+    RECT bounds;
+    if (target == IntPtr.Zero || parent == IntPtr.Zero || root == IntPtr.Zero || processId == 0 ||
+        (dialog != parent && dialog != root) || GetAncestor(parent, 2) != root ||
+        WindowProcessId(parent) != processId || WindowProcessId(root) != processId ||
+        !IsRetainedProcessAlive(processId) || !GetWindowRect(target, out bounds) ||
+        point.X < bounds.Left || point.X >= bounds.Right || point.Y < bounds.Top || point.Y >= bounds.Bottom)
+      return false;
     IntPtr atPoint = WindowFromPoint(point);
-    if (atPoint == IntPtr.Zero || GetAncestor(atPoint, 2) != GetAncestor(target, 2)) return false;
+    if (atPoint == IntPtr.Zero || GetAncestor(atPoint, 2) != root || WindowProcessId(atPoint) != processId) return false;
+    dialog = parent;
     var clientPoint = point;
-    if (!ScreenToClient(dialog, ref clientPoint)) return false;
+    if (!ScreenToClient(dialog, ref clientPoint) || GetAncestor(target, 1) != parent ||
+        GetAncestor(target, 2) != root || WindowProcessId(target) != processId) return false;
     return RealChildWindowFromPoint(dialog, clientPoint) == target;
+  }
+  private static IntPtr RequireControlClickRoot(IntPtr target, IntPtr parent) {
+    IntPtr root = GetAncestor(target, 2);
+    uint processId = WindowProcessId(target);
+    if (target == IntPtr.Zero || parent == IntPtr.Zero || root == IntPtr.Zero ||
+        GetAncestor(target, 1) != parent || GetAncestor(parent, 2) != root ||
+        processId == 0 || WindowProcessId(parent) != processId || WindowProcessId(root) != processId ||
+        !IsRetainedProcessAlive(processId))
+      throw new InvalidOperationException("Control click target lost its exact parent/root ownership; no input was injected");
+    return root;
   }
   private static string ClassOf(IntPtr window) {
     if (window == IntPtr.Zero) return "";
@@ -1024,8 +1046,9 @@ public static class GraphCodeUiaGateState {
       hit.Samples = samples;
     }
     if (!hit.HitTarget) return hit;
-    uint expectedProcessId = WindowProcessId(dialog);
-    RequireOwnedForeground(dialog, expectedProcessId);
+    IntPtr inputRoot = RequireControlClickRoot(target, dialog);
+    uint expectedProcessId = WindowProcessId(inputRoot);
+    RequireOwnedForeground(inputRoot, expectedProcessId);
     ScreenPoint before, at;
     if (!GetCursorPos(out before))
       throw new InvalidOperationException(String.Format("GetCursorPos before control click failed: Win32Error={0}", Marshal.GetLastWin32Error()));
@@ -1041,7 +1064,9 @@ public static class GraphCodeUiaGateState {
       new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0002 } },
       new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0004 } }
     };
-    RequireOwnedMouseInput(dialog, expectedProcessId, center, target);
+    if (RequireControlClickRoot(target, dialog) != inputRoot)
+      throw new InvalidOperationException("Control click target root changed; no input was injected");
+    RequireOwnedMouseInput(inputRoot, expectedProcessId, center, target);
     uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input)));
     if (sent != inputs.Length)
       throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} control mouse events: Win32Error={2}", sent, inputs.Length, Marshal.GetLastWin32Error()));

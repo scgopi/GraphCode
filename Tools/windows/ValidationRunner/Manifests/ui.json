@@ -1,5 +1,10 @@
 {
   "units": [
+    { "id": "ui.control-click.flat-root", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.control-click.nested-root", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.control-click.same-pid-unrelated-root", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.control-click.mismatched-parent", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.control-click.foreign-root", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.delete.restore.source-order", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.delete.restore.owned-navigation", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.delete.restore.foreground-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
