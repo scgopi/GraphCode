@@ -395,6 +395,73 @@ Invoke-CardsContract 'ui.cards-pilot.default-source-boundary' {
     throw 'Default CI can enter pilot without explicit process-only plan'
   }
   $gateSource = Get-Content -LiteralPath (Join-Path $RepositoryRoot 'Tools\windows\uia-live-gate.ps1') -Raw
+  foreach ($target in @('$edgeFromValue','$edgeToValue','$canvasEdgeFromId','$canvasEdgeToId')) {
+    $reads = @($gate.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left.Extent.Text -ceq $target
+    },$true))
+    if ($reads.Count -ne 1 -or $reads[0].Right.Extent.Text -match '\.Current\.Name') {
+      throw "Readonly endpoint $target is read from a semantic Name instead of its native/ValuePattern value"
+    }
+  }
+  $endpointCalls = @($gate.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and
+      $node.GetCommandName() -ceq 'Read-UiaReadonlyEdgeEndpoints'
+  },$true))
+  if ($endpointCalls.Count -ne 2) { throw 'Both ordinary edge routes must use the strict readonly reader' }
+  $endpointReader = $gate.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+      $node.Name -ceq 'Read-UiaReadonlyEdgeEndpoints'
+  },$true)
+  if ($null -eq $endpointReader -or $endpointReader.Extent.Text -notmatch 'GraphCodeMultiProjectEditNative\]::Buffer\(\$handle,100\)' -or
+      $endpointReader.Extent.Text -notmatch '\$pattern\.Current\.Value' -or
+      $endpointReader.Extent.Text -match '\.Current\.Name') {
+    throw 'Readonly endpoint reader must agree on native buffer and semantic ValuePattern without a Name fallback'
+  }
+  $endpointDecision = $gate.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+      $node.Name -ceq 'Get-UiaReadonlyEndpointsDecision'
+  },$true)
+  if ($null -eq $endpointDecision) { throw 'Strict readonly endpoint decision missing' }
+  . ([scriptblock]::Create($endpointDecision.Extent.Text))
+  $endpointSnapshot = @{
+    handle=10;processId=123;owner=5;class='GraphCodeSheetHost';title='Create or edit edge';captionless=$true
+    viewport=@{handle=11;parent=10;processId=123;class='GraphCodeSheetViewport';matches=1;stable=$true;runtime='11';owned=$true}
+    content=@{handle=12;parent=11;processId=123;class='GraphCodeNativeForm';matches=1;stable=$true;runtime='12';owned=$true}
+    fields=@(
+      @{handle=21;parent=12;processId=123;controlId=9100;class='Edit';matches=1;stable=$true;runtime='21';owned=$true
+        readonly=$true;value=$nodeId;semanticValue=$nodeId;semanticProcessId=123;name='Source loop identity'},
+      @{handle=22;parent=12;processId=123;controlId=9101;class='Edit';matches=1;stable=$true;runtime='22';owned=$true
+        readonly=$true;value=$peerId;semanticValue=$peerId;semanticProcessId=123;name='Target loop identity'}
+    )
+  }
+  if (-not (Get-UiaReadonlyEndpointsDecision $endpointSnapshot 123 5 'Create or edit edge' $nodeId $peerId).ready) {
+    throw 'Correct native/semantic readonly values were rejected because their Names are labels'
+  }
+  foreach ($negative in @('missing','duplicate','wrong-id','wrong-pid','wrong-parent','wrong-sheet-owner',
+      'writable','wrong-value','semantic-mismatch','stale','wrong-class')) {
+    $changed = $endpointSnapshot | ConvertTo-Json -Depth 10 | ConvertFrom-Json -AsHashtable
+    switch ($negative) {
+      'missing' { $changed.fields = @($changed.fields[1]) }
+      'duplicate' { $changed.fields[0].matches = 2 }
+      'wrong-id' { $changed.fields[0].controlId = 9101 }
+      'wrong-pid' { $changed.fields[0].processId = 456 }
+      'wrong-parent' { $changed.fields[0].parent = 11 }
+      'wrong-sheet-owner' { $changed.owner = 6 }
+      'writable' { $changed.fields[0].readonly = $false }
+      'wrong-value' { $changed.fields[0].value = $peerId; $changed.fields[0].semanticValue = $peerId }
+      'semantic-mismatch' { $changed.fields[0].semanticValue = $peerId }
+      'stale' { $changed.fields[0].stable = $false }
+      'wrong-class' { $changed.fields[0].class = 'Static' }
+    }
+    if ((Get-UiaReadonlyEndpointsDecision $changed 123 5 'Create or edit edge' $nodeId $peerId).ready) {
+      throw "Invalid readonly endpoint $negative was accepted"
+    }
+  }
   Assert-CardsLiveActionInvocations $gateSource
   foreach ($target in @('$mainInspect[0]', '$goalReply[0]', '$compositeReply[0]')) {
     $action = $target + '.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()'
