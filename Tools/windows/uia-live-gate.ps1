@@ -3097,9 +3097,8 @@ function Read-UiaSettingsControlSnapshot($dialog, [int] $processId, [IntPtr] $ow
   }
 }
 
-function Invoke-UiaSettingsScroll($dialog, [int] $delta) {
-  $sheet=[IntPtr]::new([long]$dialog.Current.NativeWindowHandle)
-  return [GraphCodeUiaGateState]::WheelAt($sheet,1,1,$delta)
+function Invoke-UiaSettingsScroll([IntPtr] $viewport, [int] $delta) {
+  return [GraphCodeUiaGateState]::WheelAt($viewport,1,1,$delta)
 }
 
 function Wait-UiaSettingsControlVisible($dialog, [int] $processId, [IntPtr] $owner,
@@ -3114,7 +3113,8 @@ function Wait-UiaSettingsControlVisible($dialog, [int] $processId, [IntPtr] $own
     $decision=Get-UiaSettingsVisibilityDecision $frame $processId $id $name $contains
     Require $decision.valid "Settings invalid owned viewport/control '$name'"
     if ($decision.ready) { return $frame.element }
-    Require (Invoke-UiaSettingsScroll $dialog $decision.delta) "Settings native scroll failed for '$name'"
+    Require (Invoke-UiaSettingsScroll ([IntPtr]::new([long]$frame.viewportHandle)) $decision.delta) `
+      "Settings native scroll failed for '$name'"
     Start-Sleep -Milliseconds 50
   }
   throw "Settings visible viewport wait failed for '$name' within original 5000ms budget"

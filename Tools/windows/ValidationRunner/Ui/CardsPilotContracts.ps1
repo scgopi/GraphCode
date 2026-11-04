@@ -405,7 +405,7 @@ Invoke-CardsContract 'ui.cards-pilot.default-source-boundary' {
   }
   $settingsFrame = @{
     identity=$true;matches=1;stable=$true;name='Mailroom';controlId=6205
-    processId=123;parent=12;content=12;offscreen=$false
+    processId=123;parent=12;content=12;viewportHandle=14;offscreen=$false
     bounds=@{left=20;top=80;right=120;bottom=110}
     viewport=@{left=0;top=0;right=200;bottom=100}
   }
@@ -450,7 +450,8 @@ Invoke-CardsContract 'ui.cards-pilot.default-source-boundary' {
         return $frame
       }
       function Invoke-UiaSettingsScroll {
-        param($dialog,$delta)
+        param($viewport,$delta)
+        if ($viewport -ne 14) { throw 'Settings wheel must target the verified viewport, not its sheet host' }
         $state.scrolls++
         return $scenario -cne 'no-scroll'
       }
@@ -465,7 +466,7 @@ Invoke-CardsContract 'ui.cards-pilot.default-source-boundary' {
       } elseif (-not $caught) { throw "Settings $scenario was silently accepted" }
     }
   }
-  if ($gateSource -notmatch 'WheelAt\(\$sheet,1,1,\$delta\)' -or
+  if ($gateSource -notmatch 'WheelAt\(\$viewport,1,1,\$delta\)' -or
       $gateSource -notmatch 'Wait-UiaSettingsControlVisible \$productSettings' -or
       $gateSource -match "Select-Object -First 1\s*\r?\n\s*Require \(\`$null -ne \`$element\) `"Product Settings omitted") {
     throw 'Settings ordinary route bypasses bounded native scroll/reacquisition'
