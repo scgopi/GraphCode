@@ -340,6 +340,12 @@ extension CLISessionBackend {
     await backend(for: node).restart(node, path)
   }
 
+  /// The rename gate `GraphStore` is wired with — see `ZmxSessionLauncher.awaitRenameWindow`.
+  public static let awaitRenameWindow: @Sendable (LoopNode, String?) async -> Bool = {
+    node, projectPath in
+    await ZmxSessionLauncher.awaitRenameWindow(of: node, projectPath: projectPath)
+  }
+
   /// The `.message` transport `GraphStore` is wired with — routed through the *target's*
   /// backend, since it's the target's session being typed into.
   public static let deliverMessage: @Sendable (LoopNode, String, String?) async -> Bool = {

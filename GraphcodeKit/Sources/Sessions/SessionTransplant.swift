@@ -249,7 +249,7 @@ public enum SessionTransplant {
       let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
       return "S=$(cat \(idFile) 2>/dev/null); if [ -z \"$S\" ]; then "
         + "for d in $(ls -t \"$HOME/.copilot/session-state/\" 2>/dev/null); do "
-        + "if grep -qx 'name: \(name)' "
+        + "if \(CLISessionBackendKind.copilotNameMatcher(for: name)) "
         + "\"$HOME/.copilot/session-state/$d/workspace.yaml\" 2>/dev/null; "
         + "then S=\"$d\"; break; fi; done; fi; "
         + "[ -n \"$S\" ] && [ -d \"$HOME/.copilot/session-state/$S\" ] || exit 0; "

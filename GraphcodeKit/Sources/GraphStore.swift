@@ -107,6 +107,7 @@ public actor GraphStore {
   /// stays for the `until`-guard and for every test that stubs a bare yes/no.
   private let onCheckPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)?
   private let onDeliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)?
+  private let onAwaitRenameWindow: (@Sendable (LoopNode, String?) async -> Bool)?
   private let onCaptureScript: (@Sendable (ShellPredicate) async -> String?)?
   private let onReadUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)?
   private let onReadGoalVerdict: (@Sendable (LoopNode, String?) async -> GoalVerdict?)?
@@ -403,6 +404,7 @@ public actor GraphStore {
     onEvaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)? = nil,
     onCheckPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)? = nil,
     onDeliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)? = nil,
+    onAwaitRenameWindow: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
     onCaptureScript: (@Sendable (ShellPredicate) async -> String?)? = nil,
     onReadUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)? = nil,
     onReadActivity: (@Sendable (LoopNode, String?) async -> String?)? = nil,
@@ -451,6 +453,7 @@ public actor GraphStore {
     self.onEvaluatePredicate = onEvaluatePredicate
     self.onCheckPredicate = onCheckPredicate
     self.onDeliverMessage = onDeliverMessage
+    self.onAwaitRenameWindow = onAwaitRenameWindow
     self.onCaptureScript = onCaptureScript
     self.onReadUsage = onReadUsage
     self.onReadActivity = onReadActivity
@@ -1577,6 +1580,7 @@ public actor GraphStore {
       onEvaluatePredicate: onEvaluatePredicate,
       onCheckPredicate: onCheckPredicate,
       onDeliverMessage: onDeliverMessage,
+      onAwaitRenameWindow: onAwaitRenameWindow,
       onCaptureScript: onCaptureScript,
       onAppendMemory: onAppendMemory,
       onRemoveMemory: onRemoveMemory,
@@ -2031,29 +2035,38 @@ public actor GraphStore {
     graph.nodes[id: nodeID]?.title = trimmed
   }
 
-  /// Carries a new title into a live Claude Code session as `/rename`, which takes effect
-  /// even mid-turn without interrupting it. Without this, a blank-titled loop's session
-  /// kept its launch-time name for good: the title is suggested only after the session
-  /// has started. A resolved loop is renamed too: its session often stays up for
-  /// follow-up questions, and the send's own liveness gate skips one that is gone. Never
-  /// staged to memory — a name a resume will pass anyway (`--name`) is not something the
-  /// loop should read at its next wake.
+  /// Carries a new title into a live session as `/rename`, which takes effect even
+  /// mid-turn without interrupting it. Without this, a blank-titled loop's session kept
+  /// its launch-time name for good: the title is suggested only after the session has
+  /// started. A resolved loop is renamed too: its session often stays up for follow-up
+  /// questions, and the send's own liveness gate skips one that is gone. Never staged to
+  /// memory — a rename is not something the loop should read at its next wake.
   private func renameSession(of node: LoopNode) {
-    guard node.backend == .claudeCode, let onDeliverMessage,
-      let name = SessionNaming.displayName(forTitle: node.title)
-        .flatMap(CLISessionBackendKind.sessionLabel)
+    guard let onDeliverMessage,
+      let command = node.backend.renameCommand(
+        displayName: SessionNaming.displayName(forTitle: node.title),
+        sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName)
     else { return }
-    let command = "/rename \(name)"
     let path = graph.project.path
+    let window = node.backend == .copilotCLI ? onAwaitRenameWindow : nil
     guard subGraphDepth == 0 else {
-      Task { _ = await onDeliverMessage(node, command, path) }
+      Task {
+        if let window, await !window(node, path) { return }
+        _ = await onDeliverMessage(node, command, path)
+      }
       return
     }
     let previous = sessionTyping[node.id]?.task
     let token = UUID()
     let task = Task { [self] in
       await previous?.value
-      _ = await withDeadline(deliveryDeadline) { await onDeliverMessage(node, command, path) }
+      var open = true
+      if let window {
+        open = await window(node, path) && graph.nodes[id: node.id]?.title == node.title
+      }
+      if open {
+        _ = await withDeadline(deliveryDeadline) { await onDeliverMessage(node, command, path) }
+      }
       if sessionTyping[node.id]?.token == token {
         sessionTyping.removeValue(forKey: node.id)
       }
@@ -4631,6 +4644,7 @@ public actor GraphStore {
       onEvaluatePredicate: onEvaluatePredicate,
       onCheckPredicate: onCheckPredicate,
       onDeliverMessage: onDeliverMessage,
+      onAwaitRenameWindow: onAwaitRenameWindow,
       onCaptureScript: onCaptureScript,
       onReadUsage: onReadUsage,
       onReadPresence: onReadPresence,
