@@ -395,6 +395,81 @@ Invoke-CardsContract 'ui.cards-pilot.default-source-boundary' {
     throw 'Default CI can enter pilot without explicit process-only plan'
   }
   $gateSource = Get-Content -LiteralPath (Join-Path $RepositoryRoot 'Tools\windows\uia-live-gate.ps1') -Raw
+  foreach ($name in @('Get-UiaSettingsVisibilityDecision','Wait-UiaSettingsControlVisible')) {
+    $definition = $gate.Find({
+      param($node)
+      $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+    },$true)
+    if ($null -eq $definition) { throw "Owned Settings viewport oracle missing: $name" }
+    . ([scriptblock]::Create($definition.Extent.Text))
+  }
+  $settingsFrame = @{
+    identity=$true;matches=1;stable=$true;name='Mailroom';controlId=6205
+    processId=123;parent=12;content=12;offscreen=$false
+    bounds=@{left=20;top=80;right=120;bottom=110}
+    viewport=@{left=0;top=0;right=200;bottom=100}
+  }
+  if ((Get-UiaSettingsVisibilityDecision $settingsFrame 123 6205 'Mailroom').ready) {
+    throw 'Off-viewport Settings control passed without scrolling'
+  }
+  $settingsFrame.bounds.top=50; $settingsFrame.bounds.bottom=80
+  if (-not (Get-UiaSettingsVisibilityDecision $settingsFrame 123 6205 'Mailroom').ready) {
+    throw 'Exact visible owned Settings control was rejected'
+  }
+  if ((Get-UiaSettingsVisibilityDecision $null 123 6205 'Mailroom').ready) {
+    throw 'Missing Settings control was accepted'
+  }
+  foreach ($negative in @('offscreen','duplicate','wrong-pid','wrong-parent','stale','wrong-id','wrong-name','wrong-owner')) {
+    $changed=$settingsFrame | ConvertTo-Json -Depth 6 | ConvertFrom-Json -AsHashtable
+    switch ($negative) {
+      'offscreen' { $changed.offscreen=$true }
+      'duplicate' { $changed.matches=2 }
+      'wrong-pid' { $changed.processId=456 }
+      'wrong-parent' { $changed.parent=11 }
+      'stale' { $changed.stable=$false }
+      'wrong-id' { $changed.controlId=6204 }
+      'wrong-name' { $changed.name='Other control' }
+      'wrong-owner' { $changed.identity=$false }
+    }
+    if ((Get-UiaSettingsVisibilityDecision $changed 123 6205 'Mailroom').ready) {
+      throw "Invalid Settings viewport $negative was accepted"
+    }
+  }
+  foreach ($scenario in @('scroll-reacquire','no-scroll','failed-wait','stale-after-scroll')) {
+    & {
+      $state=@{reads=0;scrolls=0}
+      function Read-UiaSettingsControlSnapshot {
+        param($dialog,$processId,$owner,$id,$name,$class,$contains)
+        $state.reads++
+        $frame=$settingsFrame | ConvertTo-Json -Depth 6 | ConvertFrom-Json -AsHashtable
+        $frame.element=$state.reads
+        if ($state.reads -eq 1 -or $scenario -ceq 'failed-wait') {
+          $frame.bounds.top=110; $frame.bounds.bottom=140
+        }
+        if ($state.reads -gt 1 -and $scenario -ceq 'stale-after-scroll') { $frame.stable=$false }
+        return $frame
+      }
+      function Invoke-UiaSettingsScroll {
+        param($dialog,$delta)
+        $state.scrolls++
+        return $scenario -cne 'no-scroll'
+      }
+      function Start-Sleep { param($Milliseconds) }
+      function Require { param($condition,$message) if (-not $condition) { throw $message } }
+      $caught=$null; $visible=$null
+      try { $visible=Wait-UiaSettingsControlVisible 10 123 5 6205 'Mailroom' } catch { $caught=$_ }
+      if ($scenario -ceq 'scroll-reacquire') {
+        if ($caught -or $visible -ne 2 -or $state.reads -ne 2 -or $state.scrolls -ne 1) {
+          throw 'Settings scroll did not reacquire and verify the actual visible control'
+        }
+      } elseif (-not $caught) { throw "Settings $scenario was silently accepted" }
+    }
+  }
+  if ($gateSource -notmatch 'WheelAt\(\$sheet,1,1,\$delta\)' -or
+      $gateSource -notmatch 'Wait-UiaSettingsControlVisible \$productSettings' -or
+      $gateSource -match "Select-Object -First 1\s*\r?\n\s*Require \(\`$null -ne \`$element\) `"Product Settings omitted") {
+    throw 'Settings ordinary route bypasses bounded native scroll/reacquisition'
+  }
   foreach ($target in @('$edgeFromValue','$edgeToValue','$canvasEdgeFromId','$canvasEdgeToId')) {
     $reads = @($gate.FindAll({
       param($node)

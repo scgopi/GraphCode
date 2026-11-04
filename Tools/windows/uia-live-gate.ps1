@@ -3025,6 +3025,101 @@ function Invoke-MultiProjectOwnedStartupFailure(
   }
 }
 
+function Get-UiaSettingsVisibilityDecision($frame, [int] $processId, [int] $id, [string] $name,
+    [bool] $contains = $false) {
+  if ($null -eq $frame -or $frame.identity -ne $true -or $frame.matches -ne 1 -or
+      $frame.stable -ne $true -or $frame.processId -ne $processId -or
+      $frame.controlId -ne $id -or $frame.parent -ne $frame.content -or
+      $(if ($contains) { -not $frame.name.Contains($name) } else { $frame.name -cne $name })) {
+    return @{ready=$false;valid=$false;delta=0}
+  }
+  $box=$frame.bounds; $view=$frame.viewport
+  if ($null -eq $box -or $null -eq $view -or $box.right -le $box.left -or
+      $box.bottom -le $box.top -or $view.right -le $view.left -or $view.bottom -le $view.top -or
+      $box.left -lt $view.left -or $box.right -gt $view.right -or
+      ($box.bottom-$box.top) -gt ($view.bottom-$view.top)) {
+    return @{ready=$false;valid=$false;delta=0}
+  }
+  if ($box.top -lt $view.top) { return @{ready=$false;valid=$true;delta=120} }
+  if ($box.bottom -gt $view.bottom) { return @{ready=$false;valid=$true;delta=-120} }
+  return @{ready=($frame.offscreen -eq $false);valid=($frame.offscreen -eq $false);delta=0}
+}
+
+function Read-UiaSettingsControlSnapshot($dialog, [int] $processId, [IntPtr] $owner,
+    [int] $id, [string] $name, [string] $class, [bool] $contains) {
+  $null=Assert-UiaOwnedSheet $dialog $processId $owner 'GraphCode Settings' `
+    'GraphCodeProductSettings' 'Settings viewport read' $false
+  $sheet=[IntPtr]::new([long]$dialog.Current.NativeWindowHandle)
+  $raw=[System.Windows.Automation.TreeWalker]::RawViewWalker
+  function Read-SettingsChild([IntPtr] $parent, [string] $childClass, [int] $childId,
+      [string] $label, [bool] $substring) {
+    $parentElement=[System.Windows.Automation.AutomationElement]::FromHandle($parent)
+    $child=$raw.GetFirstChild($parentElement); $matches=@(); $visited=0
+    while ($null -ne $child) {
+      Require ($visited -lt 256 -and $child.Current.ProcessId -eq $processId) `
+        'Settings children exceeded their owned bounded census'
+      $handle=[IntPtr]::new([long]$child.Current.NativeWindowHandle)
+      if ($handle -ne [IntPtr]::Zero -and
+          [GraphCodeUiaGateState]::WindowClass($handle) -ceq $childClass -and
+          [GraphCodeUiaGateState]::ControlIdOf($handle) -eq $childId -and
+          ($childId -ne 0 -or [string]::IsNullOrEmpty($label) -or
+           $(if ($substring) { $child.Current.Name.Contains($label) } else { $child.Current.Name -ceq $label }))) {
+        $matches+=,$child
+      }
+      $visited++; $child=$raw.GetNextSibling($child)
+    }
+    Require ($matches.Count -eq 1) "Settings exact child missing or duplicate: $childClass/$childId/$label"
+    $element=$matches[0]; $handle=[IntPtr]::new([long]$element.Current.NativeWindowHandle)
+    $runtime=$element.GetRuntimeId() -join ','
+    $again=[System.Windows.Automation.AutomationElement]::FromHandle($handle)
+    Require ([GraphCodeUiaGateState]::WindowProcessId($handle) -eq $processId -and
+      [GraphCodeUiaGateState]::IsControlOwnedBy($sheet,$handle,$childId) -and
+      [long]$raw.GetParent($again).Current.NativeWindowHandle -eq $parent.ToInt64() -and
+      ($again.GetRuntimeId() -join ',') -ceq $runtime -and $again.Current.ProcessId -eq $processId) `
+      'Settings child has stale identity, foreign PID or wrong direct parent'
+    return $again
+  }
+  $viewport=Read-SettingsChild $sheet 'GraphCodeSheetViewport' 0 '' $false
+  $viewportHandle=[IntPtr]::new([long]$viewport.Current.NativeWindowHandle)
+  $content=Read-SettingsChild $viewportHandle 'GraphCodeProductSettings' 0 '' $false
+  $contentHandle=[IntPtr]::new([long]$content.Current.NativeWindowHandle)
+  $element=Read-SettingsChild $contentHandle $class $id $name $contains
+  $handle=[IntPtr]::new([long]$element.Current.NativeWindowHandle)
+  $box=$element.Current.BoundingRectangle; $view=$viewport.Current.BoundingRectangle
+  return @{
+    identity=$true;matches=1;stable=$true;name=$element.Current.Name;controlId=$id
+    processId=$element.Current.ProcessId;parent=[long]$raw.GetParent($element).Current.NativeWindowHandle
+    content=$contentHandle.ToInt64();viewportHandle=$viewportHandle.ToInt64()
+    offscreen=$element.Current.IsOffscreen;handle=$handle.ToInt64()
+    runtime=($element.GetRuntimeId() -join ',');element=$element
+    bounds=@{left=$box.Left;top=$box.Top;right=$box.Right;bottom=$box.Bottom}
+    viewport=@{left=$view.Left;top=$view.Top;right=$view.Right;bottom=$view.Bottom}
+  }
+}
+
+function Invoke-UiaSettingsScroll($dialog, [int] $delta) {
+  $sheet=[IntPtr]::new([long]$dialog.Current.NativeWindowHandle)
+  return [GraphCodeUiaGateState]::WheelAt($sheet,1,1,$delta)
+}
+
+function Wait-UiaSettingsControlVisible($dialog, [int] $processId, [IntPtr] $owner,
+    [int] $id, [string] $name, [string] $class = 'Button', [bool] $contains = $false) {
+  $watch=[Diagnostics.Stopwatch]::StartNew(); $original=$null
+  for ($attempt=0; $attempt -lt 100 -and $watch.ElapsedMilliseconds -lt 5000; $attempt++) {
+    $frame=Read-UiaSettingsControlSnapshot $dialog $processId $owner $id $name $class $contains
+    if ($null -eq $original) { $original=$frame }
+    Require ($frame.handle -eq $original.handle -and $frame.runtime -ceq $original.runtime -and
+      $frame.content -eq $original.content -and $frame.viewportHandle -eq $original.viewportHandle) `
+      "Settings control identity changed while scrolling '$name'"
+    $decision=Get-UiaSettingsVisibilityDecision $frame $processId $id $name $contains
+    Require $decision.valid "Settings invalid owned viewport/control '$name'"
+    if ($decision.ready) { return $frame.element }
+    Require (Invoke-UiaSettingsScroll $dialog $decision.delta) "Settings native scroll failed for '$name'"
+    Start-Sleep -Milliseconds 50
+  }
+  throw "Settings visible viewport wait failed for '$name' within original 5000ms budget"
+}
+
 function Get-UiaReadonlyEndpointsDecision($snapshot, [int] $processId, [long] $owner,
     [string] $title, [string] $from, [string] $to) {
   if ($null -eq $snapshot -or $processId -le 0 -or $owner -le 0 -or
@@ -9825,10 +9920,21 @@ try {
     "Get beta releases",
     "General"
   )
+  $settingsControlIds=@{
+    'General'=6220; 'Claude Code'=6221; 'Codex'=6222; 'Copilot CLI'=6223
+    'OpenCode'=6224; 'Pi'=6225; 'Templates'=6226
+    'New loops use: Claude Code'=6112; 'Default model: Capable'=6144
+    'Pick a model for each loop'=6152; 'Show the activity strip'=6160
+    'Summarise what loops are doing (experimental)'=6200
+    'Let a model write the summaries (experimental)'=6201
+    'Visualise what loops did (experimental)'=6202; 'Daemon heartbeat (experimental)'=6203
+    'Keep this PC awake while loops run (experimental)'=6204; 'Mailroom'=6205
+    "Tell sessions they're part of a graph"=6168
+    "End a finished loop's session: After 1 hour"=6206; 'Get beta releases'=6176
+  }
   foreach ($requiredName in $requiredSettingsNames) {
-    $element = @($settingsElements | Where-Object { $_.Current.Name -eq $requiredName }) |
-      Select-Object -First 1
-    Require ($null -ne $element) "Product Settings omitted '$requiredName'; descendants: $(@($settingsElements | ForEach-Object { ""$($_.Current.ControlType.ProgrammaticName):$($_.Current.Name)"" }) -join ' | ')"
+    $element=Wait-UiaSettingsControlVisible $productSettings $settingsProcess.Id $settingsShellWindow `
+      $settingsControlIds[$requiredName] $requiredName
     Require (($element.Current.BoundingRectangle.Width -gt 0) -and
              ($element.Current.BoundingRectangle.Height -gt 0) -and
              (-not $element.Current.IsOffscreen)) "Product Settings hid '$requiredName'"
@@ -9844,6 +9950,9 @@ try {
     "Lets a loop create more loops when work genuinely splits",
     "Check for Updates offers pre-releases as well as stable releases"
   )) {
+    $copyElement=Wait-UiaSettingsControlVisible $productSettings $settingsProcess.Id $settingsShellWindow `
+      0 $copy 'Static' $true
+    Require ($copyElement.Current.Name.Contains($copy)) "Product Settings changed visible explanatory copy '$copy'"
     Require ($settingsContent -match [regex]::Escape($copy)) `
       "Product Settings omitted explanatory copy '$copy'"
   }
@@ -9861,8 +9970,8 @@ try {
   }
   $productSettingsToggleStates = @()
   foreach ($entry in $expectedToggles.GetEnumerator()) {
-    $toggleElement = @($settingsElements | Where-Object { $_.Current.Name -eq $entry.Key }) |
-      Select-Object -First 1
+    $toggleElement=Wait-UiaSettingsControlVisible $productSettings $settingsProcess.Id $settingsShellWindow `
+      $settingsControlIds[$entry.Key] $entry.Key
     $toggleState = [GraphCodeUiaGateState]::GetCheckState(
       [IntPtr]$toggleElement.Current.NativeWindowHandle
     )
@@ -9870,6 +9979,7 @@ try {
     Require ($toggleState -eq $entry.Value) `
       "Product Settings toggle '$($entry.Key)' did not load the isolated fixture"
   }
+  $null=Wait-UiaSettingsControlVisible $productSettings $settingsProcess.Id $settingsShellWindow 6220 'General'
   $productSettingsEvidence = [ordered]@{
     identity = $productSettingsIdentity
     shownSettings = @($requiredSettingsNames | Where-Object { $settingsNames -contains $_ })
