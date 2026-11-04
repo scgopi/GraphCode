@@ -78,10 +78,22 @@ foreach ($case in $activationCases) {
 }
 
 function Confirm-PopupSource([string] $Source) {
-  try { $click = Read-CSharpMethod $Source 'public PopupItemHit ClickPopupMenuItem(' } catch { return $false }
+  try {
+    $default = Read-CSharpMethod $Source 'public PopupItemHit ClickPopupMenuItem('
+    $strict = Read-CSharpMethod $Source 'public PopupItemHit ClickPopupMenuItemStrict('
+    $click = Read-CSharpMethod $Source 'private PopupItemHit ClickPopupMenuItemCore('
+  } catch { return $false }
+  if ([regex]::Matches($default, '\bClickPopupMenuItemCore\(').Count -ne 1 -or
+      -not $default.Contains('return ClickPopupMenuItemCore(popup, owner, position, commandId, expectedProcessId, true);') -or
+      [regex]::Matches($strict, '\bClickPopupMenuItemCore\(').Count -ne 1 -or
+      -not $strict.Contains('var hit = ClickPopupMenuItemCore(popup, owner, position, commandId, expectedProcessId, false);') -or
+      -not $strict.Contains('if (hit == null)') -or
+      -not $strict.Contains('throw new InvalidOperationException("Strict popup target identity or geometry is invalid; no input was injected");') -or
+      -not $strict.Contains('return hit;') -or
+      ($default + $strict) -match '\b(SendInput|PostMessage|SetForegroundWindow|SetFocus|BringWindowToTop)\(') { return $false }
   if ([regex]::Matches($click, '\boperations\.SendInput\(').Count -ne 1 -or
       [regex]::Matches($click, 'RequireOwnedPopupForeground\(popup, owner, expectedProcessId\);').Count -ne 2 -or
-      -not $click.Contains('int commandId, uint expectedProcessId)') -or
+      -not $click.Contains('int commandId, uint expectedProcessId, bool allowFallback)') -or
       $click -match '\b(SetForegroundWindow|SetFocus|BringWindowToTop)\(') { return $false }
   $offset = 0
   foreach ($needle in @(
@@ -111,6 +123,28 @@ function Confirm-PopupSource([string] $Source) {
   }
   return $true
 }
+$rootPopup = @((Get-Content (Join-Path $uiRoot 'source-assertions.json') -Raw | ConvertFrom-Json) |
+  Where-Object id -CEQ 'ui.root.source.line-6520')
+$rootAst = [Management.Automation.Language.Parser]::ParseFile(
+  (Join-Path $uiRoot 'UiRootSourceContracts.ps1'), [ref]$null, [ref]$null)
+$rootEvaluator = @($rootAst.FindAll({ param($node)
+  $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-AssertionValue'
+}, $true))
+Assert-UiContract ($rootPopup.Count -eq 1 -and $rootEvaluator.Count -eq 1) `
+  'Actual declarative popup predicate or evaluator is missing or duplicated'
+$gateSource = [IO.File]::ReadAllText((Join-Path $RepositoryRoot 'Tools\windows\uia-live-gate.ps1'))
+$rootPopupResults = [Collections.Generic.List[bool]]::new()
+function Confirm-RootPopupSource([string] $Source) {
+  $rootResources = @{ gate = $gateSource; 'input-safety' = $Source }
+  function Read-SourceResource([string] $Name) {
+    if (-not $rootResources.ContainsKey($Name)) { throw "Unexpected popup predicate resource: $Name" }
+    return $rootResources[$Name]
+  }
+  . ([scriptblock]::Create($rootEvaluator[0].Extent.Text))
+  $accepted = -not (Get-AssertionValue $rootPopup[0].condition)
+  $rootPopupResults.Add($accepted)
+  return $accepted
+}
 $popupCases = @(
   @{ name = 'actual'; source = $inputSource; expected = $true },
   @{ name = 'bypass-guard'; source = $inputSource.Replace('if (!IsOwnedPopupInput(', 'if (false && !IsOwnedPopupInput('); expected = $false },
@@ -126,7 +160,57 @@ foreach ($case in $popupCases) {
   Invoke-SourceCase "ui.popup.source.$($case.name)" {
     Assert-UiContract ((Confirm-PopupSource $case.source) -eq $case.expected) `
       "Popup input safety contract: $($case.name) must fail closed before real input on foreign foreground or hit point"
+    if ($case.name -ceq 'actual') {
+      Assert-UiContract (Confirm-RootPopupSource $inputSource) `
+        'Declarative popup oracle rejects the actual checked hilite reader'
+      $rootMutations = @(
+        @{ from = 'bool ReadMenuHilite()'; to = 'bool UnboundMenuHilite()' },
+        @{ from = 'rawMenuState = operations.GetMenuState(menu, (uint)position, 0x0400);'; to = 'rawMenuState = 0;' },
+        @{ from = 'if (rawMenuState == UInt32.MaxValue)'; to = 'if (false)' },
+        @{ from = 'if (rawMenuState == UInt32.MaxValue)'; to = 'if (rawMenuState == UInt32.MaxValue && false)' },
+        @{ from = 'throw PopupStateFailure("Popup menu state unavailable; no further input was injected");'; to = ';' },
+        @{ from = 'menuStateObserved = true;'; to = ';' },
+        @{ from = 'menuStateObserved = true;'; to = 'menuStateObserved = true; bool early = (rawMenuState & 0x0080) != 0;' },
+        @{ from = 'return (rawMenuState & 0x0080) != 0;'; to = 'return true;' },
+        @{ from = 'hiliteAtEnterFallback = ReadMenuHilite();'; to = 'hiliteAtEnterFallback = true;' },
+        @{ from = 'hiliteBeforeEnter = ReadMenuHilite();'; to = 'hiliteBeforeEnter = true;' },
+        @{ from = 'operations.SendMessage(popup, 0x01E5, (UIntPtr)position, IntPtr.Zero);'; to = ';' },
+        @{ from = 'if (!hiliteBeforeEnter)'; to = 'if (false)' },
+        @{ from = 'if (!allowFallback)'; to = 'if (false)' },
+        @{ from = 'if (!hiliteBeforeEnter)'; to = 'operations.PostMessage(popup, 0x0100, (UIntPtr)0x0D, IntPtr.Zero); if (!hiliteBeforeEnter)' },
+        @{ from = '      RequireOwnedPopupForeground(popup, owner, expectedProcessId);'; to = '      operations.PostMessage(popup, 0x0100, (UIntPtr)0x0D, IntPtr.Zero); RequireOwnedPopupForeground(popup, owner, expectedProcessId);' },
+        @{ from = '      RequireOwnedPopupForeground(popup, owner, expectedProcessId);'; to = '      ;' }
+      )
+      foreach ($mutation in $rootMutations) {
+        Assert-UiContract ($inputSource.Contains($mutation.from)) 'Declarative popup mutation did not change production source'
+        Assert-UiContract (-not (Confirm-RootPopupSource $inputSource.Replace($mutation.from, $mutation.to))) `
+          'Declarative popup oracle accepted an unchecked, unselected, unhilited or unowned Enter fallback'
+      }
+      $helper = Read-CSharpMethod $inputSource 'bool ReadMenuHilite()'
+      $unusedDecoy = $inputSource.Replace('ReadMenuHilite()', 'UncheckedMenuHilite()').
+        Replace('if (rawMenuState == UInt32.MaxValue)', 'if (false)').
+        Replace('bool UncheckedMenuHilite()', "$helper`n    bool UncheckedMenuHilite()")
+      Assert-UiContract (-not (Confirm-RootPopupSource $unusedDecoy)) `
+        'Declarative popup oracle accepted an unused checked helper while callers used an unchecked reader'
+      Assert-UiContract ($rootPopupResults.Count -eq $rootMutations.Count + 2 -and
+        @($rootPopupResults | Where-Object { $_ }).Count -eq 1) `
+        'Declarative popup positive and each source mutation did not execute exactly once'
+      foreach ($mutation in @(
+        @{ from = 'return ClickPopupMenuItemCore(popup, owner, position, commandId, expectedProcessId, true);'; to = 'return null;' },
+        @{ from = 'var hit = ClickPopupMenuItemCore(popup, owner, position, commandId, expectedProcessId, false);'; to = 'var hit = ClickPopupMenuItemCore(popup, owner, position, commandId, expectedProcessId, true);' },
+        @{ from = 'if (hit == null)'; to = 'if (false)' },
+        @{ from = 'return hit;'; to = 'return ClickPopupMenuItemCore(popup, owner, position, commandId, expectedProcessId, false);' },
+        @{ from = 'private PopupItemHit ClickPopupMenuItemCore('; to = 'private PopupItemHit UnsharedPopupCore(' }
+      )) {
+        Assert-UiContract ($inputSource.Contains($mutation.from)) 'Popup forwarding mutation did not change production source'
+        Assert-UiContract (-not (Confirm-PopupSource $inputSource.Replace($mutation.from, $mutation.to))) `
+          'Popup source contract accepted an unshared, fallback-enabled, non-refusing or replayed forwarding route'
+      }
+    }
   }
+}
+foreach ($result in $results | Where-Object { $_.id -ceq 'ui.popup.source.actual' -and $_.status -ceq 'Passed' }) {
+  $result.evidence += "; actual declarative predicate/evaluator checks=$($rootPopupResults.Count), accepted=1, refused=$($rootPopupResults.Count - 1)"
 }
 Assert-UiContract ($activationCases.Count -eq 6 -and $popupCases.Count -eq 9 -and $results.Count -eq 15) `
   'Source guard case count changed'

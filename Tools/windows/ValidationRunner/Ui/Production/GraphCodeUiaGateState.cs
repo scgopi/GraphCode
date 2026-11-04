@@ -6,6 +6,20 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Automation;
 public static class GraphCodeUiaGateState {
+  private static readonly object ClientSideProviderRegistration = new object();
+  private static string RegisteredClientSideProvider;
+  // WPF inspects caller types while initializing proxies; a PowerShell dynamic frame has no type.
+  [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  public static void RegisterClientSideProviderAssembly(System.Reflection.AssemblyName assemblyName) {
+    ArgumentNullException.ThrowIfNull(assemblyName);
+    lock (ClientSideProviderRegistration) {
+      if (RegisteredClientSideProvider == assemblyName.FullName) return;
+      ClientSettings.RegisterClientSideProviderAssembly(assemblyName);
+      GC.KeepAlive(assemblyName);
+      RegisteredClientSideProvider = assemblyName.FullName;
+    }
+  }
+
   private sealed class NativeInputOperations : IUiaInputOperations {
     public bool IsRetainedProcessAlive(uint processId) { return GraphCodeUiaGateState.IsRetainedProcessAlive(processId); }
     public uint WindowProcessId(IntPtr window) { return GraphCodeUiaGateState.WindowProcessId(window); }
@@ -159,6 +173,60 @@ public static class GraphCodeUiaGateState {
   private static extern bool BringWindowToTop(IntPtr window);
   [DllImport("kernel32.dll")]
   private static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")]
+  private static extern IntPtr GetThreadDpiAwarenessContext();
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+  [DllImport("user32.dll")]
+  private static extern bool AreDpiAwarenessContextsEqual(IntPtr first, IntPtr second);
+
+  public readonly struct ThreadDpiContext {
+    public IntPtr Context { get; }
+    public uint ThreadId { get; }
+    public ThreadDpiContext(IntPtr context, uint threadId) { Context = context; ThreadId = threadId; }
+  }
+
+  public static ThreadDpiContext EnterPhysicalDpiCoordinates() {
+    var scope = new ThreadDpiContext(GetThreadDpiAwarenessContext(), GetCurrentThreadId());
+    if (scope.Context == IntPtr.Zero)
+      throw new InvalidOperationException("Cannot capture UIA thread DPI context");
+    IntPtr result = SetThreadDpiAwarenessContext(new IntPtr(-4));
+    int error = Marshal.GetLastWin32Error();
+    if (result == IntPtr.Zero)
+      throw new InvalidOperationException("Cannot enter UIA thread PMv2 context: native set failed, error=" + error);
+    IntPtr observed = GetThreadDpiAwarenessContext();
+    if (!AreDpiAwarenessContextsEqual(observed, new IntPtr(-4))) {
+      var failure = new InvalidOperationException("UIA thread did not admit PMv2 awareness");
+      try { RestorePhysicalDpiCoordinates(scope); }
+      catch (InvalidOperationException restoreFailure) {
+        failure.Data["UiaDpiRestoreFailure"] = restoreFailure;
+        Console.Error.WriteLine("UIA_DPI_RESTORE_ERROR=" + restoreFailure.Message);
+      }
+      throw failure;
+    }
+    Console.WriteLine("UIA_DPI_ENTER thread={0} captured={1:X} observed={2:X}",
+      scope.ThreadId, scope.Context.ToInt64(), observed.ToInt64());
+    return scope;
+  }
+
+  public static void RestorePhysicalDpiCoordinates(ThreadDpiContext scope) {
+    if (scope.Context == IntPtr.Zero)
+      throw new InvalidOperationException("Cannot restore an invalid UIA thread DPI context");
+    uint thread = GetCurrentThreadId();
+    if (thread != scope.ThreadId)
+      throw new InvalidOperationException("UIA DPI scope must restore on its capture thread");
+    // The setter's inherited return token is not the stable pre-entry context.
+    IntPtr result = SetThreadDpiAwarenessContext(scope.Context);
+    int error = Marshal.GetLastWin32Error();
+    if (result == IntPtr.Zero)
+      throw new InvalidOperationException("Cannot restore UIA thread DPI context: native set failed, error=" + error);
+    IntPtr observed = GetThreadDpiAwarenessContext();
+    if (!AreDpiAwarenessContextsEqual(observed, scope.Context))
+      throw new InvalidOperationException("Cannot restore UIA thread DPI context: exact context comparison failed");
+    Console.WriteLine("UIA_DPI_RESTORE thread={0} captured={1:X} observed={2:X} exact=true",
+      thread, scope.Context.ToInt64(), observed.ToInt64());
+  }
+
   [DllImport("kernel32.dll")]
   private static extern void Sleep(uint milliseconds);
   [DllImport("user32.dll", SetLastError = true)]
@@ -668,6 +736,7 @@ public static class GraphCodeUiaGateState {
   ) { return UiaInputSafety.IsOwnedPopupInput(owner, popup, expectedProcessId, popupProcessId, foregroundProcessId, foregroundRoot, pointProcessId, pointRoot, popupVisible); }
 
   public static PopupItemHit ClickPopupMenuItem(IntPtr popup, IntPtr owner, int position, int commandId, uint expectedProcessId) { return InputSafety.ClickPopupMenuItem(popup, owner, position, commandId, expectedProcessId); }
+  public static PopupItemHit ClickPopupMenuItemStrict(IntPtr popup, IntPtr owner, int position, int commandId, uint expectedProcessId) { return InputSafety.ClickPopupMenuItemStrict(popup, owner, position, commandId, expectedProcessId); }
   private static void RequireOwnedPopupForeground(IntPtr popup, IntPtr owner, uint expectedProcessId) { InputSafety.RequireOwnedPopupForeground(popup, owner, expectedProcessId); }
   // Sidebar.updateBannerRect/updateBannerAt are pixel-only hit-test geometry with
   // no UIA identity of their own, so a genuine click requires the real live client
@@ -1073,6 +1142,7 @@ public static class GraphCodeUiaGateState {
     return hit;
   }
   public static int SendKeyInput(IntPtr owner, uint expectedProcessId, IntPtr expectedFocus, ushort virtualKey, int count) { return InputSafety.SendKeyInput(owner, expectedProcessId, expectedFocus, virtualKey, count); }
+  public static int SendKeyInput(IntPtr owner, uint expectedProcessId, IntPtr expectedFocus, ushort virtualKey, int count, bool controlModifier) { return InputSafety.SendKeyInput(owner, expectedProcessId, expectedFocus, virtualKey, count, controlModifier); }
   public static int[] SendUnicodeInput(IntPtr owner, uint expectedProcessId, IntPtr expectedFocus, string text) { return InputSafety.SendUnicodeInput(owner, expectedProcessId, expectedFocus, text); }
   public static bool TypeEditTextById(IntPtr parent, int controlId, string text) { return InputSafety.TypeEditTextById(parent, controlId, text); }
   public static int[] VisibleChildIds(IntPtr parent, int first, int last) {

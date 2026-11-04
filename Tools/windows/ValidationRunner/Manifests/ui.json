@@ -1,5 +1,68 @@
 {
   "units": [
+    { "id": "ui.cards-pilot.target-valid", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.foreign-project", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.missing-target", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.duplicate-target", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.cancel-unchanged", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.cancel-mutation-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.empty-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.missing-graph-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.timed-effect", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.goal-effect", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.custody-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.topology-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.pointer-valid", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.pointer-foreign-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.pointer-missed-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.completion-positive", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.completion-empty-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.cleanup-primary-preserved", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.default-source-boundary", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.production-environment-isolated", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.persisted-root-and-child-schema", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.private-job-and-overlapping-members", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.protected-console-companion", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.precompleted-onboarding-readiness", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.production-card-identity-binding", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.strict-native-field-transaction", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.original-cli-exit-budget", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.completed-cli-ownership-not-identity", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.popup-pointer-preparation", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-source-boundary", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-filename-identity", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-fixture-valid", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-bare-goal-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-import-valid", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-flat-import-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-stale-identity-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-custody-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-spawn-scope-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-higher-total", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-unknown-active", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-gui-exited", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-wrong-birth", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-lost-job", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-unfinished-status", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-missing-effect", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-nonempty-unclassified", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-drain-error", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.pointer-delivered", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.keyboard-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.selection-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.invalid-menu-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.synthetic-hover-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.foreign-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.null-popup-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.wrong-command-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.default-fallback-preserved", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.native.dpi.physical-coordinates", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.native.dpi.exact-restore", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.native.dpi.invalid-restore", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.native.dpi.failed-set", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.native.dpi.foreign-thread", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.native.dpi.source-boundary", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.native.dpi.primary-error-preserved", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.control-click.flat-root", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.control-click.nested-root", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.control-click.same-pid-unrelated-root", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
@@ -567,6 +630,96 @@
     },
     {
       "id": "ui.mock.isolation.ordinary-diagnostic",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.absent",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.admitted",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.delayed-admitted",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.expired-admission",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.wrong-hwnd",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.foreign-pid",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.null-foreground",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.timeout",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.hidden",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.disabled",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.hung",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.held-identity",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.invalid-mode",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.empty-mode",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.guard-cleanup-order",
       "owner": "Ui",
       "minimumCount": 1,
       "requiredGroups": []

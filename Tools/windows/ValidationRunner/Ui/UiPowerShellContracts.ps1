@@ -254,7 +254,101 @@ foreach ($mutant in @(
       ($observation | ConvertTo-Json -Compress -Depth 6 -EscapeHandling EscapeNonAscii))
   }
 }
-Assert-UiContract ($results.Count -eq 25) 'PowerShell UI fixture requires five isolation and twenty recovery cases'
+$foregroundCases = @(
+  'absent', 'admitted', 'delayed-admitted', 'expired-admission', 'wrong-hwnd', 'foreign-pid', 'null-foreground', 'timeout',
+  'hidden', 'disabled', 'hung', 'held-identity', 'invalid-mode', 'empty-mode'
+)
+foreach ($name in $foregroundCases) {
+  Invoke-UiCase "ui.foreground.supervised.$name" {
+    $definition = Get-ProductionDefinition 'Wait-UiaSupervisedForeground'
+    Assert-UiContract ($definition -notmatch 'ActivateWindow|SetForegroundWindow|AttachThreadInput|SendInput|PostKeyboard|PostMouse') `
+      'Supervised admission must only observe, never activate or inject input'
+    $definition = $definition.Replace('[Environment]::GetEnvironmentVariables("Process")', '$state.environment').
+      Replace('[Diagnostics.Stopwatch]::StartNew()', '$state.clock').
+      Replace('[GraphCodeUiaGateState]::WindowProcessId($window)', '$state.windowProcessId').
+      Replace('[GraphCodeUiaGateState]::WindowClass($window)', '$state.windowClass').
+      Replace('[GraphCodeUiaGateState]::WindowOwner($window)', '$state.windowOwner').
+      Replace('[GraphCodeUiaGateState]::WindowIsVisible($window)', '$state.visible').
+      Replace('[GraphCodeUiaGateState]::WindowIsEnabled($window)', '$state.enabled').
+      Replace('[GraphCodeUiaGateState]::WindowTitle($window)', '"Owned GraphCode"').
+      Replace('[GraphCodeUiaGateState]::IsForegroundWindow($window)', '($state.foreground -eq $window -and $window -ne [IntPtr]::Zero)')
+    Assert-UiContract (-not $definition.Contains('[GraphCodeUiaGateState]::')) 'Unmocked native call in readiness test'
+    . ([scriptblock]::Create($definition))
+    function Start-Sleep {
+      param([int] $Milliseconds)
+      $state.elapsed += $Milliseconds
+      if ($name -cin @('delayed-admitted', 'expired-admission')) { $state.foreground = [IntPtr]17 }
+      if ($name -ceq 'expired-admission') { $state.elapsed = 100 }
+    }
+    function Format-WindowHandle($window) { return "0x$($window.ToInt64().ToString('x'))" }
+    $state = @{
+      environment = @{ GRAPHCODE_UIA_SUPERVISED_FOREGROUND = '1' }; elapsed = 0
+      windowProcessId = 4242; windowClass = 'GraphCodeWindowsShell'; windowOwner = [IntPtr]::Zero
+      visible = $true; enabled = $true; foreground = [IntPtr]17; refreshes = 0
+    }
+    $state.clock = [pscustomobject]@{}
+    $state.clock | Add-Member ScriptProperty ElapsedMilliseconds { return $state.elapsed }
+    $owned = [pscustomobject]@{
+      Id = 4242; Handle = [IntPtr]23; MainWindowHandle = [IntPtr]17; HasExited = $false; Responding = $true
+    }
+    $owned | Add-Member ScriptMethod Refresh {
+      $state.refreshes++
+      if ($name -ceq 'held-identity') { $this.Handle = [IntPtr]99 }
+    }
+    switch ($name) {
+      absent { $state.environment.Clear() }
+      'wrong-hwnd' { $state.foreground = [IntPtr]18 }
+      'delayed-admitted' { $state.foreground = [IntPtr]18 }
+      'expired-admission' { $state.foreground = [IntPtr]18 }
+      'foreign-pid' { $state.windowProcessId = 7777 }
+      'null-foreground' { $state.foreground = [IntPtr]::Zero }
+      timeout { $state.foreground = [IntPtr]18 }
+      hidden { $state.visible = $false }
+      disabled { $state.enabled = $false }
+      hung { $owned.Responding = $false }
+      'invalid-mode' { $state.environment.GRAPHCODE_UIA_SUPERVISED_FOREGROUND = 'true' }
+      'empty-mode' { $state.environment.GRAPHCODE_UIA_SUPERVISED_FOREGROUND = '' }
+    }
+    $failure = $null
+    $output = @()
+    try { $output = @(Wait-UiaSupervisedForeground $owned ([IntPtr]17) 100 6>&1) } catch { $failure = $_ }
+    $accepted = $name -cin @('absent', 'admitted', 'delayed-admitted')
+    Assert-UiContract (($null -eq $failure) -eq $accepted) "Wrong supervised admission outcome: $name"
+    if ($name -ceq 'absent') {
+      Assert-UiContract ($state.refreshes -eq 0 -and $state.elapsed -eq 0 -and $output.Count -eq 0) `
+        'Absent mode changed ordinary CI behavior'
+    } elseif ($name -cin @('admitted', 'delayed-admitted')) {
+      $expectedElapsed = if ($name -ceq 'admitted') { 0 } else { 50 }
+      $expectedRefreshes = if ($name -ceq 'admitted') { 1 } else { 2 }
+      Assert-UiContract ($state.refreshes -eq $expectedRefreshes -and $state.elapsed -eq $expectedElapsed -and
+        ($output -join "`n").Contains('UIA_AWAIT_OWNED_FOREGROUND=') -and
+        ($output -join "`n").Contains('UIA_OWNED_FOREGROUND_ADMITTED=')) 'Owned foreground was not observed and reported'
+    } else {
+      Assert-UiContract ($failure.Exception.Message -match 'Supervised foreground') 'Readiness failed for an unrelated reason'
+      if ($name -cin @('wrong-hwnd', 'null-foreground', 'timeout', 'expired-admission')) {
+        Assert-UiContract ($state.elapsed -eq 100) 'Foreground refusal did not honor the monotonic deadline'
+      }
+    }
+  }
+}
+Invoke-UiCase 'ui.foreground.supervised.guard-cleanup-order' {
+  $call = $source.IndexOf('  Wait-UiaSupervisedForeground $process $shellWindow', [StringComparison]::Ordinal)
+  $guard = $source.IndexOf('  Require (Ensure-ShellForeground $shellWindow "sidebar update banner click")', [StringComparison]::Ordinal)
+  $cleanup = $source.LastIndexOf('Stop-UiaOwnedProcessTrees @(', [StringComparison]::Ordinal)
+  $restore = $source.LastIndexOf('RestorePhysicalDpiCoordinates($gateDpiScope)', [StringComparison]::Ordinal)
+  Assert-UiContract ($call -gt $source.IndexOf('$updateBanner = @(') -and $guard -gt $call -and
+    $cleanup -gt $guard -and $restore -gt $cleanup) 'Readiness escaped the ordinary input guard/owned cleanup/DPI boundary'
+  $ensure = Get-ProductionDefinition 'Ensure-ShellForeground'
+  Assert-UiContract ($ensure.Contains('[int] $TimeoutMilliseconds = 5000') -and
+    $ensure.Contains('[GraphCodeUiaGateState]::ActivateWindow($window)') -and
+    $ensure.Contains('$acquired = $activated -and [GraphCodeUiaGateState]::IsForegroundWindow($window)')) `
+    'Original five-second foreground assertion was replaced'
+  $definition = Get-ProductionDefinition 'Wait-UiaSupervisedForeground'
+  Assert-UiContract ($definition.Contains('[int] $TimeoutMilliseconds = 60000') -and
+    $definition.Contains('[Diagnostics.Stopwatch]::StartNew()') -and
+    $definition.Contains('throw "Supervised foreground admission timed out')) 'Bounded fail-closed supervision missing'
+}
+Assert-UiContract ($results.Count -eq 40) 'PowerShell UI fixture requires isolation, recovery and supervised foreground cases'
 [IO.File]::WriteAllText((Join-Path $ArtifactRoot 'ui-powershell-results.json'),
   ($results | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
 foreach ($result in $results) { Write-Output ('UI_CASE_RESULT=' + ($result | ConvertTo-Json -Compress -Depth 8 -EscapeHandling EscapeNonAscii)) }

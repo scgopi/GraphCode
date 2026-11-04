@@ -226,7 +226,13 @@ function Assert-CapRejects {
     param([scriptblock]$Action, [string]$Expected)
     try { & $Action | Out-Null }
     catch {
-        Assert-CapTest ($_.Exception.Message.Contains($Expected)) "Wrong refusal: $($_.Exception.Message)"
+        if (-not $_.Exception.Message.Contains($Expected)) {
+            $failure = [InvalidOperationException]::new("Wrong refusal: $($_.Exception.Message)", $_.Exception)
+            $failure.Data['CapTestDetail'] = [ordered]@{
+                originalStack = $_.ScriptStackTrace; fullyQualifiedErrorId = $_.FullyQualifiedErrorId
+            }
+            throw $failure
+        }
         return $_.Exception.Message
     }
     throw "Expected refusal containing '$Expected'."
@@ -3040,6 +3046,39 @@ function Invoke-CapMatchedContracts {
                 's-goal-unwired-unselected,s-goal-unwired-selected,s-main-cycle-unselected,s-main-cycle-selected' -and
             $postFixPlan.evidenceClassification -ceq 'POSTFIX_CARD_PARITY_FOCUSED_VALIDATION_V1') `
             'Post-fix card plan did not preserve the exact after-only four-scene inventory.'
+        $unselected=$postFix | ConvertTo-Json -Depth 30 | ConvertFrom-Json -DateKind String
+        $unselected.focusedCapture.profile='PostFixCardsUnselected'
+        $unselected.focusedCapture.sceneNames=@('s-goal-unwired-unselected','s-main-cycle-unselected')
+        $unselected.focusedCapture.evidenceClassification='POSTFIX_CARD_UNSELECTED_FOCUSED_VALIDATION_V1'
+        $unselectedPlan=Get-CapMatchedCapturePlan -Job $unselected
+        Assert-CapSceneContract -Job $unselected
+        Assert-CapTest ($unselectedPlan.profile -ceq 'PostFixCardsUnselected' -and
+            ($unselectedPlan.sceneNames -join ',') -ceq 's-goal-unwired-unselected,s-main-cycle-unselected' -and
+            $unselectedPlan.phases.Count -eq 1 -and $unselectedPlan.phases[0] -ceq 'after' -and
+            $unselectedPlan.includeRestart -ceq $false -and $unselectedPlan.officialParityEvidence -ceq $false) `
+            'Unselected card profile must expose only the two authorized current-source scenes.'
+        $unselectedMutations=@('unknown-extra','selected-scene','duplicate','wrong-classification',
+            'before-phase','parity-overclaim','wrong-baseline','wrong-provenance')
+        foreach ($mutation in $unselectedMutations) {
+            $changed=$unselected | ConvertTo-Json -Depth 30 | ConvertFrom-Json -DateKind String
+            switch ($mutation) {
+                'unknown-extra' {$changed.focusedCapture.sceneNames+='s-unknown'}
+                'selected-scene' {$changed.focusedCapture.sceneNames[0]='s-goal-unwired-selected'}
+                'duplicate' {$changed.focusedCapture.sceneNames[1]=$changed.focusedCapture.sceneNames[0]}
+                'wrong-classification' {$changed.focusedCapture.evidenceClassification=$postFixPlan.evidenceClassification}
+                'before-phase' {$changed.focusedCapture.phases=@('before')}
+                'parity-overclaim' {$changed.focusedCapture.officialParityEvidence=$true}
+                'wrong-baseline' {
+                    $changed.binaries.before.source='a8b09434fe41a61030fd290f7d065ec6d0db8005'
+                    $changed.binaries.before.binaryBuiltAtSource=$changed.binaries.before.source
+                    $changed.captureContract.windowIdentities.before.sourceCommit=$changed.binaries.before.source
+                }
+                'wrong-provenance' {$changed.binaries.backendFixture.sha256='not-a-hash'}
+            }
+            $diagnostic=if ($mutation -ceq 'wrong-baseline') {'Focused DPI-parametric'} elseif (
+                $mutation -ceq 'wrong-provenance') {'DPI-parametric'} else {'Focused matched capture'}
+            $null=Assert-CapRejects {Assert-CapSceneContract -Job $changed} $diagnostic
+        }
         $supervisorSource=[IO.File]::ReadAllText($supervisorPath)
         $workerSource=[IO.File]::ReadAllText($workerPath)
         $prepareSource=[IO.File]::ReadAllText((Join-Path $driverDirectory 'Prepare-FocusedUiCapture.ps1'))
@@ -3116,9 +3155,10 @@ function Invoke-CapMatchedContracts {
             $changed.scenes=@($changed.scenes | Where-Object name -CNE $name)
             $null=Assert-CapRejects {Assert-CapSceneContract -Job $changed} 'Matched scene'
         }
-        return @{positive=5;negative=($names.Count+1+$focusedMutations.Count)
+        return @{positive=6;negative=($names.Count+1+$focusedMutations.Count+$unselectedMutations.Count)
             budgetAcceptedSeconds=@(810,1710);budgetRefusedSeconds=1711
             names=$names;focused=$plan;postFixFocused=$postFixPlan;focusedMutations=$focusedMutations
+            unselectedFocused=$unselectedPlan;unselectedMutations=$unselectedMutations
             prelaunchPaths=(Invoke-CapFocusedPrelaunchPathContract)
             expectedImageCounts=(Invoke-CapFocusedExpectedImageCountContract)
             wireCancellation=(Invoke-CapMatchedWireCancellationContract)
@@ -4413,6 +4453,20 @@ function Invoke-CapMatchedSceneRoutingContract {
             $cycleScene.observation.cycleRoute.returnAction -ceq 'Show in Graph') `
             'Post-fix focused executor did not split disposable unwired routes or preserve cycle identities.'
         $postFixSceneCount=$captured.Count
+        $captured.Clear();$seeded.Clear();$model.restart=0;$model.hover=0
+        $matchedCapturePlan=[pscustomobject]@{profile='PostFixCardsUnselected'}
+        $unselectedScenes=@(Get-CapMatchedFocusedSceneNames -Profile PostFixCardsUnselected)
+        Invoke-CapMatchedScenes -Phase 'after' -SceneNames $unselectedScenes -SkipRestart
+        $wireScene=@($captured | Where-Object scene -CEQ 's-goal-unwired-unselected')[0]
+        $cycleScene=@($captured | Where-Object scene -CEQ 's-main-cycle-unselected')[0]
+        Assert-CapTest ($captured.Count -eq 2 -and $seeded.Count -eq 0 -and $model.restart -eq 0 -and
+            ($captured.scene -join ',') -ceq 's-goal-unwired-unselected,s-main-cycle-unselected' -and
+            $wireScene.observation.recoveryRoutes.wire.mutation -ceq 'NONE_ARMED_THEN_CANCELLED' -and
+            $null -eq $wireScene.observation.recoveryRoutes.markEntry -and
+            $cycleScene.observation.cycleHierarchy.selected -ceq $false -and
+            $cycleScene.observation.cycleHierarchy.inspect.invokable -ceq $true -and
+            $cycleScene.observation.cycleHierarchy.reason.invokable -ceq $false) `
+            'Two-scene executor must preserve recovery and cycle hierarchy without selected scenes.'
         $captured.Clear();$seeded.Clear();$model.appCleanup=0;$model.seedCleanup=0;$model.peerCleanup=0
         $matchedCapturePlan=[pscustomobject]@{profile='TerminalChrome'}
         $model.captureFailure=$true
@@ -6300,6 +6354,15 @@ function Invoke-CapLiveNativeBindingContracts {
 }
 
 function Invoke-CapPreflightReportContract {
+    $unexpected = [ArgumentOutOfRangeException]::new('valueCount', 'UNEXPECTED_REFUSAL_DIAGNOSTIC')
+    $wrongRefusal = $null
+    try { $null = Assert-CapRejects { throw $unexpected } 'EXPECTED_OWNERSHIP_REFUSAL' }
+    catch { $wrongRefusal = $_ }
+    Assert-CapTest ($null -ne $wrongRefusal -and
+        [object]::ReferenceEquals($wrongRefusal.Exception.InnerException, $unexpected) -and
+        $wrongRefusal.Exception.Data.Contains('CapTestDetail') -and
+        -not [string]::IsNullOrWhiteSpace($wrongRefusal.Exception.Data['CapTestDetail'].originalStack)) `
+        'Unexpected refusal lost its original exception or script stack.'
     $ast = [Management.Automation.Language.Parser]::ParseFile($supervisorPath,[ref]$null,[ref]$null)
     $definitions = @($ast.FindAll({ param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Assert-CapPreflightReport'

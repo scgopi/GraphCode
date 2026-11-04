@@ -1004,6 +1004,49 @@ function Retain-FocusWithRetry(
   return [pscustomobject]@{ Focused = $null; Candidate = $candidate }
 }
 
+function Wait-UiaSupervisedForeground(
+  $process,
+  [IntPtr] $window,
+  [int] $TimeoutMilliseconds = 60000
+) {
+  $environment = [Environment]::GetEnvironmentVariables("Process")
+  if (-not $environment.Contains("GRAPHCODE_UIA_SUPERVISED_FOREGROUND")) { return }
+  Require ($environment["GRAPHCODE_UIA_SUPERVISED_FOREGROUND"] -ceq "1") `
+    "Supervised foreground mode requires the explicit process-only value 1"
+  $heldHandle = $process.Handle
+  $ownedId = $process.Id
+  Require ($heldHandle -ne [IntPtr]::Zero -and $window -ne [IntPtr]::Zero -and $ownedId -gt 0) `
+    "Supervised foreground admission requires the retained launch identity"
+  $watch = [Diagnostics.Stopwatch]::StartNew()
+  $announced = $false
+  while ($watch.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+    $process.Refresh()
+    Require ($process.Handle -eq $heldHandle -and -not $process.HasExited -and $process.Id -eq $ownedId -and
+      $process.MainWindowHandle -eq $window) "Supervised foreground retained process/window identity changed"
+    Require ([GraphCodeUiaGateState]::WindowProcessId($window) -eq $ownedId -and
+      [GraphCodeUiaGateState]::WindowClass($window) -ceq "GraphCodeWindowsShell" -and
+      [GraphCodeUiaGateState]::WindowOwner($window) -eq [IntPtr]::Zero -and
+      [GraphCodeUiaGateState]::WindowIsVisible($window) -and
+      [GraphCodeUiaGateState]::WindowIsEnabled($window) -and $process.Responding) `
+      "Supervised foreground requires the healthy visible enabled owned top-level window"
+    if (-not $announced) {
+      $record = [ordered]@{
+        mode = "supervised-or-tool-assisted"; processId = $ownedId; window = Format-WindowHandle $window
+        title = [GraphCodeUiaGateState]::WindowTitle($window); timeoutMilliseconds = $TimeoutMilliseconds
+      }
+      Write-Host ("UIA_AWAIT_OWNED_FOREGROUND=" + ($record | ConvertTo-Json -Compress))
+      [Console]::Out.Flush()
+      $announced = $true
+    }
+    if ([GraphCodeUiaGateState]::IsForegroundWindow($window) -and $watch.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+      Write-Host "UIA_OWNED_FOREGROUND_ADMITTED=mode=supervised-or-tool-assisted processId=$ownedId window=$(Format-WindowHandle $window) elapsedMilliseconds=$($watch.ElapsedMilliseconds)"
+      return
+    }
+    Start-Sleep -Milliseconds 50
+  }
+  throw "Supervised foreground admission timed out without the exact owned foreground window"
+}
+
 function Ensure-ShellForeground(
   [IntPtr] $window,
   [string] $label,
@@ -1944,6 +1987,36 @@ function Test-ScreenPixelNear(
   }
 }
 
+function Test-UiaNativeRootChrome($root, $candidate, [string[]]$runtimeIds, [string[]]$chromeIds) {
+  if($root.window -le 0 -or $root.processId -le 0 -or $root.nativeProcessId -ne $root.processId -or
+      $root.owner -ne 0 -or $root.class -cne 'GraphCodeWindowsShell' -or
+      $root.automationId -cne 'graphcode-root' -or [string]::IsNullOrWhiteSpace($root.runtime)){
+    return $false
+  }
+  $role=switch -CaseSensitive ($candidate.automationId) {
+    'TitleBar' {'ControlType.TitleBar'}
+    'MenuBar' {'ControlType.MenuBar'}
+    default {return $false}
+  }
+  if($candidate.processId -ne $root.processId -or $candidate.role -cne $role -or
+      $candidate.class -cne '' -or $candidate.nativeWindow -ne 0 -or
+      $candidate.nativeProcessId -ne 0 -or $candidate.nativeClass -cne '' -or
+      $candidate.parentWindow -ne $root.window -or $candidate.parentRuntime -cne $root.runtime -or
+      $candidate.isControlElement -ne $true -or $candidate.isContentElement -ne $false -or
+      [string]::IsNullOrWhiteSpace($candidate.runtime) -or $candidate.runtime -ceq $root.runtime -or
+      @($runtimeIds|Where-Object {$_ -ceq $candidate.runtime}).Count -ne 1 -or
+      @($chromeIds|Where-Object {$_ -ceq $candidate.automationId}).Count -ne 1){
+    return $false
+  }
+  $parts=$candidate.runtime.Split(',')
+  if($parts.Count -ne 3 -or $parts[1] -cne [string]$root.window){return $false}
+  $a=@($root.bounds);$b=@($candidate.bounds)
+  if($a.Count -ne 4 -or $b.Count -ne 4){return $false}
+  foreach($value in @($a+$b)){if(-not [double]::IsFinite([double]$value)){return $false}}
+  return ($a[2] -gt $a[0] -and $a[3] -gt $a[1] -and $b[2] -gt $b[0] -and $b[3] -gt $b[1] -and
+    $b[0] -ge $a[0] -and $b[1] -ge $a[1] -and $b[2] -le $a[2] -and $b[3] -le $a[3])
+}
+
 function Assert-FragmentLinks(
   [System.Windows.Automation.AutomationElement] $parent,
   [System.Windows.Automation.TreeWalker] $walker,
@@ -1954,8 +2027,76 @@ function Assert-FragmentLinks(
   $allowedNativeIds = if ($label -match "root$") { @("4601", "4602") } else { @() }
   $unexpectedIds = @($allChildren | ForEach-Object { $_.Current.AutomationId } |
     Where-Object { $_ -and $_ -notin $expectedIds -and $_ -notin $allowedNativeIds })
+  if ($unexpectedIds.Count -gt 0 -and $label -match "root$") {
+    try {
+      $diagnosticClock = [Diagnostics.Stopwatch]::StartNew()
+      $candidateIds = @("TitleBar", "MenuBar")
+      $knownChildren = @($allChildren | Where-Object { $_.Current.AutomationId -cin $candidateIds })
+      $rootProcessId = $parent.Current.ProcessId
+      $rootWindow = [IntPtr]::new([long]$parent.Current.NativeWindowHandle)
+      Require ($parent.Current.AutomationId -ceq 'graphcode-root' -and $rootProcessId -gt 0 -and
+        [GraphCodeUiaGateState]::WindowProcessId($rootWindow) -eq $rootProcessId -and
+        [GraphCodeUiaGateState]::WindowClass($rootWindow) -ceq 'GraphCodeWindowsShell') `
+        'Unexpected-root diagnosis requires exact owned shell root'
+      $projection = [Collections.Generic.List[object]]::new()
+      foreach ($candidate in @($knownChildren | Select-Object -First 2)) {
+        Require ($diagnosticClock.ElapsedMilliseconds -lt 5000) 'Unexpected-root diagnostic control budget expired'
+        $current = $candidate.Current
+        $row = [ordered]@{ automationId = $current.AutomationId; processId = $current.ProcessId }
+        if ($current.ProcessId -eq $rootProcessId -and
+            [GraphCodeUiaGateState]::WindowProcessId($rootWindow) -eq $rootProcessId) {
+          $native = [IntPtr]::new([long]$current.NativeWindowHandle)
+          $actualParent = $walker.GetParent($candidate)
+          $row.class = $current.ClassName
+          $row.role = $current.ControlType.ProgrammaticName
+          $row.runtime = $candidate.GetRuntimeId() -join ','
+          $row.parentRuntime = $actualParent.GetRuntimeId() -join ','
+          $row.parentWindow = [long]$actualParent.Current.NativeWindowHandle
+          $row.isControlElement = $current.IsControlElement
+          $row.isContentElement = $current.IsContentElement
+          $row.bounds = @($current.BoundingRectangle.Left, $current.BoundingRectangle.Top,
+            $current.BoundingRectangle.Right, $current.BoundingRectangle.Bottom)
+          $row.nativeWindow = $native.ToInt64()
+          $row.nativeProcessId = [GraphCodeUiaGateState]::WindowProcessId($native)
+          if ($native -eq [IntPtr]::Zero -or $row.nativeProcessId -eq $rootProcessId) {
+            $row.nativeClass = [GraphCodeUiaGateState]::WindowClass($native)
+          }
+          Require ($diagnosticClock.ElapsedMilliseconds -lt 5000) 'Unexpected-root diagnostic control budget expired'
+        }
+        $projection.Add($row)
+      }
+      $rootSnapshot=@{window=$rootWindow.ToInt64();processId=$rootProcessId
+        nativeProcessId=[GraphCodeUiaGateState]::WindowProcessId($rootWindow)
+        owner=[GraphCodeUiaGateState]::WindowOwner($rootWindow).ToInt64()
+        class=[GraphCodeUiaGateState]::WindowClass($rootWindow);automationId=$parent.Current.AutomationId
+        runtime=($parent.GetRuntimeId() -join ',');bounds=[GraphCodeUiaGateState]::WindowBounds($rootWindow)}
+      if($knownChildren.Count -le 2){
+        $runtimeIds=@($allChildren|ForEach-Object {$_.GetRuntimeId() -join ','})
+        $chromeIds=@($knownChildren|ForEach-Object {$_.Current.AutomationId})
+        $validatedChrome=@($projection|Where-Object {
+          Test-UiaNativeRootChrome $rootSnapshot $_ $runtimeIds $chromeIds
+        }|ForEach-Object {$_.automationId})
+        Require ($diagnosticClock.ElapsedMilliseconds -lt 5000) 'Unexpected-root diagnostic control budget expired'
+        $unexpectedIds=@($unexpectedIds|Where-Object {$_ -cnotin $validatedChrome})
+      }
+      if($unexpectedIds.Count -gt 0){Write-Host ("UIA_FRAGMENT_ROOT_UNEXPECTED_STRUCTURE=" + ([ordered]@{
+        observed = [DateTimeOffset]::Now.ToString('o'); label = $label
+        rootProcessId = $rootProcessId; rootWindow = $rootWindow.ToInt64()
+        rootClass = [GraphCodeUiaGateState]::WindowClass($rootWindow)
+        rootRuntime = ($parent.GetRuntimeId() -join ',')
+        rootBounds = [GraphCodeUiaGateState]::WindowBounds($rootWindow)
+        unexpectedCount = $unexpectedIds.Count; knownCandidateCount = $knownChildren.Count
+        candidateProjectionLimit = 2; truncated = ($knownChildren.Count -gt 2)
+        candidates = $projection.ToArray(); admission = 'exact owned-root native-chrome predicate only'
+      } | ConvertTo-Json -Depth 5 -Compress))}
+    } catch {
+      Write-Warning "Unexpected-root structural diagnosis failed; original child rejection remains: $_"
+    }
+  }
   Require ($unexpectedIds.Count -eq 0) "$label exposed unexpected children: $($unexpectedIds -join ',')"
   $children = @($allChildren | Where-Object { $_.Current.AutomationId -in $expectedIds })
+  Require (@($children|Where-Object {$_.Current.ProcessId -ne $parent.Current.ProcessId}).Count -eq 0) `
+    "$label exposed a foreign required app child"
   $ids = @($children | ForEach-Object { $_.Current.AutomationId })
   Assert-Ids $ids $expectedIds "$label direct children"
   for ($i = 0; $i -lt $children.Count; $i++) {
@@ -5041,6 +5182,15 @@ function Invoke-MultiProjectRenamePhase {
   }
 }
 
+$cardsPilotEnvironment = [Environment]::GetEnvironmentVariables("Process")
+if ($cardsPilotEnvironment.Contains("GRAPHCODE_CARDS_NATIVE_ACCEPTANCE_PLAN")) {
+  Require (-not [string]::IsNullOrWhiteSpace($cardsPilotEnvironment["GRAPHCODE_CARDS_NATIVE_ACCEPTANCE_PLAN"])) `
+    "Cards native acceptance requires the explicit owned plan path"
+  . (Join-Path $PSScriptRoot "CardsAcceptance.Live.ps1")
+  Invoke-CardsNativePilot $cardsPilotEnvironment["GRAPHCODE_CARDS_NATIVE_ACCEPTANCE_PLAN"]
+  return
+}
+
 $oldZmx = [Environment]::GetEnvironmentVariable("GRAPHCODE_ZMX")
 $oldCwd = [Environment]::GetEnvironmentVariable("GRAPHCODE_GATE_CWD")
 $oldGate = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_GATE")
@@ -5075,6 +5225,7 @@ $sandboxPath = $null
 $sandboxCreated = $false
 $sandboxCleanupError = $null
 $gateFailure = $null
+$gateDpiScope = $null
 $fixtureProjectPath = $null
 $fixtureSafePath = $null
 $fixtureUnsafePath = $null
@@ -5106,6 +5257,7 @@ if ($providerZmxPath) {
   }
 }
 try {
+  $gateDpiScope = [GraphCodeUiaGateState]::EnterPhysicalDpiCoordinates()
   $tempRoot = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
     [IO.Path]::GetTempPath()
   } else {
@@ -5388,6 +5540,7 @@ try {
     }) | Select-Object -First 1
   Require ($null -ne $updateBanner) `
     "sidebar update banner did not expose its published UIA target"
+  Wait-UiaSupervisedForeground $process $shellWindow
   Require (Ensure-ShellForeground $shellWindow "sidebar update banner click") `
     "GraphCode shell did not reacquire foreground before the sidebar update banner click"
   $focusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
@@ -8590,8 +8743,15 @@ try {
     if ($_.Separator) { "<separator>" } else { [string]$_.Text }
   })
   Require (($plainLoopOrder -join "|") -ceq
-           "Open Terminal|Rename...`tF2|Save as Template...|<separator>|Edit Details...|<separator>|Delete Loop...`tDelete") `
+           "Open Terminal|Change to Timed…|Rename...`tF2|Save as Template...|<separator>|Edit Details...|<separator>|Export Loop...|Import Loops Here...|<separator>|Delete Loop...`tDelete") `
     "plain loop context menu had unexpected ordered items: $plainLoopDescription"
+  Require ((@($plainLoopItems | ForEach-Object { $_.Id }) -join "|") -ceq
+           "5104|5122|5101|5114|0|5100|0|5123|5124|0|5103") `
+    "plain loop context menu had unexpected command identities: $plainLoopDescription"
+  Require (@($plainLoopItems | Where-Object {
+    -not $_.Separator -and (-not $_.Enabled -or $_.Checked)
+  }).Count -eq 0) `
+    "plain loop context menu had an unexpected disabled or checked item: $plainLoopDescription"
   Require (@($plainLoopItems | Where-Object { $_.Id -eq 5102 }).Count -eq 0) `
     "succeeded loop context menu unexpectedly offered Stop: $plainLoopDescription"
   foreach ($absentId in @(5113, 5107, 5108, 5109, 5112, 5115)) {
@@ -8621,8 +8781,15 @@ try {
     if ($_.Separator) { "<separator>" } else { [string]$_.Text }
   })
   Require (($compositeLoopOrder -join "|") -ceq
-           "Open Terminal|New Child Node...|Open Group|Pilot Once…|Arm Schedule|Rename...`tF2|Save as Template...|Stop Loop`tCtrl+S|<separator>|Edit Details...|<separator>|Delete Loop...`tDelete") `
+           "Open Terminal|New Child Node...|Open Group|Pilot Once…|Arm Schedule|Rename...`tF2|Save as Template...|Stop Loop`tCtrl+S|<separator>|Edit Details...|<separator>|Export Loop...|Import Loops Here...|<separator>|Delete Loop...`tDelete") `
     "composite loop context menu had unexpected ordered items: $compositeLoopDescription"
+  Require ((@($compositeLoopItems | ForEach-Object { $_.Id }) -join "|") -ceq
+           "5104|5119|5113|5107|5108|5101|5114|5102|0|5100|0|5123|5124|0|5103") `
+    "composite loop context menu had unexpected command identities: $compositeLoopDescription"
+  Require (@($compositeLoopItems | Where-Object {
+    -not $_.Separator -and (($_.Enabled -ne ($_.Id -ne 5108)) -or $_.Checked)
+  }).Count -eq 0) `
+    "composite loop context menu had unexpected availability or checked state: $compositeLoopDescription"
   $armScheduleItem = @($compositeLoopItems | Where-Object { $_.Id -eq 5108 }) | Select-Object -First 1
   Require ($null -ne $armScheduleItem) "composite loop context menu omitted Arm Schedule (command 5108): $compositeLoopDescription"
   Require (-not $armScheduleItem.Enabled) `
@@ -8655,8 +8822,15 @@ try {
     if ($_.Separator) { "<separator>" } else { [string]$_.Text }
   })
   Require (($unwiredLoopOrder -join "|") -ceq
-           "Open Terminal|New Child Node...|Rename...`tF2|Save as Template...|Stop Loop`tCtrl+S|<separator>|Edit Details...|Wire it up|Mark as entry|<separator>|Delete Loop...`tDelete") `
+           "Open Terminal|New Child Node...|Rename...`tF2|Save as Template...|Stop Loop`tCtrl+S|<separator>|Edit Details...|Wire it up|Mark as entry|<separator>|Export Loop...|Import Loops Here...|<separator>|Delete Loop...`tDelete") `
     "unwired loop context menu had unexpected ordered items: $unwiredLoopDescription"
+  Require ((@($unwiredLoopItems | ForEach-Object { $_.Id }) -join "|") -ceq
+           "5104|5119|5101|5114|5102|0|5100|5109|5112|0|5123|5124|0|5103") `
+    "unwired loop context menu had unexpected command identities: $unwiredLoopDescription"
+  Require (@($unwiredLoopItems | Where-Object {
+    -not $_.Separator -and (-not $_.Enabled -or $_.Checked)
+  }).Count -eq 0) `
+    "unwired loop context menu had an unexpected disabled or checked item: $unwiredLoopDescription"
   foreach ($absentId in @(5113, 5107, 5108)) {
     Require (@($unwiredLoopItems | Where-Object { $_.Id -eq $absentId }).Count -eq 0) `
       "unwired loop context menu unexpectedly offered composite-only command $absentId : $unwiredLoopDescription"
@@ -8852,8 +9026,11 @@ try {
     if ($_.Separator) { "<separator>" } else { [string]$_.Text }
   })
   Require (($nodeCanvasMenuOrder -join "|") -ceq
-           "Open Terminal|Rename...`tF2|Save as Template...|<separator>|Edit Details...|<separator>|Delete Loop...`tDelete") `
+           "Open Terminal|Change to Timed…|Rename...`tF2|Save as Template...|<separator>|Edit Details...|<separator>|Export Loop...|Import Loops Here...|<separator>|Delete Loop...`tDelete") `
     "canvas node context menu had unexpected ordered items for UIA loop A at screen ($($nodeCanvasMenu.ScreenX),$($nodeCanvasMenu.ScreenY)) client ($($nodeCanvasMenu.ClientX),$($nodeCanvasMenu.ClientY)) bounds $nodeBounds : $($nodeCanvasMenu.Description)"
+  Require ((@($nodeCanvasMenu.Items | ForEach-Object { $_.Id }) -join "|") -ceq
+           "5104|5122|5101|5114|0|5100|0|5123|5124|0|5103") `
+    "canvas node context menu had unexpected command identities: $($nodeCanvasMenu.Description)"
   Require (@($nodeCanvasMenu.Items | Where-Object {
     -not $_.Separator -and (-not $_.Enabled -or $_.Checked)
   }).Count -eq 0) `
@@ -12101,6 +12278,7 @@ try {
     if ($sandboxCreated) { Write-Host "UIA_FAILED_SANDBOX_RETAINED=$sandboxPath" }
     Write-Host "UIA_CLEANUP_ERROR=$($_.Exception.Message)"
   } finally {
+  try {
   if ($null -eq $oldZmx) { Remove-Item Env:GRAPHCODE_ZMX -ErrorAction SilentlyContinue }
   else { $env:GRAPHCODE_ZMX = $oldZmx }
   if ($null -eq $oldCwd) { Remove-Item Env:GRAPHCODE_GATE_CWD -ErrorAction SilentlyContinue }
@@ -12146,6 +12324,18 @@ try {
     Write-Host "UIA_SANDBOX_RETAINED=$sandboxPath"
     if (-not $process -and -not $settingsProcess -and -not $renameProcess) {
       Write-Host "UIA_PROCESS_TREE_CLEANUP=not_needed no UIA shell was launched"
+    }
+  }
+  } finally {
+    if ($null -ne $gateDpiScope) {
+      try {
+        [GraphCodeUiaGateState]::RestorePhysicalDpiCoordinates($gateDpiScope)
+      } catch {
+        if ($gateFailure) { $gateFailure.Exception.Data["UiaDpiRestoreFailure"] = $_.Exception }
+        elseif ($sandboxCleanupError) { $sandboxCleanupError.Exception.Data["UiaDpiRestoreFailure"] = $_.Exception }
+        else { $sandboxCleanupError = $_ }
+        Write-Host "UIA_DPI_RESTORE_ERROR=$($_.Exception.Message)"
+      }
     }
   }
   }

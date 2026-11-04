@@ -1055,6 +1055,15 @@ the explicit attention-border RGB as a Windows mapping, not a verified
 resolution of SwiftUI `.orange`. Blur/compositing equivalence and the static
 attention endpoints still require separate visual/temporal evidence.
 
+Windows card ZIP export commits the completed archive with a handle-relative
+native rename (`NtSetInformationFile`, `FileRenameInformation`). The original
+parent and archive handles stay held; there is no absolute-path rename fallback.
+Existing destinations require explicit replacement approval. Pending, failed or
+unobserved native completion retains staging and reports both NTSTATUS values
+rather than claiming publication. Native commit regressions cover absent and
+existing targets, held source/parent/target custody and synchronous completion.
+This headless coverage does not establish native picker destination selection.
+
 The card's attention face follows the same display state as its state pill:
 NEEDS YOU warms the face and amber halo even when the underlying lifecycle is
 not `running`. Selection replaces the hairline with the solid selection ring,

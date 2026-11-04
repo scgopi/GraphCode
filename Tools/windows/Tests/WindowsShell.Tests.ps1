@@ -529,6 +529,18 @@ Invoke-Native "Shell process ownership mock contracts" {
   $global:LASTEXITCODE = 0
 }
 
+Invoke-Native "Stable canvas card context menu mock contracts" {
+  . (Join-Path $PSScriptRoot "..\Import-PinnedPester.ps1")
+  $cardMenuResults = Invoke-Pester -Path (Join-Path $PSScriptRoot "CanvasCardContextMenu.Tests.ps1") -PassThru
+  if ($cardMenuResults.TotalCount -ne 16 -or $cardMenuResults.PassedCount -ne 16 -or
+      $cardMenuResults.FailedCount -ne 0 -or $cardMenuResults.SkippedCount -ne 0 -or
+      $cardMenuResults.NotRunCount -ne 0) {
+    throw "Stable canvas card context menu mock contracts did not pass all 16 unskipped cases"
+  }
+  Write-Host "CANVAS_CARD_CONTEXT_MENU_MOCK_CASES=$($cardMenuResults.TotalCount)"
+  $global:LASTEXITCODE = 0
+}
+
 foreach ($path in @(
     "build.zig",
     "build.zig.zon",
@@ -804,6 +816,10 @@ Invoke-Native "Update offer modal deferral executable tests" {
 Invoke-Native "Sketch promotion executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\SketchPromotion.zig --test-filter 'sketch promotion' } finally { Pop-Location }
+}
+Invoke-Native "Card transfer data-only executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\CardTransfer.zig --test-filter 'card transfer ' } finally { Pop-Location }
 }
 Invoke-Native "Context menu and gate fixture message executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent

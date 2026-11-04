@@ -109,16 +109,40 @@ public void RequireOwnedMouseInput(
       throw new InvalidOperationException("Owned mouse hit changed; no mouse input was injected");
   }
 public int SendKeyInput(IntPtr owner, uint expectedProcessId, IntPtr expectedFocus, ushort virtualKey, int count) {
+    return SendKeyInput(owner, expectedProcessId, expectedFocus, virtualKey, count, false);
+  }
+public int SendKeyInput(IntPtr owner, uint expectedProcessId, IntPtr expectedFocus, ushort virtualKey, int count, bool controlModifier) {
     if (count <= 0) return 0;
-    var inputs = new KeyInputRecord[count * 2];
+    if (controlModifier && count != 1)
+      throw new ArgumentOutOfRangeException(nameof(count), "A Control chord requires one key pair");
+    var inputs = new KeyInputRecord[controlModifier ? 4 : count * 2];
+    int start = controlModifier ? 1 : 0;
     for (int index = 0; index < count; index++) {
-      inputs[index * 2] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = virtualKey } };
-      inputs[index * 2 + 1] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = virtualKey, Flags = 0x0002 } };
+      inputs[start + index * 2] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = virtualKey } };
+      inputs[start + index * 2 + 1] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = virtualKey, Flags = 0x0002 } };
+    }
+    if (controlModifier) {
+      inputs[0] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x11 } };
+      inputs[3] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x11, Flags = 0x0002 } };
     }
     RequireOwnedKeyboardInput(owner, expectedProcessId, expectedFocus);
     uint sent = operations.SendKeyInputs((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(KeyInputRecord)));
-    if (sent != inputs.Length)
-      throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} key events (cbSize={2}): Win32Error={3}", sent, inputs.Length, Marshal.SizeOf(typeof(KeyInputRecord)), Marshal.GetLastWin32Error()));
+    if (sent != inputs.Length) {
+      var primary = new InvalidOperationException(String.Format("SendInput injected {0} of {1} key events (cbSize={2}): Win32Error={3}", sent, inputs.Length, Marshal.SizeOf(typeof(KeyInputRecord)), Marshal.GetLastWin32Error()));
+      if (controlModifier && sent != 0) {
+        var releases = sent == 1 || sent == 3 ? new[] { inputs[3] } : new[] { inputs[2], inputs[3] };
+        try {
+          // The chord may move focus within this dialog; cleanup never replays keydowns.
+          RequireOwnedKeyboardInput(owner, expectedProcessId, IntPtr.Zero);
+          uint released = operations.SendKeyInputs((uint)releases.Length, releases, Marshal.SizeOf(typeof(KeyInputRecord)));
+          if (released != releases.Length)
+            throw new InvalidOperationException(String.Format("Control chord key-up cleanup injected {0} of {1} events; key release is unproved", released, releases.Length));
+        } catch (Exception cleanup) when (cleanup is InvalidOperationException || cleanup is System.ComponentModel.Win32Exception) {
+          throw new AggregateException("Control chord failed and key release is unproved; no further input is permitted", primary, cleanup);
+        }
+      }
+      throw primary;
+    }
     return count;
   }
 public int[] SendUnicodeInput(IntPtr owner, uint expectedProcessId, IntPtr expectedFocus, string text) {
@@ -232,6 +256,15 @@ public static bool IsOwnedPopupInput(
       pointProcessId == expectedProcessId && pointRoot == popup && popupVisible;
   }
 public PopupItemHit ClickPopupMenuItem(IntPtr popup, IntPtr owner, int position, int commandId, uint expectedProcessId) {
+    return ClickPopupMenuItemCore(popup, owner, position, commandId, expectedProcessId, true);
+  }
+public PopupItemHit ClickPopupMenuItemStrict(IntPtr popup, IntPtr owner, int position, int commandId, uint expectedProcessId) {
+    var hit = ClickPopupMenuItemCore(popup, owner, position, commandId, expectedProcessId, false);
+    if (hit == null)
+      throw new InvalidOperationException("Strict popup target identity or geometry is invalid; no input was injected");
+    return hit;
+  }
+private PopupItemHit ClickPopupMenuItemCore(IntPtr popup, IntPtr owner, int position, int commandId, uint expectedProcessId, bool allowFallback) {
     if (popup == IntPtr.Zero || position < 0) return null;
     IntPtr menu = operations.PopupMenuHandle(popup);
     RECT item;
@@ -257,18 +290,67 @@ public PopupItemHit ClickPopupMenuItem(IntPtr popup, IntPtr owner, int position,
       throw new InvalidOperationException(String.Format("GetCursorPos after popup move failed: Win32Error={0}", Marshal.GetLastWin32Error()));
     if (at.X != screenX || at.Y != screenY)
       throw new InvalidOperationException(String.Format("Popup cursor landed at ({0},{1}), expected ({2},{3})", at.X, at.Y, screenX, screenY));
-    operations.SendMessage(popup, 0x0200, UIntPtr.Zero, operations.MouseLParam(point.X, point.Y));
+    uint rawMenuState = 0;
+    bool menuStateObserved = false;
+    InvalidOperationException PopupStateFailure(string message) {
+      var failure = new InvalidOperationException(message);
+      failure.Data["rawMenuState"] = rawMenuState;
+      failure.Data["rawMenuStateObserved"] = menuStateObserved;
+      // The existing GetMenuState binding does not capture last-error.
+      failure.Data["nativeErrorAvailable"] = false;
+      failure.Data["owner"] = owner.ToInt64();
+      failure.Data["popup"] = popup.ToInt64();
+      failure.Data["menu"] = menu.ToInt64();
+      failure.Data["expectedProcessId"] = expectedProcessId;
+      failure.Data["position"] = position;
+      failure.Data["commandId"] = commandId;
+      failure.Data["itemRect"] = new[] { item.Left, item.Top, item.Right, item.Bottom };
+      failure.Data["screenPoint"] = new[] { screenX, screenY };
+      failure.Data["clientPoint"] = new[] { point.X, point.Y };
+      failure.Data["cursorBefore"] = new[] { before.X, before.Y };
+      failure.Data["cursorAtMove"] = new[] { at.X, at.Y };
+      try {
+        ScreenPoint observed;
+        if (operations.GetCursorPos(out observed)) {
+          failure.Data["cursorAtRefusal"] = new[] { observed.X, observed.Y };
+          IntPtr pointWindow = operations.WindowFromPoint(observed);
+          failure.Data["pointWindow"] = pointWindow.ToInt64();
+          failure.Data["pointWindowProcessId"] = operations.WindowProcessId(pointWindow);
+          failure.Data["pointWindowRoot"] = operations.GetAncestor(pointWindow, 2).ToInt64();
+        }
+        IntPtr foreground = operations.GetForegroundWindow();
+        failure.Data["foreground"] = foreground.ToInt64();
+        failure.Data["foregroundProcessId"] = operations.WindowProcessId(foreground);
+        failure.Data["foregroundRoot"] = operations.GetAncestor(foreground, 2).ToInt64();
+        failure.Data["ownerProcessId"] = operations.WindowProcessId(owner);
+        failure.Data["popupProcessId"] = operations.WindowProcessId(popup);
+      } catch (Exception metadataError) {
+        failure.Data["metadataError"] = metadataError.ToString();
+      }
+      return failure;
+    }
+    bool ReadMenuHilite() {
+      rawMenuState = operations.GetMenuState(menu, (uint)position, 0x0400);
+      menuStateObserved = true;
+      if (rawMenuState == UInt32.MaxValue)
+        throw PopupStateFailure("Popup menu state unavailable; no further input was injected");
+      return (rawMenuState & 0x0080) != 0;
+    }
+    if (allowFallback)
+      operations.SendMessage(popup, 0x0200, UIntPtr.Zero, operations.MouseLParam(point.X, point.Y));
     bool hilite = false;
     for (int attempt = 0; attempt < 50 && !hilite; attempt++) {
-      hilite = (operations.GetMenuState(menu, (uint)position, 0x0400) & 0x0080) != 0;
+      hilite = ReadMenuHilite();
       if (!hilite) operations.Sleep(10);
     }
     bool selectItemFallback = false;
     if (!hilite) {
+      if (!allowFallback)
+        throw PopupStateFailure("Strict popup did not acknowledge pointer hover; no selection or keyboard fallback was emitted");
       operations.SendMessage(popup, 0x01E5, (UIntPtr)position, IntPtr.Zero);
       selectItemFallback = true;
       for (int attempt = 0; attempt < 50 && !hilite; attempt++) {
-        hilite = (operations.GetMenuState(menu, (uint)position, 0x0400) & 0x0080) != 0;
+        hilite = ReadMenuHilite();
         if (!hilite) operations.Sleep(10);
       }
     }
@@ -299,14 +381,16 @@ public PopupItemHit ClickPopupMenuItem(IntPtr popup, IntPtr owner, int position,
     bool hiliteAtEnterFallback = false;
     bool hiliteBeforeEnter = false;
     if (operations.IsWindowVisible(popup)) {
+      if (!allowFallback)
+        throw new InvalidOperationException("Strict popup remained open after pointer input; no selection or keyboard fallback was emitted");
       // Injected clicks can be dropped (or held) by the desktop's input stack,
       // and the menu can lose its hover hilite meanwhile. Enter with no hilited
       // item ends TrackPopupMenu with command 0: the popup closes exactly as if
       // the item had been chosen, but no command reaches the shell. Re-assert
       // the intended item and prove its hilite immediately before Enter.
-      hiliteAtEnterFallback = (operations.GetMenuState(menu, (uint)position, 0x0400) & 0x0080) != 0;
+      hiliteAtEnterFallback = ReadMenuHilite();
       operations.SendMessage(popup, 0x01E5, (UIntPtr)position, IntPtr.Zero);
-      hiliteBeforeEnter = (operations.GetMenuState(menu, (uint)position, 0x0400) & 0x0080) != 0;
+      hiliteBeforeEnter = ReadMenuHilite();
     }
     if (operations.IsWindowVisible(popup)) {
       if (!hiliteBeforeEnter)

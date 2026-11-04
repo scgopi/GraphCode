@@ -5,6 +5,29 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+function Assert-CompiledUiaProviderProvenance([Collections.IDictionary] $Observed) {
+  foreach ($key in @('expectedPath','loadedPath','name','version','clientVersion','fileVersion',
+      'clientFileVersion','token','signature','signer','fileMvid','loadedMvid',
+      'fileHash','loadedHash','publicEntry')) {
+    if ([string]::IsNullOrWhiteSpace([string]$Observed[$key])) {
+      throw [InvalidOperationException]::new("UIA provider provenance: missing $key")
+    }
+  }
+  if (-not [string]::Equals([IO.Path]::GetFullPath($Observed.expectedPath),
+        [IO.Path]::GetFullPath($Observed.loadedPath),[StringComparison]::OrdinalIgnoreCase) -or
+      $Observed.name -ine 'UIAutomationClientSideProviders' -or
+      $Observed.version -cne $Observed.clientVersion -or
+      $Observed.fileVersion -cne $Observed.clientFileVersion -or
+      $Observed.token -cne 'B77A5C561934E089' -or
+      $Observed.signature -cne 'Valid' -or
+      $Observed.signer -cne 'CN=.NET, O=Microsoft Corporation, L=Redmond, S=Washington, C=US' -or
+      $Observed.fileMvid -cne $Observed.loadedMvid -or
+      $Observed.fileHash -cne $Observed.loadedHash -or
+      -not $Observed.Contains('reference') -or $Observed.reference -ne $false -or
+      $Observed.publicEntry -cne 'UIAutomationClientsideProviders.UIAutomationClientSideProviders') {
+    throw [InvalidOperationException]::new('UIA provider provenance: wrong runtime component, signature, public entry, bytes or loaded identity')
+  }
+}
 if ($RequiredType -cne "GraphCode.ValidationFixtureDirectoryNative" -and [Environment]::Version.Major -lt 8) {
   throw "Compiled Windows bindings require PowerShell on .NET 8 or newer (PowerShell 7.4+); observed $([Environment]::Version)"
 }
@@ -120,7 +143,11 @@ if ($RequiredType -cin @("GraphCodeUiaGateState", "GraphCodeUiaAttribution")) {
       throw "UIA runtime dependency $runtimePath does not match PowerShell CLR $([Environment]::Version); reference-pack assemblies are not supported"
     }
     $runtimeAssembly = [Reflection.Assembly]::LoadFrom($runtimePath)
-    if ($runtimeAssembly.GetName().Version.Major -ne [Environment]::Version.Major -or
+    if (-not [string]::Equals([IO.Path]::GetFullPath($runtimeAssembly.Location),
+          [IO.Path]::GetFullPath($runtimePath),[StringComparison]::OrdinalIgnoreCase) -or
+        $runtimeAssembly.GetName().Version -ne $runtimeIdentity.Version -or
+        [Convert]::ToHexString($runtimeAssembly.GetName().GetPublicKeyToken()) -cne
+          [Convert]::ToHexString($runtimeIdentity.GetPublicKeyToken()) -or
         @($runtimeAssembly.GetCustomAttributesData() | Where-Object {
           $_.AttributeType.FullName -ceq "System.Runtime.CompilerServices.ReferenceAssemblyAttribute"
         }).Count -ne 0) {
@@ -133,5 +160,40 @@ if ($RequiredType -cin @("GraphCodeUiaGateState", "GraphCodeUiaAttribution")) {
       [System.Windows.Automation.InvokePattern].Assembly -ne $uiFrameworkAssemblies.UIAutomationClient) {
     throw "UIA types do not belong to the explicitly selected PowerShell runtime assemblies"
   }
+  $providerPath = Join-Path $PSHOME 'UIAutomationClientsideProviders.dll'
+  $providerHash = (Get-FileHash -LiteralPath $providerPath -Algorithm SHA256).Hash
+  $providerSignature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature -FilePath $providerPath
+  if ($providerSignature.Status -ne 'Valid' -or $providerSignature.SignerCertificate.Subject -cne
+      'CN=.NET, O=Microsoft Corporation, L=Redmond, S=Washington, C=US') {
+    throw [InvalidOperationException]::new('UIA provider provenance: normal signed Microsoft runtime component is required')
+  }
+  $providerAssembly = [Reflection.Assembly]::LoadFrom($providerPath)
+  $providerEntry = $providerAssembly.GetType('UIAutomationClientsideProviders.UIAutomationClientSideProviders',$false)
+  $providerFile = [IO.File]::OpenRead($providerPath)
+  try {
+    $providerPe = [Reflection.PortableExecutable.PEReader]::new($providerFile)
+    try {
+      $providerMetadata = [Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($providerPe)
+      $providerMvid = $providerMetadata.GetGuid($providerMetadata.GetModuleDefinition().Mvid)
+    } finally { $providerPe.Dispose() }
+  } finally { $providerFile.Dispose() }
+  Assert-CompiledUiaProviderProvenance @{
+    expectedPath=$providerPath; loadedPath=$providerAssembly.Location
+    name=$providerAssembly.GetName().Name; version=$providerAssembly.GetName().Version.ToString()
+    clientVersion=$uiFrameworkAssemblies.UIAutomationClient.GetName().Version.ToString()
+    fileVersion=(Get-Item -LiteralPath $providerPath).VersionInfo.FileVersion
+    clientFileVersion=(Get-Item -LiteralPath $uiFrameworkAssemblies.UIAutomationClient.Location).VersionInfo.FileVersion
+    token=[Convert]::ToHexString($providerAssembly.GetName().GetPublicKeyToken())
+    signature=[string]$providerSignature.Status; signer=$providerSignature.SignerCertificate.Subject
+    fileMvid=$providerMvid.ToString(); loadedMvid=$providerAssembly.ManifestModule.ModuleVersionId.ToString()
+    fileHash=$providerHash; loadedHash=(Get-FileHash -LiteralPath $providerAssembly.Location -Algorithm SHA256).Hash
+    reference=(@($providerAssembly.GetCustomAttributesData() | Where-Object {
+      $_.AttributeType.FullName -ceq 'System.Runtime.CompilerServices.ReferenceAssemblyAttribute'
+    }).Count -ne 0)
+    publicEntry=$(if ($null -ne $providerEntry -and $providerEntry.IsPublic) { $providerEntry.FullName } else { '' })
+  }
+  $registrationName = [Reflection.AssemblyName]::new($providerAssembly.FullName)
+  $registrationName.Name = $providerEntry.Namespace
+  [GraphCodeUiaGateState]::RegisterClientSideProviderAssembly($registrationName)
 }
 Write-Output $assembly

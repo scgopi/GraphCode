@@ -83,10 +83,17 @@ import PackageDescription
     ],
     swiftSettings: [.swiftLanguageMode(.v5)]
   )
+  let cliDependencies: [Target.Dependency] = ["GraphcodeKit", "MailroomKit", "WindowsCardTransferCore"]
   let platformTestTargets: [Target] = [
+    .target(
+      name: "WindowsCardTransferCore",
+      dependencies: ["GraphcodeKit"],
+      path: "graphcode-cli/WindowsCardTransferCore",
+      swiftSettings: [.swiftLanguageMode(.v5)]
+    ),
     .testTarget(
       name: "GraphcodeWindowsProductionTests",
-      dependencies: ["GraphcodeKit"],
+      dependencies: ["GraphcodeKit", "WindowsCardTransferCore"],
       path: "windows-tests",
       swiftSettings: [.swiftLanguageMode(.v5)]
     )
@@ -101,6 +108,7 @@ import PackageDescription
     path: "GraphcodeKit/Sources",
     swiftSettings: [.swiftLanguageMode(.v5)]
   )
+  let cliDependencies: [Target.Dependency] = ["GraphcodeKit", "MailroomKit"]
   let platformTestTargets: [Target] = []
 #endif
 
@@ -133,7 +141,7 @@ let package = Package(
     graphcodeKitTarget,
     .executableTarget(
       name: "graphcode-cli",
-      dependencies: ["GraphcodeKit", "MailroomKit"],
+      dependencies: cliDependencies,
       path: "graphcode-cli/Sources",
       swiftSettings: [.swiftLanguageMode(.v5)]
     ),

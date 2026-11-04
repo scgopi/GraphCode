@@ -10,7 +10,7 @@ public static class SuiteRegistration
 {
     public static IReadOnlyList<IValidationSuite> CreateSuites() => new IValidationSuite[]
     {
-        new ActivationSuite(), new ManagedUiSuite(), new NativeUiSuite(), new ControlClickTopologySuite()
+        new ActivationSuite(), new ManagedUiSuite(), new CardsAcceptanceControlsSuite(), new NativeUiSuite(), new ControlClickTopologySuite()
     }.Concat(UiAdapterCases.CreateSuites()).ToArray();
 }
 

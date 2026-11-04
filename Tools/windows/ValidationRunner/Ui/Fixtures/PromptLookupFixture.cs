@@ -3,6 +3,25 @@ namespace GraphCode.Validation.Ui.Fixtures {
 using System;
 using System.Runtime.InteropServices;
 public static class PromptLookupFixture {
+  public sealed record ZipPickerResult(int Result, string SelectedPath, bool ReplacementApproved, int HResult);
+  [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+  private delegate int ZipPicker(IntPtr owner, [MarshalAs(UnmanagedType.Bool)] bool saving,
+    string suggestedName, System.Text.StringBuilder buffer, uint capacity,
+    [MarshalAs(UnmanagedType.Bool)] out bool replacement, out int error);
+  public static ZipPickerResult PickZipProduction(string libraryPath, IntPtr owner, string suggestedName) {
+    if (!System.IO.Path.IsPathFullyQualified(libraryPath) || owner == IntPtr.Zero ||
+        string.IsNullOrWhiteSpace(suggestedName))
+      throw new ArgumentException("An absolute sealed picker library, owned native owner and suggested name are required.");
+    IntPtr library = NativeLibrary.Load(libraryPath);
+    try {
+      var pick = Marshal.GetDelegateForFunctionPointer<ZipPicker>(
+        NativeLibrary.GetExport(library, "graphcode_pick_zip"));
+      var buffer = new System.Text.StringBuilder(32768);
+      int result = pick(owner, true, suggestedName, buffer, (uint)buffer.Capacity,
+        out bool replacement, out int error);
+      return new ZipPickerResult(result, buffer.ToString(), replacement, error);
+    } finally { NativeLibrary.Free(library); }
+  }
   private delegate IntPtr WindowProc(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam);
   private static readonly WindowProc procedure = DefWindowProc;
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -26,6 +45,16 @@ public static class PromptLookupFixture {
   public static extern bool DestroyWindow(IntPtr window);
   [DllImport("user32.dll")]
   public static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetThreadDpiAwarenessContext();
+  [DllImport("user32.dll", SetLastError = true)]
+  public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+  [DllImport("user32.dll")]
+  public static extern bool AreDpiAwarenessContextsEqual(IntPtr first, IntPtr second);
+  [DllImport("kernel32.dll")]
+  public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")]
+  public static extern uint GetDpiForWindow(IntPtr window);
   [DllImport("user32.dll")]
   private static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
   public static void Place(IntPtr window, int x, int y, int width, int height) {

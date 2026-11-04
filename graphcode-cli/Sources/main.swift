@@ -31,6 +31,12 @@ func fail(_ message: String, code: Int32 = ExitCode.usage) -> Never {
   exit(code)
 }
 
+#if os(Windows)
+  if let code = WindowsCardTransfer.runIfRequested(Array(CommandLine.arguments.dropFirst())) {
+    exit(code)
+  }
+#endif
+
 NodRuntimeLocator.installAvailability()
 
 let command: GraphcodeCommand
