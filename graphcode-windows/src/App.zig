@@ -7374,6 +7374,24 @@ pub const App = struct {
             _ = c.InvalidateRect(self.window.hwnd, null, 0);
             return;
         }
+        if (mutation == 24) {
+            self.applyUiaFixtureGraph(.project, "Reply actions", 57,
+                \\[{"id":"11111111-1111-4111-8111-111111111111","title":"Reply Goal","loopType":"goalBased","state":"awaitingInput"},{"id":"22222222-2222-4222-8222-222222222222","title":"Reply Composite","loopType":"proactive","state":"running","presence":{"presence":"awaitingInput","confidence":"reported"},"subGraph":{"nodes":[{"id":"55555555-5555-4555-8555-555555555555","title":"Reply nested Main","loopType":"turnBased","state":"idle"},{"id":"66666666-6666-4666-8666-666666666666","title":"Reply nested Goal","loopType":"goalBased","state":"idle"}]}}]
+            ,
+                \\[{"id":"88888888-8888-4888-8888-888888888888","from":"11111111-1111-4111-8111-111111111111","to":"22222222-2222-4222-8222-222222222222","kind":"handoff"}]
+            ) catch |err| {
+                self.reportWorktreeError("Unable to prepare Reply action UIA fixture", err);
+                return;
+            };
+            _ = self.model.setSelectedID("11111111-1111-4111-8111-111111111111");
+            self.surface = .project;
+            self.workspace_controls.panel_visible = false;
+            self.layoutWorkspace();
+            self.layoutEmptyStateControls();
+            self.syncAccessibility();
+            _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            return;
+        }
         const dialog = if (self.worktree_dialog) |*value| value else return;
         const target_path = if (mutation == 2 or mutation == 3) self.ownedUiaFixturePath(if (mutation == 2) .safe else .unsafe) catch |err| {
             self.reportWorktreeError("UIA fixture owner unavailable", err);

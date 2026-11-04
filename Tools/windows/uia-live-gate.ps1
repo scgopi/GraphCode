@@ -3025,6 +3025,53 @@ function Invoke-MultiProjectOwnedStartupFailure(
   }
 }
 
+function Get-CardsFixtureRestorationDecision([object[]] $before, [object[]] $after, [int] $processId) {
+  if ($null -eq $before -or $null -eq $after -or $before.Count -eq 0 -or
+      $before.Count -ne $after.Count -or $processId -le 0) {
+    return [pscustomobject]@{ready=$false;failure='missing or changed graph-child census'}
+  }
+  $beforeIds=[Collections.Generic.List[string]]::new()
+  $afterIds=[Collections.Generic.List[string]]::new()
+  for ($index=0; $index -lt $before.Count; $index++) {
+    $left=$before[$index]; $right=$after[$index]
+    foreach ($row in @($left,$right)) {
+      if ($row -isnot [Collections.IDictionary] -or
+          [string]::IsNullOrWhiteSpace($row.automationId) -or
+          $row.processId -ne $processId -or $row.parentId -cne 'graph' -or
+          [string]::IsNullOrWhiteSpace($row.controlType)) {
+        return [pscustomobject]@{ready=$false;failure='invalid graph-child owner, parent or role'}
+      }
+    }
+    if ($beforeIds.Contains($left.automationId) -or $afterIds.Contains($right.automationId)) {
+      return [pscustomobject]@{ready=$false;failure='duplicate graph-child identity'}
+    }
+    $beforeIds.Add($left.automationId); $afterIds.Add($right.automationId)
+    foreach ($field in @('automationId','name','processId','parentId','controlType')) {
+      if ([string]$left[$field] -cne [string]$right[$field]) {
+        return [pscustomobject]@{ready=$false;failure='original ordered graph-child metadata not restored'}
+      }
+    }
+  }
+  return [pscustomobject]@{ready=$true;failure=''}
+}
+
+function Get-CardsCompositeBackDecision([object[]] $items, [string] $expectedId, [int] $processId) {
+  if ([string]::IsNullOrWhiteSpace($expectedId) -or $processId -le 0 -or
+      $null -eq $items -or @($items | Where-Object { $null -eq $_ }).Count) {
+    return [pscustomobject]@{ ready=$false; failure='invalid breadcrumb snapshot' }
+  }
+  $matches = @($items | Where-Object { $_.automationId -ceq $expectedId })
+  if ($matches.Count -ne 1) {
+    return [pscustomobject]@{ ready=$false; failure='expected one exact-parent breadcrumb' }
+  }
+  $back = $matches[0]
+  return [pscustomobject]@{
+    ready=($back.processId -eq $processId -and $back.parentId -ceq 'graph' -and
+      $back.name -ceq 'Back to UIA project')
+    failure='breadcrumb owner, hierarchy or retained project name differs'
+  }
+}
+
 function Get-MultiProjectAutomationId([string] $kind, [string] $path, [string] $nodeId = "") {
   $prefix = switch -CaseSensitive ($kind) {
     "loop" { "loop-row" }
@@ -3035,6 +3082,7 @@ function Get-MultiProjectAutomationId([string] $kind, [string] $path, [string] $
     "overview-worktree-notice" { "canvas-card" }
     "workspace-loop-bar" { "workspace-loop-bar" }
     "workspace-toolbar" { "workspace-toolbar" }
+    "composite-back" { "canvas-card" }
     default { throw "MULTIPROJECT_KIND: unsupported automation identity kind" }
   }
   $identity = if ($nodeId) { "${kind}:${path}:$nodeId" } else { "${kind}:$path" }
@@ -6084,6 +6132,11 @@ try {
     viewportIntersectionRequired = $true
   } | ConvertTo-Json -Compress -Depth 5))
   if ($CycleHierarchyOnly) {
+    $originalGraphSnapshot = @(Get-DirectChildren $graph $rawWalker | ForEach-Object {
+      [ordered]@{automationId=[string]$_.Current.AutomationId;name=[string]$_.Current.Name
+        processId=[int]$_.Current.ProcessId;parentId=[string]$rawWalker.GetParent($_).Current.AutomationId
+        controlType=[string]$_.Current.ControlType.ProgrammaticName}
+    })
     Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 23)) `
       "cycle hierarchy fixture mutation was rejected"
     Start-Sleep -Milliseconds 200
@@ -6151,7 +6204,7 @@ try {
         $mainReason[0].Current.BoundingRectangle.Bottom)
     }
 
-    $selectedCard[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $mainInspect[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
     Start-Sleep -Milliseconds 150
     $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
     $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
@@ -6159,7 +6212,11 @@ try {
       $_.Current.AutomationId -match '^workspace-show-graph-' -and $_.Current.Name -ceq 'Show in Graph'
     })
     Require ($showGraph.Count -eq 1) `
-      "selected Main cycle card activation did not enter its workspace"
+      "Main Inspect action did not enter its workspace"
+    $mainWorkspaceId = Get-MultiProjectAutomationId "workspace-loop-bar" "20000000-0000-4000-8000-000000000001"
+    Require (@(Get-DirectChildren $graph $rawWalker | Where-Object {
+      $_.Current.AutomationId -ceq $mainWorkspaceId -and $_.Current.ProcessId -eq $process.Id
+    }).Count -eq 1) "Main Inspect opened a different loop workspace"
     $showGraph[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
     Start-Sleep -Milliseconds 150
     $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
@@ -6226,11 +6283,128 @@ try {
           $unselectedReason[0].Current.BoundingRectangle.Bottom)
       }
       selectedActivation = [ordered]@{
-        invokedCardAutomationId = [string]$selectedCard[0].Current.AutomationId
+        invokedActionAutomationId = $selectedEvidence.inspectAutomationId
+        targetCardAutomationId = $selectedEvidence.cardAutomationId
+        workspaceLoopBarAutomationId = $mainWorkspaceId
         workspaceShowGraphObserved = $true
         stableIdentityAfterReturn = [string]$unselectedCard[0].Current.AutomationId
       }
     }
+    Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 24)) `
+      "Reply action fixture mutation was rejected"
+    $projectRoot = [Environment]::GetEnvironmentVariable('GRAPHCODE_GATE_CWD')
+    $goalId = '11111111-1111-4111-8111-111111111111'
+    $compositeId = '22222222-2222-4222-8222-222222222222'
+    $replyCardIds = @(
+      (Get-MultiProjectAutomationId "project-card" $projectRoot $goalId),
+      (Get-MultiProjectAutomationId "project-card" $projectRoot $compositeId)
+    )
+    $replyProbe = Wait-ForGraphChildren $root $rawWalker `
+      { $_.Current.AutomationId -match '^(canvas-card-|attention-action-)' } `
+      { param($items)
+        @($items | Where-Object { $_.Current.Name -ceq 'Reply' }).Count -eq 2 -and
+        @($items | Where-Object { $_.Current.AutomationId -cin $replyCardIds }).Count -eq 2 }
+    $goalCard = @($replyProbe.Items | Where-Object { $_.Current.AutomationId -ceq $replyCardIds[0] })
+    Require ($goalCard.Count -eq 1 -and $goalCard[0].Current.Name -ceq 'Reply Goal' -and
+      $goalCard[0].Current.ProcessId -eq $process.Id) "Goal Reply fixture owner was not exact"
+    $goalReply = @($replyProbe.Items | Where-Object {
+      $_.Current.AutomationId -match '^attention-action-' -and $_.Current.Name -ceq 'Reply' -and
+      $_.Current.ProcessId -eq $process.Id -and
+      $goalCard[0].Current.BoundingRectangle.Contains($_.Current.BoundingRectangle)
+    })
+    Require ($goalReply.Count -eq 1) "Goal card did not own exactly one Reply action"
+    $goalReplyId = [string]$goalReply[0].Current.AutomationId
+    $goalReply[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $goalWorkspaceId = Get-MultiProjectAutomationId "workspace-loop-bar" $goalId
+    $goalWorkspace = Wait-ForGraphChildren $root $rawWalker `
+      { $_.Current.AutomationId -match '^workspace-(loop-bar|show-graph)-' } `
+      { param($items)
+        @($items | Where-Object { $_.Current.AutomationId -ceq $goalWorkspaceId }).Count -eq 1 -and
+        @($items | Where-Object { $_.Current.Name -ceq 'Show in Graph' }).Count -eq 1 }
+    $goalShowGraph = @($goalWorkspace.Items | Where-Object { $_.Current.Name -ceq 'Show in Graph' })
+    Require ($goalShowGraph.Count -eq 1 -and @($goalWorkspace.Items | Where-Object {
+      $_.Current.AutomationId -ceq $goalWorkspaceId -and $_.Current.ProcessId -eq $process.Id
+    }).Count -eq 1) "Goal Reply did not publish its exact workspace and return control"
+    $goalShowGraph[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $replyProbe = Wait-ForGraphChildren $root $rawWalker `
+      { $_.Current.AutomationId -match '^(canvas-card-|attention-action-)' } `
+      { param($items)
+        @($items | Where-Object { $_.Current.AutomationId -ceq $goalReplyId }).Count -eq 1 -and
+        @($items | Where-Object { $_.Current.AutomationId -cin $replyCardIds }).Count -eq 2 }
+    $compositeCard = @($replyProbe.Items | Where-Object { $_.Current.AutomationId -ceq $replyCardIds[1] })
+    Require ($compositeCard.Count -eq 1 -and $compositeCard[0].Current.Name -ceq 'Reply Composite' -and
+      $compositeCard[0].Current.ProcessId -eq $process.Id) "Composite Reply fixture owner was not exact"
+    $compositeReply = @($replyProbe.Items | Where-Object {
+      $_.Current.AutomationId -match '^attention-action-' -and $_.Current.Name -ceq 'Reply' -and
+      $_.Current.ProcessId -eq $process.Id -and
+      $compositeCard[0].Current.BoundingRectangle.Contains($_.Current.BoundingRectangle)
+    })
+    Require ($compositeReply.Count -eq 1) "Composite card did not own exactly one Reply action"
+    $compositeReplyId = [string]$compositeReply[0].Current.AutomationId
+    $compositeReply[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $nestedIds = @(
+      (Get-MultiProjectAutomationId "project-card" $projectRoot "55555555-5555-4555-8555-555555555555"),
+      (Get-MultiProjectAutomationId "project-card" $projectRoot "66666666-6666-4666-8666-666666666666")
+    )
+    $expectedBackId = Get-MultiProjectAutomationId "composite-back" $compositeId
+    $nestedProbe = Wait-ForGraphChildren $root $rawWalker `
+      { $_.Current.AutomationId -match '^canvas-card-' } `
+      { param($items)
+        @($items | Where-Object { $_.Current.AutomationId -cin $nestedIds }).Count -eq 2 -and
+        @($items | Where-Object { $_.Current.AutomationId -ceq $expectedBackId }).Count -eq 1 -and
+        @($items | Where-Object { $_.Current.AutomationId -cin $replyCardIds }).Count -eq 0 }
+    $backSnapshot = @($nestedProbe.Items | ForEach-Object {
+      [ordered]@{ automationId=[string]$_.Current.AutomationId; name=[string]$_.Current.Name
+        processId=[int]$_.Current.ProcessId; parentId=[string]$rawWalker.GetParent($_).Current.AutomationId }
+    })
+    $backDecision = Get-CardsCompositeBackDecision $backSnapshot $expectedBackId $process.Id
+    Require ($backDecision.ready -and @($nestedProbe.Items | Where-Object {
+      $_.Current.AutomationId -cin $nestedIds
+    }).Count -eq 2 -and @($nestedProbe.Items | Where-Object {
+      $_.Current.AutomationId -cin $replyCardIds
+    }).Count -eq 0) "Composite Reply did not publish its exact nested canvas and unique owned parent breadcrumb"
+    $back = @($nestedProbe.Items | Where-Object { $_.Current.AutomationId -ceq $expectedBackId })
+    $backId = [string]$back[0].Current.AutomationId
+    $back[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $restoredReply = Wait-ForGraphChildren $root $rawWalker `
+      { $_.Current.AutomationId -match '^(canvas-card-|attention-action-)' } `
+      { param($items)
+        @($items | Where-Object { $_.Current.AutomationId -cin $replyCardIds }).Count -eq 2 -and
+        @($items | Where-Object { $_.Current.AutomationId -cin @($goalReplyId, $compositeReplyId) }).Count -eq 2 }
+    Require (@($restoredReply.Items | Where-Object {
+      $_.Current.AutomationId -cin $replyCardIds
+    }).Count -eq 2 -and @($restoredReply.Items | Where-Object {
+      $_.Current.AutomationId -cin @($goalReplyId, $compositeReplyId)
+    }).Count -eq 2) "Composite Back did not restore exact parent cards and Reply identities"
+    $evidence.replyActions = [ordered]@{
+      goal = [ordered]@{ invokedActionAutomationId = $goalReplyId; workspaceLoopBarAutomationId = $goalWorkspaceId }
+      composite = [ordered]@{ invokedActionAutomationId = $compositeReplyId; nestedCardAutomationIds = $nestedIds; backAutomationId = $backId }
+      restoredParentCardAutomationIds = @($restoredReply.Items | Where-Object {
+        $_.Current.AutomationId -cin $replyCardIds
+      } | ForEach-Object { [string]$_.Current.AutomationId })
+    }
+    Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 20)) `
+      "original graph fixture restoration was rejected"
+    $restoredOriginal = Wait-ForGraphChildren $root $rawWalker `
+      { $_.Current.AutomationId -cin $replyCardIds } `
+      { param($items)
+        $items.Count -eq 2 -and @($items | Where-Object { $_.Current.AutomationId -cin $replyCardIds }).Count -eq 2 -and
+        (@($items | ForEach-Object { $_.Current.Name }) -join '|') -ceq 'UIA loop A|UIA loop B' }
+    Require ($restoredOriginal.Items.Count -eq 2 -and @($restoredOriginal.Items | Where-Object {
+      $_.Current.AutomationId -cin $replyCardIds
+    }).Count -eq 2 -and (@($restoredOriginal.Items | ForEach-Object {
+      $_.Current.Name
+    }) -join '|') -ceq 'UIA loop A|UIA loop B') "Original owned fixture graph was not restored"
+    $restoredGraphSnapshot = @($restoredOriginal.Children | ForEach-Object {
+      [ordered]@{automationId=[string]$_.Current.AutomationId;name=[string]$_.Current.Name
+        processId=[int]$_.Current.ProcessId;parentId=[string]$rawWalker.GetParent($_).Current.AutomationId
+        controlType=[string]$_.Current.ControlType.ProgrammaticName}
+    })
+    $restorationDecision=Get-CardsFixtureRestorationDecision $originalGraphSnapshot $restoredGraphSnapshot $process.Id
+    Require $restorationDecision.ready "Original complete graph-child identities, multiplicities, owners or roles were not restored"
+    $evidence.originalFixtureRestored = @($restoredOriginal.Items | ForEach-Object { [string]$_.Current.AutomationId })
+    $evidence.originalGraphChildren=$originalGraphSnapshot
+    $evidence.restoredGraphChildren=$restoredGraphSnapshot
     $json = $evidence | ConvertTo-Json -Compress -Depth 8
     $hasher = [Security.Cryptography.SHA256]::Create()
     try {

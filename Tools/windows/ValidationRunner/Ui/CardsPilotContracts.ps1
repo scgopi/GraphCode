@@ -62,6 +62,30 @@ function Invoke-CardsContract([string] $id, [scriptblock] $test, [bool] $reject 
     })
   } | ConvertTo-Json -Compress))
 }
+function Assert-CardsLiveActionInvocations([string] $source) {
+  $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$null, [ref]$errors)
+  if ($errors.Count -ne 0) { throw [InvalidOperationException]::new('CARDS_PILOT_ACTION_INVOCATION: live gate does not parse') }
+  $branches = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.IfStatementAst] -and
+      $node.Clauses[0].Item1.Extent.Text -ceq '$CycleHierarchyOnly'
+  }, $true))
+  if ($branches.Count -ne 1) { throw [InvalidOperationException]::new('CARDS_PILOT_ACTION_INVOCATION: expected one focused Cards slice') }
+  foreach ($target in @('$mainInspect[0]', '$goalReply[0]', '$compositeReply[0]')) {
+    $calls = @($branches[0].Clauses[0].Item2.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+        $node.Member.Value -ceq 'Invoke' -and
+        $node.Expression -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+        $node.Expression.Member.Value -ceq 'GetCurrentPattern' -and
+        $node.Expression.Expression.Extent.Text -ceq $target
+    }, $true))
+    if ($calls.Count -ne 1) {
+      throw [InvalidOperationException]::new("CARDS_PILOT_ACTION_INVOCATION: $target must invoke its actual action exactly once")
+    }
+  }
+}
 Invoke-CardsContract 'ui.cards-pilot.target-valid' {
   Assert-CardsPilotTarget (New-CardsContractGraph) $project $nodeId 'goalBased'
 }
@@ -369,6 +393,77 @@ Invoke-CardsContract 'ui.cards-pilot.default-source-boundary' {
   if ($null -eq $guard -or $guard.Clauses[0].Item1.Extent.Text -cne
       '$cardsPilotEnvironment.Contains("GRAPHCODE_CARDS_NATIVE_ACCEPTANCE_PLAN")') {
     throw 'Default CI can enter pilot without explicit process-only plan'
+  }
+  $gateSource = Get-Content -LiteralPath (Join-Path $RepositoryRoot 'Tools\windows\uia-live-gate.ps1') -Raw
+  Assert-CardsLiveActionInvocations $gateSource
+  foreach ($target in @('$mainInspect[0]', '$goalReply[0]', '$compositeReply[0]')) {
+    $action = $target + '.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()'
+    $mutated = $gateSource.Replace($action, $action.Replace('.Invoke()', '.GetType()'))
+    if ($mutated -ceq $gateSource) { throw "Missing Cards action mutation target $target" }
+    $caught = $null
+    try { Assert-CardsLiveActionInvocations $mutated } catch { $caught = $_.Exception }
+    if ($caught -isnot [InvalidOperationException] -or $caught.Message -notmatch '^CARDS_PILOT_ACTION_INVOCATION:') {
+      throw "Missing actual Cards action $target passed its contract"
+    }
+  }
+  foreach ($name in @('Get-CardsCompositeBackDecision','Get-CardsFixtureRestorationDecision','Get-MultiProjectAutomationId')) {
+    $definition = $gate.Find({
+      param($node)
+      $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+    },$true)
+    if ($null -eq $definition) { throw "Missing breadcrumb contract function $name" }
+    . ([scriptblock]::Create($definition.Extent.Text))
+  }
+  $backId = Get-MultiProjectAutomationId 'composite-back' $peerId
+  $back = @{automationId=$backId;name='Back to UIA project';processId=123;parentId='graph'}
+  if (-not (Get-CardsCompositeBackDecision @($back) $backId 123).ready) { throw 'Exact parent breadcrumb was rejected' }
+  foreach ($invalid in @(
+      @{items=@()},
+      @{items=@($null)},
+      @{items=@($back,$back)},
+      @{items=@(@{automationId=(Get-MultiProjectAutomationId 'composite-back' $nodeId);name=$back.name;processId=123;parentId='graph'})},
+      @{items=@(@{automationId=$backId;name=$back.name;processId=123;parentId='loops'})})) {
+    if ((Get-CardsCompositeBackDecision $invalid.items $backId 123).ready) {
+      throw 'Missing/null/duplicate/foreign-parent breadcrumb was accepted'
+    }
+  }
+  $restoreWait = $gate.Find({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and
+      $node.GetCommandName() -ceq 'Wait-ForGraphChildren' -and
+      $node.Parent.Parent -is [Management.Automation.Language.AssignmentStatementAst] -and
+      $node.Parent.Parent.Left.Extent.Text -ceq '$restoredOriginal'
+  },$true)
+  if ($null -eq $restoreWait) { throw 'Original fixture restoration wait missing' }
+  $restoreFilter = $restoreWait.CommandElements[-2].ScriptBlock.GetScriptBlock()
+  $restoreUntil = $restoreWait.CommandElements[-1].ScriptBlock.GetScriptBlock()
+  $replyCardIds = @('canvas-card-goal','canvas-card-composite')
+  $originalChildren = @(
+    @{Current=@{AutomationId=$replyCardIds[0];Name='UIA loop A'}},
+    @{Current=@{AutomationId=$replyCardIds[1];Name='UIA loop B'}},
+    @{Current=@{AutomationId='canvas-card-reclaim';Name='Reclaim'}},
+    @{Current=@{AutomationId='canvas-card-keep';Name='Keep'}}
+  )
+  $restoredCards = @($originalChildren | Where-Object $restoreFilter)
+  if ($restoredCards.Count -ne 2 -or -not (& $restoreUntil $restoredCards)) {
+    throw 'Original fixture restoration mistakes Reclaim/Keep siblings for loop cards'
+  }
+  $baseline = @($originalChildren | ForEach-Object {
+    @{automationId=$_.Current.AutomationId;name=$_.Current.Name;processId=123;parentId='graph';controlType='ControlType.Button'}
+  })
+  if (-not (Get-CardsFixtureRestorationDecision $baseline $baseline 123).ready) {
+    throw 'Original graph with legitimate Reclaim/Keep siblings was rejected'
+  }
+  $wrongParent=@($baseline | ForEach-Object {$_.Clone()});$wrongParent[0].parentId='loops'
+  $wrongRole=@($baseline | ForEach-Object {$_.Clone()});$wrongRole[0].controlType='ControlType.Text'
+  $notRestored=@($baseline | ForEach-Object {$_.Clone()});$notRestored[0].name='Reply Goal'
+  foreach ($invalid in @(
+      @{items=@($baseline[0],$baseline[1],$baseline[2])},
+      @{items=@($baseline[0],$baseline[1],$baseline[2],$baseline[2])},
+      @{items=$wrongParent},@{items=$wrongRole},@{items=$notRestored},@{items=@($null)})) {
+    if ((Get-CardsFixtureRestorationDecision $baseline $invalid.items 123).ready) {
+      throw 'Missing/duplicate/foreign-parent/changed-role/unrestored graph-child snapshot was accepted'
+    }
   }
 }
 Invoke-CardsContract 'ui.cards-pilot.production-environment-isolated' {
