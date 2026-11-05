@@ -253,7 +253,7 @@ final class WindowsCardTransferTests: XCTestCase {
     enum Closed: Error { case connection }
     XCTAssertEqual(
       CardTransferFailure.exchange(Closed.connection, mutationDispatched: true).status,
-      .outcome_unknown)
+      .outcomeUnknown)
     XCTAssertEqual(
       CardTransferFailure.exchange(Closed.connection, mutationDispatched: false).status, .failed)
     let refusal = CardTransferFailure(status: .rejected, message: "Refused")
@@ -270,7 +270,7 @@ final class WindowsCardTransferTests: XCTestCase {
         _ = try CardTransferWire.graphReply(data, requestID: id, projectPath: project)
       })
       XCTAssertEqual(error.status, .failed)
-      XCTAssertEqual(CardTransferFailure.exchange(error, mutationDispatched: true).status, .outcome_unknown)
+      XCTAssertEqual(CardTransferFailure.exchange(error, mutationDispatched: true).status, .outcomeUnknown)
       XCTAssertEqual(CardTransferFailure.exchange(error, mutationDispatched: false).status, .failed)
     }
   }
@@ -342,7 +342,7 @@ final class WindowsCardTransferTests: XCTestCase {
     let request = try XCTUnwrap(CardTransferRequest.parse(arguments()))
     for (status, exitCode) in [
       (CardTransferStatus.succeeded, Int32(0)), (.rejected, 1), (.oversized, 1),
-      (.failed, 1), (.unavailable, 69), (.outcome_unknown, 75),
+      (.failed, 1), (.unavailable, 69), (.outcomeUnknown, 75),
     ] {
       let result = CardTransferResult(
         request: request, status: status, message: "Explicit result",
@@ -359,9 +359,24 @@ final class WindowsCardTransferTests: XCTestCase {
       XCTAssertEqual(object["sessionPreparationStarted"] as? Bool, false)
     }
     let partial = CardTransferResult(
-      request: request, status: .outcome_unknown, message: "Check the graph; do not retry.",
+      request: request, status: .outcomeUnknown, message: "Check the graph; do not retry.",
       sessionPreparationStarted: true)
     XCTAssertTrue(partial.sessionPreparationStarted)
+  }
+
+  func testUnknownOutcomeRetainsItsWireCodeAndExitCode() throws {
+    XCTAssertEqual(CardTransferStatus.outcomeUnknown.rawValue, "outcome_unknown")
+    XCTAssertEqual(CardTransferStatus.outcomeUnknown.exitCode, 75)
+    XCTAssertEqual(CardTransferStatus(rawValue: "outcome_unknown"), .outcomeUnknown)
+    XCTAssertNil(CardTransferStatus(rawValue: "outcomeUnknown"))
+    let result = CardTransferResult(
+      request: nil, status: .outcomeUnknown, message: "Check the graph; do not retry.",
+      sessionPreparationStarted: true)
+    let line = try result.record()
+    let data = Data(line.dropFirst(CardTransferResult.prefix.count).utf8)
+    let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    XCTAssertEqual(object["status"] as? String, "outcome_unknown")
+    XCTAssertEqual(result.exitCode, 75)
   }
 
   func testZIPFailureDoesNotReachDestinationCommit() {

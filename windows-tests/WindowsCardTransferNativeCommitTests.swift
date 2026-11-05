@@ -83,7 +83,7 @@ final class WindowsCardTransferNativeCommitTests: XCTestCase {
       let existing = Data("existing destination must survive".utf8)
       try existing.write(to: fixture.target, options: .withoutOverwriting)
       XCTAssertThrowsError(try commit(fixture)) { error in
-        XCTAssertEqual((error as? CardTransferFailure)?.status, .outcome_unknown)
+        XCTAssertEqual((error as? CardTransferFailure)?.status, .outcomeUnknown)
       }
       XCTAssertEqual(try Data(contentsOf: fixture.target), existing)
       XCTAssertEqual(try Data(contentsOf: fixture.source), fixture.bytes)
@@ -144,7 +144,7 @@ final class WindowsCardTransferNativeCommitTests: XCTestCase {
       defer { XCTAssertTrue(CloseHandle(target)) }
       XCTAssertThrowsError(try commit(fixture, replace: true)) { error in
         let failure = error as? CardTransferFailure
-        XCTAssertEqual(failure?.status, .outcome_unknown)
+        XCTAssertEqual(failure?.status, .outcomeUnknown)
         XCTAssertTrue(failure?.message.contains("NTSTATUS") == true)
       }
       XCTAssertEqual(try Data(contentsOf: fixture.target), existing)
@@ -163,7 +163,7 @@ final class WindowsCardTransferNativeCommitTests: XCTestCase {
         try CardTransferNativeArchiveCommit.requireSynchronousSuccess(returned: returned, completed: completed)
       ) { error in
         let failure = error as? CardTransferFailure
-        XCTAssertEqual(failure?.status, .outcome_unknown)
+        XCTAssertEqual(failure?.status, .outcomeUnknown)
         XCTAssertTrue(failure?.message.contains(String(UInt32(bitPattern: returned), radix: 16)) == true)
         XCTAssertTrue(failure?.message.contains(String(UInt32(bitPattern: completed), radix: 16)) == true)
       }

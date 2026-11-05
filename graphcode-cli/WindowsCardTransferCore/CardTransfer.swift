@@ -24,13 +24,13 @@ public enum CardTransferStatus: String, Sendable {
   case oversized
   case unavailable
   case failed
-  case outcome_unknown
+  case outcomeUnknown = "outcome_unknown"
 
   public var exitCode: Int32 {
     switch self {
     case .succeeded: return 0
     case .unavailable: return 69
-    case .outcome_unknown: return 75
+    case .outcomeUnknown: return 75
     case .rejected, .oversized, .failed: return 1
     }
   }
@@ -54,7 +54,7 @@ public struct CardTransferFailure: Error, LocalizedError, Sendable {
       return failure
     }
     return Self(
-      status: mutationDispatched ? .outcome_unknown : .failed,
+      status: mutationDispatched ? .outcomeUnknown : .failed,
       message: mutationDispatched
         ? "Import outcome is unknown. Check the graph; do not retry automatically. \(error.localizedDescription)"
         : "The daemon did not confirm the requested snapshot. \(error.localizedDescription)")
@@ -103,7 +103,10 @@ public struct CardTransferRequest: Sendable {
       let node = values["--node"].flatMap(UUID.init(uuidString:)),
       let project = values["--project"], let scopeText = values["--containing-composite"],
       let path = values[pathFlag]
-    else { throw refused("Transfer requires invocation, project, node, containing-composite and ZIP path.") }
+    else {
+      throw refused(
+        "Transfer requires invocation, project, node, containing-composite and ZIP path.")
+    }
     let scope: CardTransferScope
     if scopeText == "root" {
       scope = .root
@@ -147,7 +150,8 @@ public enum CardTransferWindowsPath {
 
   public static func extended(_ path: String) throws -> String {
     guard isAbsolute(path) else {
-      throw CardTransferFailure(status: .rejected, message: "Expected an absolute drive or UNC filesystem path.")
+      throw CardTransferFailure(
+        status: .rejected, message: "Expected an absolute drive or UNC filesystem path.")
     }
     let normalized = path.replacingOccurrences(of: "/", with: "\\")
     if normalized.hasPrefix("\\\\?\\") { return normalized }
@@ -170,7 +174,9 @@ public enum CardTransferLocalProject {
     else {
       throw CardTransferFailure(
         status: .rejected,
-        message: "This card-transfer route supports local drive or UNC projects only; remote and overview transfers are not available.")
+        message:
+          "This card-transfer route supports local drive or UNC projects only; remote and overview transfers are not available."
+      )
     }
     return try perform()
   }
@@ -187,7 +193,8 @@ public struct CardTransferTarget: Sendable {
     var matches: [Self] = []
     func visit(_ graph: LoopGraph, owner: UUID?, depth: Int) throws {
       guard depth <= 64 else {
-        throw CardTransferFailure(status: .rejected, message: "The graph nesting is too deep to transfer.")
+        throw CardTransferFailure(
+          status: .rejected, message: "The graph nesting is too deep to transfer.")
       }
       if graph.nodes[id: nodeID] != nil {
         matches.append(Self(nodeID: nodeID, graph: graph, containingComposite: owner))
@@ -213,7 +220,8 @@ public struct CardTransferTarget: Sendable {
 
   public func importCommand(_ request: GraphImportRequest) throws -> GraphCommand {
     guard request.asChildOf == nodeID else {
-      throw CardTransferFailure(status: .rejected, message: "The import parent does not match the selected card.")
+      throw CardTransferFailure(
+        status: .rejected, message: "The import parent does not match the selected card.")
     }
     let command = GraphCommand.importNodes(request)
     return containingComposite.map { .subGraphCommand(nodeID: $0, command: command) } ?? command
@@ -224,7 +232,8 @@ public enum CardTransferWire {
   public static func request(id: UUID, command: DaemonCommand) throws -> Data {
     let data = try JSONEncoder().encode(DaemonWireEnvelope.request(id: id, command: command))
     guard data.count <= FramedMessageIO.v2MaxPayloadBytes else {
-      throw CardTransferFailure(status: .oversized, message: "The transfer request exceeds the v2 payload limit.")
+      throw CardTransferFailure(
+        status: .oversized, message: "The transfer request exceeds the v2 payload limit.")
     }
     return data
   }
@@ -240,7 +249,9 @@ public enum CardTransferWire {
         status: .rejected, message: envelope.error?.message ?? "The daemon refused protocol v2.")
     }
     guard envelope.kind == .hello, envelope.selectedVersion == 2 else {
-      throw CardTransferFailure(status: .rejected, message: "Card transfer requires daemon protocol v2; no downgrade is allowed.")
+      throw CardTransferFailure(
+        status: .rejected,
+        message: "Card transfer requires daemon protocol v2; no downgrade is allowed.")
     }
   }
 
@@ -255,34 +266,41 @@ public enum CardTransferWire {
       return nil
     }
     guard envelope.requestID == requestID else {
-      throw CardTransferFailure(status: .failed, message: "The daemon reply has no matching request identity.")
+      throw CardTransferFailure(
+        status: .failed, message: "The daemon reply has no matching request identity.")
     }
     if envelope.kind == .error, let error = envelope.error {
       guard error.code == DaemonWireErrorCode.requestFailed.rawValue else {
         throw CardTransferFailure(
           status: .failed,
-          message: "The daemon did not provide an authoritative mutation verdict (\(error.code)): \(error.message)")
+          message:
+            "The daemon did not provide an authoritative mutation verdict (\(error.code)): \(error.message)"
+        )
       }
       throw CardTransferFailure(
-        status: error.message.lowercased().contains("exceeds the v2 payload limit") ? .oversized : .rejected,
+        status: error.message.lowercased().contains("exceeds the v2 payload limit")
+          ? .oversized : .rejected,
         message: error.message)
     }
     guard envelope.kind == .response, case .graphChanged(let graph)? = envelope.event,
       graph.project.path == projectPath
     else {
-      throw CardTransferFailure(status: .failed, message: "The daemon did not return this project's correlated graph.")
+      throw CardTransferFailure(
+        status: .failed, message: "The daemon did not return this project's correlated graph.")
     }
     return graph
   }
 
   private static func decode(_ data: Data) throws -> DaemonWireEnvelope {
     guard data.count <= FramedMessageIO.v2MaxPayloadBytes else {
-      throw CardTransferFailure(status: .failed, message: "The daemon reply exceeds the v2 payload limit.")
+      throw CardTransferFailure(
+        status: .failed, message: "The daemon reply exceeds the v2 payload limit.")
     }
     do {
       return try JSONDecoder().decode(DaemonWireEnvelope.self, from: data).validated()
     } catch {
-      throw CardTransferFailure(status: .failed, message: "Invalid daemon v2 reply: \(error.localizedDescription)")
+      throw CardTransferFailure(
+        status: .failed, message: "Invalid daemon v2 reply: \(error.localizedDescription)")
     }
   }
 }
@@ -308,7 +326,8 @@ public struct CardTransferPublication {
   public func cleanup(removeOwnedEmptyDirectory: () throws -> Void) throws {
     guard committed else {
       throw CardTransferFailure(
-        status: .failed, message: "Staging is retained because archive publication was not confirmed.")
+        status: .failed,
+        message: "Staging is retained because archive publication was not confirmed.")
     }
     try removeOwnedEmptyDirectory()
   }
@@ -341,7 +360,10 @@ public struct CardTransferOwnership: Sendable {
       archiveIsRegular, children == ["bundle.zip"]
     else {
       throw CardTransferFailure(
-        status: .rejected, message: "Export staging identity, file type or children changed; nothing was published or deleted.")
+        status: .rejected,
+        message:
+          "Export staging identity, file type or children changed; nothing was published or deleted."
+      )
     }
   }
 
@@ -351,7 +373,8 @@ public struct CardTransferOwnership: Sendable {
   ) throws {
     guard expected == observed, !isReparse, children.isEmpty else {
       throw CardTransferFailure(
-        status: .rejected, message: "Staging changed or has unexpected children; nothing was deleted.")
+        status: .rejected,
+        message: "Staging changed or has unexpected children; nothing was deleted.")
     }
     try remove()
   }
@@ -404,7 +427,8 @@ public struct CardTransferResult: Encodable, Sendable {
     encoder.outputFormatting = [.sortedKeys]
     let record = Self.prefix + String(decoding: try encoder.encode(self), as: UTF8.self) + "\n"
     guard record.utf8.count <= 256 * 1024 else {
-      throw CardTransferFailure(status: .failed, message: "The transfer result exceeds the output limit.")
+      throw CardTransferFailure(
+        status: .failed, message: "The transfer result exceeds the output limit.")
     }
     return record
   }

@@ -10,15 +10,17 @@
       let request: CardTransferRequest
       do {
         guard let parsed = try CardTransferRequest.parse(arguments) else {
-          return emit(CardTransferResult(
-            request: nil, status: .rejected, message: "Missing card-transfer opt-in.",
-            sessionPreparationStarted: false))
+          return emit(
+            CardTransferResult(
+              request: nil, status: .rejected, message: "Missing card-transfer opt-in.",
+              sessionPreparationStarted: false))
         }
         request = parsed
       } catch {
-        return emit(CardTransferResult(
-          request: nil, status: .rejected, message: error.localizedDescription,
-          sessionPreparationStarted: false))
+        return emit(
+          CardTransferResult(
+            request: nil, status: .rejected, message: error.localizedDescription,
+            sessionPreparationStarted: false))
       }
       final class ResultBox: @unchecked Sendable {
         var result: CardTransferResult?
@@ -31,9 +33,10 @@
       }
       finished.wait()
       guard let result = box.result else {
-        return emit(CardTransferResult(
-          request: request, status: .failed, message: "The transfer completed without a result.",
-          sessionPreparationStarted: false))
+        return emit(
+          CardTransferResult(
+            request: request, status: .failed, message: "The transfer completed without a result.",
+            sessionPreparationStarted: false))
       }
       return emit(result)
     }
@@ -84,7 +87,8 @@
           result = await export(request, projectPath: projectPath, target: target)
         case .import:
           guard let bundle = GraphExportBundle.readFromZip(at: request.zipPath) else {
-            throw CardTransferFailure(status: .failed, message: "Could not read the selected GraphCode ZIP bundle.")
+            throw CardTransferFailure(
+              status: .failed, message: "Could not read the selected GraphCode ZIP bundle.")
           }
           guard !bundle.graphSnapshot.nodes.isEmpty else {
             throw CardTransferFailure(status: .rejected, message: "The bundle contains no loops.")
@@ -92,20 +96,23 @@
           let current = try await openedClient.graph(
             .readProjectGraph(path: projectPath), projectPath: projectPath)
           guard current.id == root.id else {
-            throw CardTransferFailure(status: .rejected, message: "The project changed before session preparation.")
+            throw CardTransferFailure(
+              status: .rejected, message: "The project changed before session preparation.")
           }
           _ = try CardTransferTarget.resolve(
             nodeID: request.nodeID, expectedScope: request.scope, in: current)
           sessionPreparationStarted = true
-          guard let prepared = await bundle.preparedImportRequest(
-            asChildOf: request.nodeID, projectPath: projectPath)
+          guard
+            let prepared = await bundle.preparedImportRequest(
+              asChildOf: request.nodeID, projectPath: projectPath)
           else {
             throw CardTransferFailure(status: .rejected, message: "The bundle contains no loops.")
           }
           let refreshed = try await openedClient.graph(
             .readProjectGraph(path: projectPath), projectPath: projectPath)
           guard refreshed.id == root.id else {
-            throw CardTransferFailure(status: .rejected, message: "The project changed while preparing sessions.")
+            throw CardTransferFailure(
+              status: .rejected, message: "The project changed while preparing sessions.")
           }
           let refreshedTarget = try CardTransferTarget.resolve(
             nodeID: request.nodeID, expectedScope: request.scope, in: refreshed)
@@ -115,22 +122,27 @@
             projectPath: projectPath, mutation: true)
           guard imported.id == root.id else {
             throw CardTransferFailure(
-              status: .outcome_unknown,
-              message: "The import reply names another graph identity. Check the graph; do not retry automatically.")
+              status: .outcomeUnknown,
+              message:
+                "The import reply names another graph identity. Check the graph; do not retry automatically."
+            )
           }
           result = CardTransferResult(
             request: request, status: .succeeded,
-            message: "Imported \(prepared.request.snapshot.nodes.count) loop(s); \(prepared.resumingSessions) session(s) restored. Embedded descendants may not carry all memory or session history.",
+            message:
+              "Imported \(prepared.request.snapshot.nodes.count) loop(s); \(prepared.resumingSessions) session(s) restored. Embedded descendants may not carry all memory or session history.",
             sessionPreparationStarted: true)
         }
       } catch {
-        let failure = error as? CardTransferFailure
+        let failure =
+          error as? CardTransferFailure
           ?? CardTransferFailure(status: .failed, message: error.localizedDescription)
         result = CardTransferResult(
           request: request, status: failure.status,
-          message: failure.message + (sessionPreparationStarted
-            ? " Session preparation already started; restored artifacts may remain even if the graph was not changed."
-            : ""),
+          message: failure.message
+            + (sessionPreparationStarted
+              ? " Session preparation already started; restored artifacts may remain even if the graph was not changed."
+              : ""),
           sessionPreparationStarted: sessionPreparationStarted)
       }
       if let client {
@@ -139,8 +151,10 @@
         } catch {
           result = CardTransferResult(
             request: request, status: result.outcome,
-            message: result.message + " Closing the owned daemon connection failed: \(error.localizedDescription)",
-            sessionPreparationStarted: result.sessionPreparationStarted, outputPath: result.outputPath)
+            message: result.message
+              + " Closing the owned daemon connection failed: \(error.localizedDescription)",
+            sessionPreparationStarted: result.sessionPreparationStarted,
+            outputPath: result.outputPath)
         }
       }
       return result
@@ -158,25 +172,30 @@
           destination: request.zipPath, replaceExisting: request.replaceExisting)
         staging = owned
         let persistence = ProjectPersistence(baseDirectory: SupportDirectory.url)
-        guard let bundle = await persistence.createExportBundle(
-          for: [request.nodeID], from: target.graph, projectPath: projectPath)
+        guard
+          let bundle = await persistence.createExportBundle(
+            for: [request.nodeID], from: target.graph, projectPath: projectPath)
         else {
-          throw CardTransferFailure(status: .failed, message: "Could not prepare the selected loop's bundle.")
+          throw CardTransferFailure(
+            status: .failed, message: "Could not prepare the selected loop's bundle.")
         }
         try publication.writeAndCommit(
           writeArchive: {
             guard bundle.writeToZip(at: owned.archive.path) != nil else {
               throw CardTransferFailure(
-                status: .failed, message: "ZIP creation failed; the selected destination was not replaced.")
+                status: .failed,
+                message: "ZIP creation failed; the selected destination was not replaced.")
             }
           },
           acquireArchive: { try owned.acquireArchive() },
           validateOwnership: { try owned.validateForCommit() },
           commit: { try owned.commit() })
         status = .succeeded
-        message = "Exported the selected loop. Embedded descendants may not carry all memory or session history."
+        message =
+          "Exported the selected loop. Embedded descendants may not carry all memory or session history."
       } catch {
-        let failure = error as? CardTransferFailure
+        let failure =
+          error as? CardTransferFailure
           ?? CardTransferFailure(status: .failed, message: error.localizedDescription)
         status = failure.status
         message = failure.message
@@ -185,7 +204,8 @@
         do {
           try publication.cleanup { try staging.removeOwnedEmptyDirectory() }
         } catch {
-          message += " Export staging retained at \(staging.directory.path): \(error.localizedDescription)"
+          message +=
+            " Export staging retained at \(staging.directory.path): \(error.localizedDescription)"
         }
         do {
           try staging.close()
@@ -226,14 +246,18 @@
           let remaining = clock.now.duration(to: deadline).components
           let timeout = Double(remaining.seconds) + Double(remaining.attoseconds) / 1e18
           guard timeout > 0 else {
-            throw CardTransferFailure(status: .failed, message: "Timed out waiting for the correlated daemon reply.")
+            throw CardTransferFailure(
+              status: .failed, message: "Timed out waiting for the correlated daemon reply.")
           }
           let frame = try await connection.receiveFrameWithDeadline(timeout)
-          if let graph = try CardTransferWire.graphReply(frame, requestID: id, projectPath: projectPath) {
+          if let graph = try CardTransferWire.graphReply(
+            frame, requestID: id, projectPath: projectPath)
+          {
             return graph
           }
         }
-        throw CardTransferFailure(status: .failed, message: "No correlated reply within 64 daemon frames.")
+        throw CardTransferFailure(
+          status: .failed, message: "No correlated reply within 64 daemon frames.")
       } catch {
         throw CardTransferFailure.exchange(error, mutationDispatched: mutation)
       }
@@ -256,11 +280,14 @@
       let target = URL(fileURLWithPath: destination).standardizedFileURL
       let attributes = try withWindowsPath(target) { GetFileAttributesW($0) }
       if attributes != INVALID_FILE_ATTRIBUTES {
-        guard attributes & DWORD(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) == 0 else {
-          throw CardTransferFailure(status: .rejected, message: "The export destination is not a regular file.")
+        guard attributes & DWORD(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) == 0
+        else {
+          throw CardTransferFailure(
+            status: .rejected, message: "The export destination is not a regular file.")
         }
         guard replaceExisting else {
-          throw CardTransferFailure(status: .rejected, message: "The destination exists and overwrite was not approved.")
+          throw CardTransferFailure(
+            status: .rejected, message: "The destination exists and overwrite was not approved.")
         }
       } else {
         let error = GetLastError()
@@ -285,7 +312,8 @@
         try requireDirectory(parentInfo)
         parentIdentity = try identity(parentInfo)
         guard try withWindowsPath(directory, { CreateDirectoryW($0, nil) }) else {
-          throw WindowsPipeError.win32(operation: "Create owned export staging", code: GetLastError())
+          throw WindowsPipeError.win32(
+            operation: "Create owned export staging", code: GetLastError())
         }
         created = true
         let ownedHandle = try open(
@@ -297,8 +325,12 @@
         directoryIdentity = try identity(directoryInfo)
       } catch {
         var message = error.localizedDescription
-        if created { message += " Staging retained at \(directory.path); ownership was not established." }
-        do { try close() } catch { message += " Handle close failed: \(error.localizedDescription)" }
+        if created {
+          message += " Staging retained at \(directory.path); ownership was not established."
+        }
+        do { try close() } catch {
+          message += " Handle close failed: \(error.localizedDescription)"
+        }
         throw CardTransferFailure(status: .failed, message: message)
       }
     }
@@ -311,15 +343,19 @@
 
     func acquireArchive() throws {
       guard archiveHandle == nil, let directoryIdentity else {
-        throw CardTransferFailure(status: .failed, message: "Export staging has no directory ownership receipt.")
+        throw CardTransferFailure(
+          status: .failed, message: "Export staging has no directory ownership receipt.")
       }
       let handle = try open(
         archive, access: DWORD(DELETE | FILE_READ_DATA | FILE_READ_ATTRIBUTES),
         share: DWORD(FILE_SHARE_READ), directory: false)
       archiveHandle = handle
       let info = try information(handle)
-      guard info.dwFileAttributes & DWORD(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) == 0 else {
-        throw CardTransferFailure(status: .rejected, message: "The completed archive is not a regular file.")
+      guard
+        info.dwFileAttributes & DWORD(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) == 0
+      else {
+        throw CardTransferFailure(
+          status: .rejected, message: "The completed archive is not a regular file.")
       }
       ownership = CardTransferOwnership(directory: directoryIdentity, archive: try identity(info))
     }
@@ -328,7 +364,8 @@
       guard let ownership, let archiveHandle, let directoryHandle,
         let parentHandle, let parentIdentity, let directoryIdentity
       else {
-        throw CardTransferFailure(status: .failed, message: "The export archive has no held ownership receipt.")
+        throw CardTransferFailure(
+          status: .failed, message: "The export archive has no held ownership receipt.")
       }
       try requireDirectory(information(parentHandle))
       try requireDirectory(information(directoryHandle))
@@ -337,26 +374,30 @@
         try probe(destination.deletingLastPathComponent(), directory: true) == parentIdentity,
         try identity(information(archiveHandle)) == ownership.archive
       else {
-        throw CardTransferFailure(status: .rejected, message: "The export's held directory or archive identity changed.")
+        throw CardTransferFailure(
+          status: .rejected, message: "The export's held directory or archive identity changed.")
       }
       let archiveInfo = try information(archiveHandle)
       try ownership.validate(
         directory: probe(directory, directory: true), archive: probe(archive, directory: false),
         directoryIsReparse: false,
-        archiveIsRegular: archiveInfo.dwFileAttributes & DWORD(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) == 0,
+        archiveIsRegular: archiveInfo.dwFileAttributes
+          & DWORD(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) == 0,
         children: FileManager.default.contentsOfDirectory(atPath: directory.path).sorted())
     }
 
     func commit() throws {
       try validateForCommit()
       guard let archiveHandle, let parentHandle else {
-        throw CardTransferFailure(status: .failed, message: "The platform cannot describe an owned archive rename.")
+        throw CardTransferFailure(
+          status: .failed, message: "The platform cannot describe an owned archive rename.")
       }
       let attributes = try withWindowsPath(destination) { GetFileAttributesW($0) }
       if attributes != INVALID_FILE_ATTRIBUTES,
         attributes & DWORD(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
       {
-        throw CardTransferFailure(status: .rejected, message: "The export destination changed to a directory or link.")
+        throw CardTransferFailure(
+          status: .rejected, message: "The export destination changed to a directory or link.")
       }
       try CardTransferNativeArchiveCommit.rename(
         archive: archiveHandle, parent: parentHandle,
@@ -369,7 +410,8 @@
       }
       try requireDirectory(information(directoryHandle))
       guard try identity(information(directoryHandle)) == directoryIdentity else {
-        throw CardTransferFailure(status: .rejected, message: "The held staging directory identity changed.")
+        throw CardTransferFailure(
+          status: .rejected, message: "The held staging directory identity changed.")
       }
       try CardTransferOwnership.removeEmptyDirectory(
         expected: directoryIdentity, observed: probe(directory, directory: true),
@@ -377,10 +419,13 @@
       ) {
         var disposition = FILE_DISPOSITION_INFO()
         withUnsafeMutableBytes(of: &disposition) { $0[0] = 1 }
-        guard SetFileInformationByHandle(
-          directoryHandle, FileDispositionInfo, &disposition, DWORD(MemoryLayout<FILE_DISPOSITION_INFO>.size))
+        guard
+          SetFileInformationByHandle(
+            directoryHandle, FileDispositionInfo, &disposition,
+            DWORD(MemoryLayout<FILE_DISPOSITION_INFO>.size))
         else {
-          throw WindowsPipeError.win32(operation: "Remove held empty staging directory", code: GetLastError())
+          throw WindowsPipeError.win32(
+            operation: "Remove held empty staging directory", code: GetLastError())
         }
       }
     }
@@ -405,7 +450,8 @@
           DWORD(FILE_FLAG_OPEN_REPARSE_POINT | (directory ? FILE_FLAG_BACKUP_SEMANTICS : 0)), nil)
       }
       guard let handle, handle != INVALID_HANDLE_VALUE else {
-        throw WindowsPipeError.win32(operation: "Acquire export identity handle", code: GetLastError())
+        throw WindowsPipeError.win32(
+          operation: "Acquire export identity handle", code: GetLastError())
       }
       return handle
     }
@@ -421,7 +467,8 @@
     private func identity(_ info: BY_HANDLE_FILE_INFORMATION) throws -> CardTransferFileIdentity {
       let index = UInt64(info.nFileIndexHigh) << 32 | UInt64(info.nFileIndexLow)
       guard index != 0 else {
-        throw CardTransferFailure(status: .rejected, message: "The filesystem did not provide a reliable export identity.")
+        throw CardTransferFailure(
+          status: .rejected, message: "The filesystem did not provide a reliable export identity.")
       }
       return CardTransferFileIdentity(volume: info.dwVolumeSerialNumber, index: index)
     }
@@ -430,7 +477,8 @@
       guard info.dwFileAttributes & DWORD(FILE_ATTRIBUTE_DIRECTORY) != 0,
         info.dwFileAttributes & DWORD(FILE_ATTRIBUTE_REPARSE_POINT) == 0
       else {
-        throw CardTransferFailure(status: .rejected, message: "Export staging or its parent is not an ordinary directory.")
+        throw CardTransferFailure(
+          status: .rejected, message: "Export staging or its parent is not an ordinary directory.")
       }
     }
 
