@@ -346,6 +346,20 @@ struct GraphcodeCommandTests {
   }
 
   @Test
+  func renderingAFinishedLoopShowsItsEndingOverItsOpenSession() {
+    let node = LoopNode(
+      title: "Naming check", loopType: .goalBased, goal: GoalSpec(summary: "work"),
+      presence: PresenceReading(presence: .awaitingInput, confidence: .scanned),
+      state: .succeeded)
+    let graph = LoopGraph(
+      project: ProjectRef(path: "/tmp/x", name: "x"), nodes: [node])
+
+    let output = GraphcodeCommand.render(graph)
+
+    #expect(output.contains("\(node.id)  succeeded  goalBased  Naming check"))
+  }
+
+  @Test
   func renderingAnEmptyGraphSaysSoRatherThanPrintingNothing() {
     let output = GraphcodeCommand.render(
       LoopGraph(project: ProjectRef(path: "/tmp/x", name: "x")))
