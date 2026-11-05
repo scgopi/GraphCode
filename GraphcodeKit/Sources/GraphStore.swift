@@ -1317,7 +1317,7 @@ public actor GraphStore {
       await stopNode(nodeID)
 
     case .restartNode(let nodeID):
-      await restartNode(nodeID)
+      await restartNode(nodeID, from: connectionID)
 
     case .restartSessions:
       await restartSessions()
@@ -3252,9 +3252,9 @@ public actor GraphStore {
   /// a stopped one was told to stay down, so both are refused rather than revived — except
   /// a loop stopped for a missing CLI, which nobody told to stay down and whose restart
   /// is exactly what its dialog asks the human for once the CLI is installed.
-  private func restartNode(_ nodeID: UUID) async {
+  private func restartNode(_ nodeID: UUID, from connectionID: UUID?) async {
     guard let node = graph.nodes[id: nodeID] else {
-      announceError("no loop \(nodeID) in this graph")
+      await refuse("no loop \(nodeID) in this graph", to: connectionID)
       return
     }
     if node.state == .stopped, let failure = node.launchFailure {
@@ -3262,7 +3262,8 @@ public actor GraphStore {
       return
     }
     guard !node.isResolved else {
-      announceError("\(node.title) has finished — there is no session to restart")
+      await refuse(
+        "\(node.title) has finished — there is no session to restart", to: connectionID)
       return
     }
     if node.loopType == .composite {
@@ -4506,6 +4507,19 @@ public actor GraphStore {
 
   private func announceError(_ message: String) {
     pendingErrors.append(message)
+  }
+
+  /// A refusal that is one client's business: changing nothing, it has no `.graphChanged`
+  /// to acknowledge it, so the asker's CLI hears only this — and a bystander parked on
+  /// its own verdict would take a broadcast copy for one (`mailroomInbox` does the same).
+  /// Without a v1 requester to answer, it falls back to the broadcast.
+  private func refuse(_ message: String, to connectionID: UUID?) async {
+    guard let connectionID, connections[connectionID] != nil else {
+      announceError(message)
+      return
+    }
+    _ = await send(.errorOccurred(message), to: connectionID)
+    onAnnounceError?(message)
   }
 
   private func reject(

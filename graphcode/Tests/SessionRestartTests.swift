@@ -70,6 +70,65 @@ struct SessionRestartTests {
     #expect(errors.value.count == 1)
   }
 
+  /// A refused restart changes nothing, so no `.graphChanged` acknowledges it: the
+  /// asking CLI hears only the refusal, and a bystander's CLI, parked on a verdict of its
+  /// own, must not take a broadcast copy for one.
+  @Test
+  func aRefusedRestartAnswersOnlyTheConnectionThatAsked() async throws {
+    let store = GraphStore(onRestartSession: { _, _ in true })
+    await store.handle(.createNode(draft("Done")))
+    let id = await store.graph.nodes[0].id
+    await store.handle(.nodeCheckApproved(id))
+    var asker: [Int32] = [0, 0]
+    var bystander: [Int32] = [0, 0]
+    #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &asker) == 0)
+    #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &bystander) == 0)
+    defer {
+      for descriptor in [asker[0], asker[1], bystander[0], bystander[1]] { close(descriptor) }
+    }
+    let askerID = UUID()
+    await store.addConnection(id: askerID, fileDescriptor: asker[0])
+    await store.addConnection(id: UUID(), fileDescriptor: bystander[0])
+    guard case .graphChanged = try nextEvent(from: asker[1]),
+      case .graphChanged = try nextEvent(from: bystander[1])
+    else {
+      Issue.record("expected each connection's joining snapshot")
+      return
+    }
+
+    await store.handle(.restartNode(id), from: askerID)
+
+    guard case .errorOccurred(let message) = try nextEvent(from: asker[1]) else {
+      Issue.record("the asker heard nothing, so its CLI waits out its timeout")
+      return
+    }
+    #expect(message == "Done has finished — there is no session to restart")
+    var reached: [String] = []
+    while let event = try nextEvent(from: bystander[1], waiting: 1) {
+      if case .errorOccurred(let message) = event { reached.append(message) }
+    }
+    #expect(reached.isEmpty)
+  }
+
+  /// Blocking read with a deadline: `OutboundChannels` writes off the actor, so a
+  /// non-blocking read straight after `handle` races the delivery.
+  private func nextEvent(from descriptor: Int32, waiting seconds: Int32 = 2) throws
+    -> DaemonEvent?
+  {
+    var timeout = timeval(tv_sec: Int(seconds), tv_usec: 0)
+    setsockopt(
+      descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    var length: UInt32 = 0
+    var header = [UInt8](repeating: 0, count: 4)
+    guard recv(descriptor, &header, 4, MSG_WAITALL) == 4 else { return nil }
+    withUnsafeMutableBytes(of: &length) { $0.copyBytes(from: header) }
+    var payload = [UInt8](repeating: 0, count: Int(UInt32(bigEndian: length)))
+    guard recv(descriptor, &payload, payload.count, MSG_WAITALL) == payload.count else {
+      return nil
+    }
+    return try JSONDecoder().decode(DaemonEvent.self, from: Data(payload))
+  }
+
   @Test
   func restartingEverySessionSkipsTheFinishedOnes() async {
     let restarted = LockIsolated<Set<UUID>>([])

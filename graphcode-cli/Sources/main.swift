@@ -214,9 +214,14 @@ func runAndPrintGraph(projectPath: String, _ commands: [DaemonCommand]) throws {
     try sendCommand(command)
   }
   phase = "waiting for the daemon to acknowledge the command"
+  // A refused command changes nothing, so its error is the only answer that will come.
   let event = try client.waitForEvent {
-    if case .graphChanged = $0 { return true } else { return false }
+    switch $0 {
+    case .graphChanged, .errorOccurred: return true
+    default: return false
+    }
   }
+  if case .errorOccurred(let message) = event { fail(message) }
   if case .graphChanged(let graph) = event {
     print(GraphcodeCommand.render(graph, mailroomReader: mailroomReader))
   }
