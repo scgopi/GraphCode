@@ -14810,6 +14810,10 @@ test "terminal parity native minimum grows the host and publishes every fitting 
         original: c.WNDPROC,
         minimum_messages: usize = 0,
 
+        fn cappedStartWidth(dpi: u32, work_width: i32) i32 {
+            return @min(physicalCoordinate(900, dpi), @divTrunc(work_width, 2));
+        }
+
         fn expectedWindowWidth(app: *const App, tab_count: i32) !i32 {
             const dpi = app.dpi;
             const chrome = tab_count * physicalCoordinate(Tokens.tab_min_width, dpi) +
@@ -14842,6 +14846,13 @@ test "terminal parity native minimum grows the host and publishes every fitting 
             return c.CallWindowProcW(self.original, hwnd, message, wparam, lparam);
         }
     };
+    for ([_]u32{ 96, 108, 120, 132, 144, 168, 192 }) |dpi| {
+        for ([_]i32{ 1024, 1920 }) |work_width| {
+            const start_width = NativeDispatch.cappedStartWidth(dpi, work_width);
+            try std.testing.expect(start_width > 0 and start_width < work_width);
+            std.debug.print("TERMINAL_CAP_FIXTURE dpi={d} work={d} start={d}\n", .{ dpi, work_width, start_width });
+        }
+    }
     const previous_dpi_context = NativeDispatch.SetThreadDpiAwarenessContext(@bitCast(@as(isize, -4)));
     if (previous_dpi_context == 0) return error.TerminalMinimumDpiContextFailed;
     defer {
@@ -14943,6 +14954,8 @@ test "terminal parity native minimum grows the host and publishes every fitting 
             monitor.rcWork.top,      monitor.rcWork.right,     monitor.rcWork.bottom,
         });
         const work_width = monitor.rcWork.right - monitor.rcWork.left;
+        const capped_start_width = NativeDispatch.cappedStartWidth(dpi, work_width);
+        try std.testing.expect(capped_start_width > 0 and capped_start_width < work_width);
         const desired = try NativeDispatch.expectedWindowWidth(&app, 12);
         var info = std.mem.zeroes(c.MINMAXINFO);
         _ = c.SendMessageW(app.window.hwnd, c.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&info)));
@@ -15015,9 +15028,13 @@ test "terminal parity native minimum grows the host and publishes every fitting 
         const constrained_desired = try NativeDispatch.expectedWindowWidth(&app, @intCast(constrained_count));
         try std.testing.expect(constrained_desired > work_width);
         try workspace.layout.save(before_path);
+        try std.testing.expect(c.MoveWindow(app.window.hwnd, monitor.rcWork.left, monitor.rcWork.top, capped_start_width, physicalCoordinate(600, dpi), 0) != 0);
         info = std.mem.zeroes(c.MINMAXINFO);
         _ = c.SendMessageW(app.window.hwnd, c.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&info)));
         try std.testing.expectEqual(work_width, info.ptMinTrackSize.x);
+        try std.testing.expect(c.GetWindowRect(app.window.hwnd, &window) != 0);
+        try std.testing.expectEqual(capped_start_width, window.right - window.left);
+        try std.testing.expect(window.right - window.left < work_width);
         app.publishWorkspaceTabs();
         try std.testing.expect(c.GetWindowRect(app.window.hwnd, &window) != 0);
         try std.testing.expectEqual(work_width, window.right - window.left);
