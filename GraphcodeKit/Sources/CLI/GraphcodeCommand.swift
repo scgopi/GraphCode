@@ -816,7 +816,10 @@ extension GraphcodeCommand {
       return lines.joined(separator: "\n")
     }
     for node in graph.nodes {
-      var line = "  \(node.id)  \(node.displayState)  \(node.loopType)  \(node.title)"
+      // A finished loop's session can still sit at its prompt; the presence it reports
+      // must not hide the ending, or the loop reads as one that can still be restarted.
+      let state = node.isResolved ? node.state : node.displayState
+      var line = "  \(node.id)  \(state)  \(node.loopType)  \(node.title)"
       if let exitCode = node.presence?.exitCode {
         line += "  ← session exited (\(exitCode))"
       } else if let reason = AttentionRollup.reason(for: node) {
