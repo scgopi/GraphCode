@@ -2813,7 +2813,7 @@ pub const App = struct {
 
     fn routeQuickChatWorkspaceAway(self: *App, status_text: []const u8) void {
         self.surface = .quick_chats;
-        self.workspace_controls.panel_visible = false;
+        self.workspace_controls.setPanelVisible(false);
         self.selected_quick_chat = null;
         self.layoutWorkspace();
         self.layoutEmptyStateControls();
@@ -2830,7 +2830,7 @@ pub const App = struct {
 
     fn routeFromFailedQuickChatOpen(self: *App) void {
         self.surface = .quick_chats;
-        self.workspace_controls.panel_visible = false;
+        self.workspace_controls.setPanelVisible(false);
         self.layoutWorkspace();
         self.layoutEmptyStateControls();
         self.syncAccessibility();
@@ -2858,7 +2858,7 @@ pub const App = struct {
         workspace.scopeToLoop(node_id, project_path, true) catch {
             if (workspace.boundQuickChatID() != null) {
                 self.surface = .project;
-                self.workspace_controls.panel_visible = false;
+                self.workspace_controls.setPanelVisible(false);
                 self.layoutWorkspace();
                 self.layoutEmptyStateControls();
             }
@@ -2918,7 +2918,7 @@ pub const App = struct {
     fn openProjectWithLayout(self: *App, path: []const u8, comptime layout: fn (*App) void) void {
         if (path.len == 0) return;
         self.surface = .project;
-        self.workspace_controls.panel_visible = false;
+        self.workspace_controls.setPanelVisible(false);
         layout(self);
         const previous = if (self.pending_rebind_path.len != 0)
             self.allocator.dupe(u8, self.pending_previous_subscription) catch {
@@ -3011,7 +3011,7 @@ pub const App = struct {
 
     pub fn openGlobalOverview(self: *App) void {
         self.surface = .overview;
-        self.workspace_controls.panel_visible = false;
+        self.workspace_controls.setPanelVisible(false);
         self.layoutWorkspace();
         self.layoutEmptyStateControls();
         self.syncAccessibility();
@@ -3025,7 +3025,7 @@ pub const App = struct {
                     if (self.selectProject(self.model.graphs.items[graph_index].project.path)) self.inspectWorktrees();
                 } else if (self.selectProject(self.model.graphs.items[graph_index].project.path)) {
                     self.surface = .project;
-                    self.workspace_controls.panel_visible = false;
+                    self.workspace_controls.setPanelVisible(false);
                     self.layoutWorkspace();
                     self.layoutEmptyStateControls();
                     self.rebindWorkspace(self.model.graphs.items[graph_index].project.path);
@@ -3478,7 +3478,7 @@ pub const App = struct {
             };
             self.selected_quick_chat = index;
             self.surface = .workspace;
-            self.workspace_controls.panel_visible = false;
+            self.workspace_controls.setPanelVisible(false);
             self.layoutWorkspace();
             self.layoutEmptyStateControls();
             if (std.process.getEnvVarOwned(self.allocator, "USERPROFILE")) |home| {
@@ -4816,7 +4816,7 @@ pub const App = struct {
         };
         if (!self.selectProject(selection.project_path) or !self.selectNodeIndex(node_index)) return;
         self.surface = .project;
-        self.workspace_controls.panel_visible = false;
+        self.workspace_controls.setPanelVisible(false);
         self.layoutWorkspace();
         self.layoutEmptyStateControls();
         self.ensureLoopVisible(selection.project_path, node_index);
@@ -4864,7 +4864,7 @@ pub const App = struct {
                 std.mem.eql(u8, graph.nodes.items[index].loop_type, "proactive")))
         {
             self.surface = .project;
-            self.workspace_controls.panel_visible = false;
+            self.workspace_controls.setPanelVisible(false);
             self.layoutWorkspace();
             self.layoutEmptyStateControls();
             self.showCompositeGroup(graph.nodes.items[index]);
@@ -4875,7 +4875,7 @@ pub const App = struct {
             return false;
         }
         self.surface = .workspace;
-        self.workspace_controls.panel_visible = true;
+        self.workspace_controls.setPanelVisible(true);
         self.layoutWorkspace();
         self.layoutEmptyStateControls();
         self.clearEdgeSelection();
@@ -4973,7 +4973,7 @@ pub const App = struct {
             .seen_restarts = node.session_restarts,
             .generation = generation,
             .deadline_ms = std.time.milliTimestamp() + TerminalWorkspace.Workspace.loop_open_timeout_ms,
-            .panel_visible = self.workspace_controls.panel_visible,
+            .panel_visible = self.workspace_controls.requestedPanelVisible(),
         };
         // Retire the old reader before the worker can send a kill; its exit is not a
         // resolution, and a counter advance is the daemon's permission to remount.
@@ -4991,7 +4991,8 @@ pub const App = struct {
             return false;
         };
         self.surface = .project;
-        self.workspace_controls.panel_visible = false;
+        self.workspace_controls.setPanelVisible(false);
+        self.workspace_controls.restorePanels();
         workspace.collapse();
         self.layoutEmptyStateControls();
         self.syncAccessibility();
@@ -5041,7 +5042,7 @@ pub const App = struct {
         self.clearSessionRestart();
         workspace.agent_restart_suspended = false;
         self.surface = .workspace;
-        self.workspace_controls.panel_visible = panel_visible;
+        self.workspace_controls.setPanelVisible(panel_visible);
         self.layoutWorkspace();
         self.layoutEmptyStateControls();
         workspace.openLaunchedNode(0, workspace.loop_id, TerminalWorkspace.Workspace.loop_open_timeout_ms) catch |err| {
@@ -5883,7 +5884,7 @@ pub const App = struct {
                 const selected = self.selectProject(stable.path);
                 if (selected) {
                     self.surface = .project;
-                    self.workspace_controls.panel_visible = false;
+                    self.workspace_controls.setPanelVisible(false);
                     self.layoutWorkspace();
                     self.layoutEmptyStateControls();
                 }
@@ -7199,7 +7200,7 @@ pub const App = struct {
         if (mutation == 7) {
             self.closeCompositeGroup();
             self.surface = .project;
-            self.workspace_controls.panel_visible = false;
+            self.workspace_controls.setPanelVisible(false);
             self.layoutWorkspace();
             self.syncAccessibility();
             _ = self.model.setSelectedID("11111111-1111-4111-8111-111111111111");
@@ -7330,7 +7331,7 @@ pub const App = struct {
                 return;
             };
             self.surface = .project;
-            self.workspace_controls.panel_visible = false;
+            self.workspace_controls.setPanelVisible(false);
             self.layoutWorkspace();
             self.layoutEmptyStateControls();
             self.syncAccessibility();
@@ -7344,7 +7345,7 @@ pub const App = struct {
         if (mutation == 20) {
             if (!self.installUiaFixture(false)) return;
             self.surface = .project;
-            self.workspace_controls.panel_visible = false;
+            self.workspace_controls.setPanelVisible(false);
             self.layoutWorkspace();
             self.layoutEmptyStateControls();
             self.syncAccessibility();
@@ -7376,7 +7377,7 @@ pub const App = struct {
             };
             _ = self.model.setSelectedID("20000000-0000-4000-8000-000000000001");
             self.surface = .project;
-            self.workspace_controls.panel_visible = false;
+            self.workspace_controls.setPanelVisible(false);
             self.layoutWorkspace();
             self.layoutEmptyStateControls();
             self.syncAccessibility();
@@ -7394,7 +7395,7 @@ pub const App = struct {
             };
             _ = self.model.setSelectedID("11111111-1111-4111-8111-111111111111");
             self.surface = .project;
-            self.workspace_controls.panel_visible = false;
+            self.workspace_controls.setPanelVisible(false);
             self.layoutWorkspace();
             self.layoutEmptyStateControls();
             self.syncAccessibility();
@@ -7996,13 +7997,13 @@ pub const App = struct {
                 self.workspace_controls.apply(.toggle_rail);
                 self.layoutWorkspace();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
-                self.setStatus(if (self.workspace_controls.rail_visible) "Workspace rail shown" else "Workspace rail hidden");
+                self.setStatus(if (self.workspace_controls.rail_auto_hidden) "Window too narrow for the requested panel and a full terminal tab; enlarge the window" else if (self.workspace_controls.rail_visible) "Workspace rail shown" else "Workspace rail hidden");
             },
             .toggle_panel => {
                 if (!self.toggleWorkspacePanelState()) return;
                 self.layoutWorkspace();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
-                self.setStatus(if (self.workspace_controls.panel_visible) "Workspace panel shown" else "Workspace panel hidden");
+                self.setStatus(if (self.workspace_controls.panel_auto_hidden) "Window too narrow for the requested panel and a full terminal tab; enlarge the window" else if (self.workspace_controls.panel_visible) "Workspace panel shown" else "Workspace panel hidden");
             },
             .toggle_activity => {
                 self.workspace_controls.apply(.toggle_activity);
@@ -8065,7 +8066,7 @@ pub const App = struct {
             .quick_chats
         else
             .project;
-        self.workspace_controls.panel_visible = false;
+        self.workspace_controls.setPanelVisible(false);
         self.workspace_controls.apply(.show_graph);
         finish_native(self);
         publish(self);
@@ -8231,7 +8232,7 @@ pub const App = struct {
 
     fn toggleWorkspaceDetailPanelState(self: *App) void {
         if (self.hasQuickChatWorkspaceScope()) return;
-        self.workspace_controls.panel_visible = !self.workspace_controls.panel_visible;
+        self.workspace_controls.apply(.toggle_panel);
         if (self.workspace_controls.panel_visible) self.surface = .workspace;
     }
 
@@ -8241,7 +8242,7 @@ pub const App = struct {
         self.layoutWorkspace();
         self.syncAccessibility();
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
-        self.setStatus(if (self.workspace_controls.panel_visible) "Loop detail panel expanded" else "Loop detail panel collapsed");
+        self.setStatus(if (self.workspace_controls.panel_auto_hidden) "Window too narrow for the requested panel and a full terminal tab; enlarge the window" else if (self.workspace_controls.panel_visible) "Loop detail panel expanded" else "Loop detail panel collapsed");
     }
 
     fn layoutWorkspace(self: *App) void {
@@ -8249,6 +8250,20 @@ pub const App = struct {
         var client: c.RECT = undefined;
         if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
         if (self.fitWorkspaceWindow(client) and c.GetClientRect(self.window.hwnd, &client) == 0) return;
+        var panels_fit = true;
+        if (self.surface == .workspace and self.workspace != null) {
+            panels_fit = self.workspace_controls.fitTerminal(client.right, self.workspace.?.minimumSelectedTabWidth(), physicalCoordinate(Tokens.sidebar_width, self.dpi), physicalCoordinate(Tokens.loop_detail_width, self.dpi));
+        } else {
+            self.workspace_controls.restorePanels();
+        }
+        defer {
+            const message = "Window too narrow for the requested panel and a full terminal tab; enlarge the window";
+            if (!panels_fit and !std.mem.eql(u8, self.status_override, message)) {
+                self.setStatus(message);
+            } else if (panels_fit and std.mem.eql(u8, self.status_override, message)) {
+                self.setStatus("");
+            }
+        }
         const restore_header = self.header_focus != null and c.GetFocus() == self.window.hwnd;
         const previous_transition = self.header_focus_transition;
         self.header_focus_transition = previous_transition or restore_header;
@@ -8304,8 +8319,8 @@ pub const App = struct {
         var client_width = physicalCoordinate(min_client_width, self.dpi);
         if (self.workspace) |workspace| {
             client_width = @max(client_width, workspace.minimumChromeWidth() +|
-                (if (self.workspace_controls.rail_visible) physicalCoordinate(Tokens.sidebar_width, self.dpi) else @as(i32, 0)) +|
-                (if (self.workspace_controls.panel_visible) physicalCoordinate(Tokens.loop_detail_width, self.dpi) else @as(i32, 0)));
+                (if (self.workspace_controls.requestedRailVisible()) physicalCoordinate(Tokens.sidebar_width, self.dpi) else @as(i32, 0)) +|
+                (if (self.workspace_controls.requestedPanelVisible()) physicalCoordinate(Tokens.loop_detail_width, self.dpi) else @as(i32, 0)));
         }
         const desired = windowWidthForPhysicalClient(self.window.hwnd, self.dpi, @min(client_width, work_width));
         return @min(desired, work_width);
@@ -9950,7 +9965,7 @@ pub const App = struct {
             .remote_section => self.sidebar_state.remote_collapsed = !self.sidebar_state.remote_collapsed,
             .quick_chats_header => {
                 self.surface = .quick_chats;
-                self.workspace_controls.panel_visible = false;
+                self.workspace_controls.setPanelVisible(false);
                 self.layoutWorkspace();
                 self.layoutEmptyStateControls();
             },
@@ -9975,7 +9990,7 @@ pub const App = struct {
             .open_project => |path| {
                 if (self.selectProject(path)) {
                     self.surface = .project;
-                    self.workspace_controls.panel_visible = false;
+                    self.workspace_controls.setPanelVisible(false);
                     self.layoutWorkspace();
                     self.rebindWorkspace(path);
                     self.syncAccessibility();
@@ -10650,7 +10665,7 @@ fn onWindowMessage(
                 Accessibility.uia_open_overview_command => app.openGlobalOverview(),
                 Accessibility.uia_open_quick_chats_command => {
                     app.surface = .quick_chats;
-                    app.workspace_controls.panel_visible = false;
+                    app.workspace_controls.setPanelVisible(false);
                     app.layoutWorkspace();
                     app.layoutEmptyStateControls();
                     app.syncAccessibility();
@@ -11314,7 +11329,7 @@ fn onWindowMessage(
                             const graph = app.model.graphs.items[hit.graph_index];
                             if (app.selectProject(graph.project.path)) {
                                 app.surface = .project;
-                                app.workspace_controls.panel_visible = false;
+                                app.workspace_controls.setPanelVisible(false);
                                 app.layoutWorkspace();
                                 app.layoutEmptyStateControls();
                                 app.rebindWorkspace(graph.project.path);
@@ -11523,7 +11538,7 @@ fn onWindowMessage(
                             };
                             if (Sidebar.graphForProject(&app.model, path) != null and app.selectProject(path)) {
                                 app.surface = .project;
-                                app.workspace_controls.panel_visible = false;
+                                app.workspace_controls.setPanelVisible(false);
                                 app.layoutWorkspace();
                                 app.clearEdgeSelection();
                                 app.rebindWorkspace(path);
@@ -11588,7 +11603,7 @@ fn onWindowMessage(
                                 else => {},
                             };
                             app.surface = .quick_chats;
-                            app.workspace_controls.panel_visible = false;
+                            app.workspace_controls.setPanelVisible(false);
                             app.layoutWorkspace();
                             app.layoutEmptyStateControls();
                         },
@@ -14866,9 +14881,11 @@ test "terminal parity native minimum grows the host and publishes every fitting 
         workspace: *TerminalWorkspace.Workspace,
         count: usize = 0,
         failure: ?anyerror = null,
+        refresh_ok: bool = false,
 
         fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
-        fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+        fn syncElements(self: *@This(), name: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+            self.refresh_ok = !std.mem.eql(u8, name, "Graph layout unavailable");
             self.count = 0;
             for (elements) |element| {
                 if (!std.mem.startsWith(u8, element.identity, "workspace-tab:")) continue;
@@ -14889,6 +14906,147 @@ test "terminal parity native minimum grows the host and publishes every fitting 
             try std.testing.expectEqual(index == self.workspace.layout.selected_tab, element.selected);
         }
     };
+    var boundary_rows: usize = 0;
+    var boundary_failures: usize = 0;
+    for ([_]u32{ 96, 108, 120, 132, 144, 168, 192 }) |dpi| {
+        var app = try overviewTestApp(dpi);
+        defer {
+            const hwnd = app.window.hwnd;
+            deinitOverviewTestApp(&app);
+            std.debug.assert(c.IsWindow(hwnd) == 0);
+            std.debug.print("TERMINAL_BOUNDARY_WINDOW dpi={d} destroyed=true\n", .{dpi});
+        }
+        var workspace = TerminalWorkspace.Workspace{
+            .parent = app.window.hwnd,
+            .allocator = app.allocator,
+            .zmx_path = &.{},
+            .cwd = &.{},
+            .input_queue = .{ .allocator = app.allocator },
+            .layout = try @import("WorkspaceLayout.zig").Layout.init(app.allocator, "terminal-boundary"),
+            .layout_path = &.{},
+            .project_key = &.{},
+            .dpi = dpi,
+        };
+        defer workspace.layout.deinit();
+        app.workspace = &workspace;
+        defer app.workspace = null;
+        app.surface = .workspace;
+        _ = try app.model.updateFromFrame(
+            \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\terminal-boundary","name":"Terminal boundary"},"nodes":[{"id":"loop","title":"Loop","state":"idle","metricHistory":[{"value":1},{"value":2}]}],"edges":[]}}}
+        );
+        try std.testing.expect(app.model.setSelectedIndex(0));
+        var boundary_directory = std.testing.tmpDir(.{});
+        defer boundary_directory.cleanup();
+        const boundary_path = try boundary_directory.dir.realpathAlloc(app.allocator, ".");
+        defer app.allocator.free(boundary_path);
+        const snapshot_path = try std.fs.path.join(app.allocator, &.{ boundary_path, "layout.json" });
+        defer app.allocator.free(snapshot_path);
+        const style = c.GetWindowLongW(app.window.hwnd, c.GWL_STYLE);
+        _ = c.SetWindowLongW(app.window.hwnd, c.GWL_STYLE, style | c.WS_MAXIMIZE);
+        defer _ = c.SetWindowLongW(app.window.hwnd, c.GWL_STYLE, style);
+        // Hold the requested physical viewport using the existing hidden maximized seam.
+        try std.testing.expect(c.IsZoomed(app.window.hwnd) != 0);
+        var sink = Sink{ .workspace = &workspace };
+        for ([_]i32{ 1024, 1920 }) |width| {
+            const tab_count: usize = @intCast(@divTrunc(width, physicalCoordinate(Tokens.tab_min_width, dpi)) + 12);
+            while (workspace.tabCount() < tab_count) {
+                var id: [32]u8 = undefined;
+                try workspace.layout.addTab(try std.fmt.bufPrint(&id, "shell-{d}", .{workspace.tabCount()}), false);
+            }
+            try workspace.layout.selectTab(tab_count - 1);
+            try workspace.layout.save(snapshot_path);
+            const layout_before = try boundary_directory.dir.readFileAlloc(app.allocator, "layout.json", 1024 * 1024);
+            defer app.allocator.free(layout_before);
+            for ([_][2]bool{ .{ false, false }, .{ false, true }, .{ true, false }, .{ true, true } }) |visibility| {
+                app.workspace_controls = .{ .rail_visible = visibility[0], .panel_visible = visibility[1], .activity_enabled = false };
+                try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, width, physicalCoordinate(600, dpi), 0) != 0);
+                var client: c.RECT = undefined;
+                var outer: c.RECT = undefined;
+                try std.testing.expect(c.GetClientRect(app.window.hwnd, &client) != 0);
+                try std.testing.expect(c.GetWindowRect(app.window.hwnd, &outer) != 0);
+                app.layoutWorkspace();
+                sink.failure = null;
+                app.syncAccessibilityTo(&sink, logicalClientRect(app.window.hwnd, dpi));
+                const rail = WorkspaceControls.railPresentation(logicalCoordinate(client.right, dpi), app.workspace_controls);
+                const detail_width = if (app.workspace_controls.panel_visible) physicalCoordinate(Tokens.loop_detail_width, dpi) else 0;
+                const controls = TerminalSurface.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, dpi, 0);
+                const last_control = TerminalSurface.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, dpi, 2);
+                const available = @max(workspace.layout_origin_x, controls.left - physicalCoordinate(Tokens.tab_controls_gap, dpi)) -
+                    workspace.layout_origin_x - physicalCoordinate(Tokens.tab_bar_inset, dpi);
+                const selected_rect = workspace.visibleTabBounds(tab_count - 1);
+                const selected_visible = selected_rect != null;
+                const row_ok = client.right == width and
+                    workspace.layout_width == @max(0, client.right - physicalCoordinate(rail.rail_right, dpi) - detail_width) and
+                    sink.refresh_ok and sink.failure == null and sink.count > 0 and sink.count < tab_count and
+                    selected_visible and selected_rect.?.right - selected_rect.?.left >= physicalCoordinate(Tokens.tab_min_width, dpi) and
+                    workspace.layout.selected_tab == tab_count - 1;
+                boundary_rows += 1;
+                if (!row_ok) boundary_failures += 1;
+                std.debug.print("TERMINAL_BOUNDARY dpi={d} actual={d} requested={d} client={d} outer={d} frame={d} rail={any} detail={any} mode={s} railpx={d} detailpx={d} viewport={d} controls={d}..{d} available={d} count={d} tabs={d} selected={d} selected-visible={any} refresh={any} error={s} ok={any}\n", .{
+                    dpi,                                                 Win32.dpiForWindow(app.window.hwnd),      width,            client.right,
+                    outer.right - outer.left,                            outer.right - outer.left - client.right,  visibility[0],    visibility[1],
+                    @tagName(rail.mode),                                 physicalCoordinate(rail.rail_right, dpi), detail_width,     workspace.layout_width,
+                    controls.left,                                       last_control.right,                       available,        sink.count,
+                    tab_count,                                           workspace.layout.selected_tab,            selected_visible, sink.refresh_ok,
+                    if (sink.failure) |err| @errorName(err) else "none", row_ok,
+                });
+            }
+            app.workspace_controls = .{ .rail_visible = true, .panel_visible = true, .activity_enabled = false };
+            app.layoutWorkspace();
+            const full_tab = physicalCoordinate(Tokens.tab_min_width, dpi);
+            const selected_bounds = workspace.visibleTabBounds(workspace.layout.selected_tab);
+            if (selected_bounds == null or selected_bounds.?.right - selected_bounds.?.left < full_tab) boundary_failures += 1;
+            if (width < physicalCoordinate(Tokens.sidebar_width, dpi) + physicalCoordinate(Tokens.loop_detail_width, dpi) +
+                full_tab + 2 * physicalCoordinate(Tokens.tab_bar_inset, dpi) +
+                physicalCoordinate(Tokens.tab_controls_gap, dpi) + 3 * physicalCoordinate(Tokens.tab_control_width, dpi) +
+                2 * physicalCoordinate(Tokens.tab_control_gap, dpi))
+            {
+                var command_result: c.LRESULT = 0;
+                try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_COMMAND, @intFromEnum(MainWindow.Command.toggle_sidebar), 0, &command_result));
+                if (!app.workspace_controls.rail_visible or app.workspace_controls.panel_visible) boundary_failures += 1;
+                try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("header-toggle-panel:control")));
+                if (!app.workspace_controls.panel_visible or app.workspace_controls.rail_visible) boundary_failures += 1;
+                try std.testing.expectEqual(@as(?bool, true), app.headerPresentation().panel_visible);
+                app.handleAction(.toggle_rail);
+                try std.testing.expectEqual(@as(?bool, false), app.headerPresentation().panel_visible);
+                try std.testing.expect(app.invokeHeaderOverflowCommand(headerOverflowCommand(.toggle_panel)));
+                if (!app.workspace_controls.panel_visible or app.workspace_controls.rail_visible) boundary_failures += 1;
+            }
+            try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, physicalCoordinate(2000, dpi), physicalCoordinate(600, dpi), 0) != 0);
+            app.layoutWorkspace();
+            if (!app.workspace_controls.rail_visible or !app.workspace_controls.panel_visible) boundary_failures += 1;
+            app.toggleWorkspaceDetailPanel();
+            try std.testing.expect(!app.workspace_controls.requestedPanelVisible());
+            try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, width, physicalCoordinate(600, dpi), 0) != 0);
+            app.layoutWorkspace();
+            try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, physicalCoordinate(2000, dpi), physicalCoordinate(600, dpi), 0) != 0);
+            app.layoutWorkspace();
+            try std.testing.expect(!app.workspace_controls.panel_visible);
+            app.handleAction(.toggle_rail);
+            try std.testing.expect(!app.workspace_controls.requestedRailVisible());
+            app.layoutWorkspace();
+            try std.testing.expect(!app.workspace_controls.rail_visible);
+            try workspace.layout.save(snapshot_path);
+            const layout_after = try boundary_directory.dir.readFileAlloc(app.allocator, "layout.json", 1024 * 1024);
+            defer app.allocator.free(layout_after);
+            try std.testing.expectEqualSlices(u8, layout_before, layout_after);
+        }
+        app.workspace_controls = .{ .rail_visible = false, .panel_visible = true, .activity_enabled = false };
+        const panel_threshold = workspace.minimumSelectedTabWidth() + physicalCoordinate(Tokens.loop_detail_width, dpi);
+        try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, panel_threshold - 1, physicalCoordinate(600, dpi), 0) != 0);
+        app.layoutWorkspace();
+        try std.testing.expect(app.workspace_controls.panel_auto_hidden and !app.workspace_controls.panel_visible);
+        try std.testing.expect(std.mem.startsWith(u8, app.status(), "Window too narrow"));
+        try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, panel_threshold, physicalCoordinate(600, dpi), 0) != 0);
+        app.layoutWorkspace();
+        try std.testing.expect(app.workspace_controls.panel_visible and !app.workspace_controls.panel_auto_hidden);
+        const threshold_tab = workspace.visibleTabBounds(workspace.layout.selected_tab).?;
+        try std.testing.expect(threshold_tab.right - threshold_tab.left >= physicalCoordinate(Tokens.tab_min_width, dpi));
+        try std.testing.expect(!std.mem.startsWith(u8, app.status(), "Window too narrow"));
+    }
+    std.debug.print("TERMINAL_BOUNDARY_SUMMARY rows={d} failures={d}\n", .{ boundary_rows, boundary_failures });
+    try std.testing.expectEqual(@as(usize, 56), boundary_rows);
+    try std.testing.expectEqual(@as(usize, 0), boundary_failures);
     for ([_]u32{ 96, 108, 120, 132, 144, 168, 192 }) |dpi| {
         var app = try overviewTestApp(dpi);
         defer {
@@ -14923,7 +15081,7 @@ test "terminal parity native minimum grows the host and publishes every fitting 
         app.workspace = &workspace;
         defer app.workspace = null;
         app.surface = .workspace;
-        app.workspace_controls.panel_visible = true;
+        app.workspace_controls.setPanelVisible(true);
         var dispatch = NativeDispatch{ .app = &app, .original = null };
         const previous_context = c.SetWindowLongPtrW(app.window.hwnd, c.GWLP_USERDATA, @bitCast(@intFromPtr(&dispatch)));
         defer _ = c.SetWindowLongPtrW(app.window.hwnd, c.GWLP_USERDATA, previous_context);
@@ -14981,7 +15139,7 @@ test "terminal parity native minimum grows the host and publishes every fitting 
 
         for ([_][2]bool{ .{ false, false }, .{ false, true }, .{ true, false }, .{ true, true } }) |visibility| {
             app.workspace_controls.rail_visible = visibility[0];
-            app.workspace_controls.panel_visible = visibility[1];
+            app.workspace_controls.setPanelVisible(visibility[1]);
             const visibility_desired = try NativeDispatch.expectedWindowWidth(&app, 12);
             info = std.mem.zeroes(c.MINMAXINFO);
             _ = c.SendMessageW(app.window.hwnd, c.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&info)));
@@ -21991,7 +22149,7 @@ fn expectSettledGraphPublication(surface: GraphCanvas.Surface, owner: []const u8
     defer F.deinit(&app);
     try F.seed(&app);
     app.surface = surface;
-    app.workspace_controls.panel_visible = surface == .workspace;
+    app.workspace_controls.setPanelVisible(surface == .workspace);
     var workspace: TerminalWorkspace.Workspace = .{
         .parent = null,
         .allocator = app.allocator,
@@ -22112,7 +22270,7 @@ test "graph publication explicit open preserves v1 and v2 acceptance rejection a
         defer F.deinit(&app);
         try F.seed(&app);
         app.surface = .workspace;
-        app.workspace_controls.panel_visible = true;
+        app.workspace_controls.setPanelVisible(true);
         app.openProjectWithLayout("B", F.layout);
         try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
         try std.testing.expect(!app.workspace_controls.panel_visible);
@@ -26224,7 +26382,7 @@ test "header presentation follows destinations and keeps sidebar independent" {
         for ([_]bool{ false, true }) |sidebar_visible| {
             app.workspace_controls.rail_visible = sidebar_visible;
             for ([_]bool{ false, true }) |panel_visible| {
-                app.workspace_controls.panel_visible = panel_visible;
+                app.workspace_controls.setPanelVisible(panel_visible);
                 const header = app.headerPresentation();
                 try std.testing.expectEqual(surface == .workspace, header.contains(.toggle_panel));
                 if (surface == .workspace) try std.testing.expectEqual(panel_visible, header.panel_visible.?);
@@ -26324,7 +26482,7 @@ test "responsive header overflow publishes context actions and routes hidden UIA
     try std.testing.expect(app.model.selectProject("C:\\local"));
     try std.testing.expect(app.model.setSelectedIndex(0));
     app.surface = .workspace;
-    app.workspace_controls.panel_visible = false;
+    app.workspace_controls.setPanelVisible(false);
     const workspace_header = app.headerPresentation();
     const workspace_layout = workspace_header.layout(client.right);
     try std.testing.expect(workspace_header.contains(.toggle_panel));
@@ -26363,7 +26521,7 @@ test "responsive header focus moves a direct action into overflow on window resi
     );
     try std.testing.expect(app.model.setSelectedIndex(0));
     app.surface = .workspace;
-    app.workspace_controls.panel_visible = false;
+    app.workspace_controls.setPanelVisible(false);
     try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, 1200, 900, 0) != 0);
     try std.testing.expect(app.headerLayout().bounds(.toggle_panel) != null);
     app.header_focus = .toggle_panel;

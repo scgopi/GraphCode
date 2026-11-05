@@ -2168,7 +2168,14 @@ pub const Workspace = struct {
 
     /// Physical pixels, using the same per-component rounding as the tab geometry.
     pub fn minimumChromeWidth(self: *const Workspace) i32 {
-        const count = std.math.cast(i32, self.tabCount()) orelse return std.math.maxInt(i32);
+        return self.chromeWidthForTabs(std.math.cast(i32, self.tabCount()) orelse return std.math.maxInt(i32));
+    }
+
+    pub fn minimumSelectedTabWidth(self: *const Workspace) i32 {
+        return self.chromeWidthForTabs(1);
+    }
+
+    fn chromeWidthForTabs(self: *const Workspace, count: i32) i32 {
         const controls = 3 *| Dpi.scale(Tokens.tab_control_width, self.dpi) +|
             2 *| Dpi.scale(Tokens.tab_control_gap, self.dpi);
         return count *| Dpi.scale(Tokens.tab_min_width, self.dpi) +|

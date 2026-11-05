@@ -47,6 +47,14 @@ window borders; scaling the combined logical width can hide a tab. Expansion
 never activates the window or exceeds its monitor's work area. Maximized or
 monitor-constrained windows retain the selected-tab overflow window rather than
 shrinking pills, rescaling the terminal, or moving tabs between sessions.
+On Windows, if requested side panels would leave less than one full 92-logical
+tab plus its existing controls and insets, the last-opened panel takes priority.
+The other panel is temporarily hidden and returns when space permits; an
+explicitly hidden panel stays hidden. Reopening an auto-hidden panel through the
+existing sidebar menu or loop-panel header/overflow control swaps priority.
+If even one panel cannot fit alongside that terminal minimum, the panels remain
+temporarily hidden and the status asks for a wider window. This responsive policy
+is user-approved Windows behavior, not a claim about macOS's implicit layout.
 Agent names follow the primary pane: **Goal**, **Loop**, or the recorded backend's
 display name; plain-shell tabs are **Shell**. Missing backend metadata is labeled
 **Agent**, never assumed to be Claude Code. `Ctrl+1` through `Ctrl+9` select those
