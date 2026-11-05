@@ -101,6 +101,89 @@ static void checkRect(IRawElementProviderFragment *fragment, POINT origin,
   check(ok, description);
 }
 
+static void nativeRootGeometryChecks() {
+  HWND hwnd = CreateWindowW(L"STATIC", L"UIA native root geometry", WS_OVERLAPPEDWINDOW,
+                            137, 211, 640, 480, nullptr, nullptr, nullptr, nullptr);
+  check(hwnd != nullptr, "hidden framed root geometry window exists");
+  if (!hwnd) return;
+  check(!IsWindowVisible(hwnd) && GetForegroundWindow() != hwnd,
+        "root geometry fixture is hidden and not foreground");
+  RECT outer{}, client{};
+  POINT origin{0, 0};
+  const bool measured = GetWindowRect(hwnd, &outer) && GetClientRect(hwnd, &client) &&
+      ClientToScreen(hwnd, &origin);
+  check(measured, "root geometry fixture has native outer and client rectangles");
+  check(measured && origin.y > outer.top,
+        "root geometry fixture includes a native nonclient caption");
+  auto *provider = gc_uia_create(hwnd);
+  check(provider != nullptr, "root geometry provider exists");
+  if (!provider) {
+    DestroyWindow(hwnd);
+    return;
+  }
+  IRawElementProviderFragment *root = nullptr;
+  check(provider->QueryInterface(IID_PPV_ARGS(&root)) == S_OK && root,
+        "root geometry fragment exists");
+  if (root) {
+    UiaRect bounds{};
+    check(root->get_BoundingRectangle(&bounds) == S_OK &&
+              bounds.left == outer.left && bounds.top == outer.top &&
+              bounds.width == outer.right - outer.left &&
+              bounds.height == outer.bottom - outer.top,
+          "root bounds equal the entire native window including its caption");
+    check(bounds.left <= origin.x && bounds.top <= origin.y &&
+              bounds.left + bounds.width >= origin.x + client.right &&
+              bounds.top + bounds.height >= origin.y + client.bottom,
+          "root bounds contain the entire native client area");
+    auto *projects = child(root, NavigateDirection_FirstChild);
+    checkRect(projects, origin, 0, 0, client.right - client.left, 28,
+              "nonroot placeholder retains its client-relative 28-pixel geometry");
+    const char *identities[] = {"loop:root-geometry"};
+    const char *names[] = {"Geometry descendant"};
+    const int parents[] = {2};
+    const int flags[] = {0};
+    const int row_bounds[] = {32, 120, 192, 160};
+    auto update = reinterpret_cast<FullUpdate>(&gc_uia_update);
+    check(update(provider, "Geometry", identities, names, parents, flags, flags, flags,
+                 row_bounds, 1, 0, 1, 0, 0, 0, 0) == S_OK,
+          "root geometry descendant publication succeeds");
+    auto *loops = child(projects, NavigateDirection_NextSibling);
+    auto *row = child(loops, NavigateDirection_FirstChild);
+    checkRect(row, origin, 32, 120, 160, 40,
+              "published descendant retains its client-relative geometry");
+    UiaRect descendant{};
+    check(row && row->get_BoundingRectangle(&descendant) == S_OK &&
+              bounds.left <= descendant.left && bounds.top <= descendant.top &&
+              bounds.left + bounds.width >= descendant.left + descendant.width &&
+              bounds.top + bounds.height >= descendant.top + descendant.height,
+          "root bounds contain the published descendant below the caption");
+    check(SetWindowPos(hwnd, nullptr, 197, 263, 720, 520,
+                       SWP_NOACTIVATE | SWP_NOZORDER) != FALSE,
+          "hidden root geometry fixture moves and resizes without activation");
+    origin = {0, 0};
+    check(GetWindowRect(hwnd, &outer) && GetClientRect(hwnd, &client) &&
+              ClientToScreen(hwnd, &origin),
+          "moved root geometry fixture has fresh native rectangles");
+    check(root->get_BoundingRectangle(&bounds) == S_OK &&
+              bounds.left == outer.left && bounds.top == outer.top &&
+              bounds.width == outer.right - outer.left &&
+              bounds.height == outer.bottom - outer.top,
+          "root bounds follow native window movement and resizing");
+    checkRect(projects, origin, 0, 0, client.right - client.left, 28,
+              "nonroot placeholder geometry is preserved after moving and resizing");
+    checkRect(row, origin, 32, 120, 160, 40,
+              "published descendant geometry follows the native client origin");
+    check(!IsWindowVisible(hwnd) && GetForegroundWindow() != hwnd,
+          "root geometry fixture remains hidden and not foreground");
+    if (row) row->Release();
+    if (loops) loops->Release();
+    if (projects) projects->Release();
+    root->Release();
+  }
+  gc_uia_release(provider);
+  DestroyWindow(hwnd);
+}
+
 extern "C" HRESULT gc_uia_set_canvas_bounds(IRawElementProviderSimple *provider, int left, int top,
                                              int right, int bottom);
 extern "C" HRESULT gc_uia_set_sidebar_scroll(IRawElementProviderSimple *provider, int offset,
@@ -815,6 +898,7 @@ static void nativeCommandAndScrollChecks() {
 }
 
 int main() {
+  nativeRootGeometryChecks();
   HWND hwnd = CreateWindowW(L"STATIC", L"UIA native test", WS_OVERLAPPED,
                             137, 211, 300, 300, nullptr, nullptr, nullptr, nullptr);
   check(hwnd != nullptr, "native window exists");

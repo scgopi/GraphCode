@@ -226,11 +226,32 @@ struct SessionNamingTests {
     #expect(await typedAfterRenaming(.claudeCode, state: state).typed == ["/rename Fix login"])
   }
 
+  /// Copilot 1.0.96 applies a typed `/rename` idle and mid-turn, and the short id has to
+  /// survive it: the name is how `CopilotSessionLog` finds the session afterwards.
   @Test
-  func aRenameReachesNoSessionItCannotName() async {
-    #expect(await typedAfterRenaming(.claudeCode, ramp: false).typed.isEmpty)
-    #expect(await typedAfterRenaming(.copilotCLI).typed.isEmpty)
+  func aRenamedCopilotLoopKeepsItsLookupKey() async throws {
+    let result = await typedAfterRenaming(.copilotCLI)
+    #expect(result.typed == ["/rename Fix login · 11111111"])
+    #expect(result.memory.isEmpty)
+    let name = try #require(result.typed.first?.dropFirst("/rename ".count))
+    #expect(CLISessionBackendKind.isCopilotSessionName(String(name), for: sessionName))
+  }
+
+  @Test(arguments: [LoopState.succeeded, .failed])
+  func aFinishedCopilotLoopsOpenSessionIsRenamedToo(_ state: LoopState) async {
     #expect(
-      await typedAfterRenaming(.claudeCode, to: NodeDraft.untitledFallback).typed.isEmpty)
+      await typedAfterRenaming(.copilotCLI, state: state).typed
+        == ["/rename Fix login · 11111111"])
+  }
+
+  @Test(arguments: [CLISessionBackendKind.claudeCode, .copilotCLI])
+  func aRenameWaitsForTheRampAndARealTitle(_ backend: CLISessionBackendKind) async {
+    #expect(await typedAfterRenaming(backend, ramp: false).typed.isEmpty)
+    #expect(await typedAfterRenaming(backend, to: NodeDraft.untitledFallback).typed.isEmpty)
+  }
+
+  @Test(arguments: [CLISessionBackendKind.codex, .openCode, .pi, .nod])
+  func aRenameReachesNoSessionItCannotName(_ backend: CLISessionBackendKind) async {
+    #expect(await typedAfterRenaming(backend).typed.isEmpty)
   }
 }

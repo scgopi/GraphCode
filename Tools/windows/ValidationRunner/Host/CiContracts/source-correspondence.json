@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "baselineManifestSha256": "CC8ED5141AE38CB425F4E41AB7F2E4EF1F07F5AE4CAD7FA969A68645B07A0A2F",
+  "baselineSource": "Tools/windows/Tests/ValidationRunner.Tests.ps1",
+  "inventoryIsExecutionEvidence": false,
+  "executionEvidence": "UnitResult.executedCount and groups, plus per-adapter case JSON written beneath ArtifactRoot",
+  "families": [
+    {
+      "unit": "host.hardening-source-and-diagnostics",
+      "expectedExpandedCount": 22,
+      "production": "Tools/windows/Tests/Hardening.Tests.ps1",
+      "cases": [
+        { "originalLines": "5144-5155", "ids": ["source.full-pinned-real-hardening", "source.owned-environment", "source.native-exit.terminal", "source.native-exit.shell"] },
+        { "originalLines": "5170-5176", "ids": ["diagnostics.positions-and-bounds"] },
+        { "originalLines": "5177-5180", "ids": ["diagnostics.end-without-start"] },
+        { "originalLines": "5181-5186", "ids": ["diagnostics.empty-capture"] },
+        { "originalLines": "5188-5200", "ids": ["payload.complete.plain", "payload.complete.csi", "payload.complete.wrapped", "payload.complete.osc_bell", "payload.complete.osc_st_inside", "payload.complete.osc_st_outside"] },
+        { "originalLines": "5201-5205", "ids": ["payload.pending.empty", "payload.pending.missing_end", "payload.pending.missing_start", "payload.pending.reversed", "payload.pending.unterminated_osc"] },
+        { "originalLines": "5206-5210", "ids": ["payload.completed-empty"] },
+        { "originalLines": "5211-5222", "ids": ["source.high-output-failure-diagnostics", "source.repeat-preserves-child-diagnostics", "source.release-shell-version"] }
+      ]
+    },
+    {
+      "unit": "host.ci-partition",
+      "expectedExpandedCount": 17,
+      "production": "Tools/windows/validate.ps1 -List and -DryRun, with actual PR workflow invocations expanded over the declared matrix",
+      "cases": [
+        { "originalLines": "4384-4403", "ids": ["workflow.windows-shell.yml.shell-unit.0.0", "workflow.windows-shell.yml.shell-unit.0.1", "workflow.windows-shell.yml.shell-unit.0.2", "workflow.windows-shell.yml.shell-integration.0", "workflow.windows-shell.yml.shell-integration.1", "workflow.windows-shell.yml.packaging-contracts.0", "workflow.windows-shell.yml.packaging-real.0", "workflow.windows-port-validation.yml.investigation-privacy.0", "workflow.windows-port-validation.yml.spikes-swift.0", "workflow.windows-port-validation.yml.spikes-other.0", "workflow.windows-hardening.yml.deterministic.0"] },
+        { "originalLines": "4404-4410", "ids": ["coverage.all-listed-tasks"] },
+        { "originalLines": "4413-4432", "ids": ["coverage.all-parts"] },
+        { "originalLines": null, "purpose": "New positive and deletion controls for the migrated partition predicate", "ids": ["control.complete", "control.missing-integration", "control.missing-unit-shard", "control.missing-packaging-real"] }
+      ]
+    },
+    {
+      "unit": "host.ci-aggregate",
+      "expectedExpandedCount": 17,
+      "production": "Tools/windows/Assert-CiPartResults.ps1",
+      "cases": [
+        { "originalLines": "4434-4457", "ids": ["source.aggregate.windows-shell", "source.aggregate.windows-spikes"] },
+        { "originalLines": "4459-4475", "ids": ["required.success", "required.skipped", "required.failure", "required.cancelled", "not-required.skipped", "not-required.failure", "not-required.classifier-failure"] },
+        { "originalLines": null, "purpose": "Additional actual producer refusal cases", "ids": ["invalid-requirement", "empty-parts"] },
+        { "originalLines": null, "purpose": "New positive/mutation controls for compiled aggregate source contracts", "ids": ["control.aggregate.valid", "control.aggregate.missing-part", "control.aggregate.renamed-required-check", "control.aggregate.success-only", "control.aggregate.missing-needs-json", "control.aggregate.missing-required-argument"] }
+      ]
+    },
+    {
+      "unit": "host.ci-topology",
+      "expectedExpandedCount": 39,
+      "production": ".github/workflows/windows-*.yml and Tools/windows/Invoke-ValidationRunnerContract.ps1",
+      "cases": [
+        { "originalLines": "5233-5257", "ids": ["source.cold-cache.spikes-swift", "source.cold-cache.spikes-other", "source.cold-cache.packaging-real", "source.runner-topology-timeout"] },
+        { "originalLines": null, "purpose": "Hosted artifact loss regression: exact compiled evidence root must opt into hidden files; both missing and explicit false options are rejected", "ids": ["source.runner-hidden-evidence-scoped", "control.evidence.hidden-files-missing", "control.evidence.hidden-files-false"] },
+        { "originalLines": "5258-5273", "ids": ["source.warmer-key.zig", "source.warmer-key.providers", "source.warmer-events-and-build-only"] },
+        { "originalLines": "5277-5282", "ids": ["source.uia-diagnostics.shell", "source.uia-diagnostics.port"] },
+        { "originalLines": "5283-5291", "ids": ["source.pinned-swift.shell", "source.pinned-swift.port", "source.pinned-swift.hardening"] },
+        { "originalLines": "5292-5307", "ids": ["source.shell-bootstrap", "source.hosted-explicit-skip-limits", "source.shell-live-task"] },
+        { "originalSource": "Tools/windows/Tests/WindowsCiTopology.Tests.ps1:39-115", "purpose": "Preserve scheduling and required names; replace old monolithic execution assertions with the compiled host contract", "ids": ["source.runner-single-win2022-fail-closed", "source.runner-no-providers-or-hidden-failure", "source.runner-new-sdk-build-execution", "source.runner-port-exactly-once", "source.runner-aggregate-required", "source.runner-hardening-single-fallback", "source.runner-compatibility-no-monolith"] },
+        { "originalLines": null, "purpose": "New SDK/CWD/Pester-prerequisite/full-execution/coverage/exit/marker positive and negative controls; not executions of GitHub Actions", "ids": ["control.canonical.valid", "control.canonical.wrong-sdk", "control.canonical.wrong-build-cwd", "control.canonical.missing-pester-prerequisite", "control.canonical.filtered-run", "control.canonical.missing-run", "control.canonical.missing-complete", "control.canonical.missing-positive-count", "control.canonical.missing-full-count-equality", "control.canonical.inverted-complete", "control.canonical.missing-pass-count", "control.canonical.missing-executed-count", "control.canonical.ignored-exit", "control.canonical.duplicate-run"] }
+      ]
+    },
+    {
+      "unit": "host.shell-section-gate",
+      "expectedExpandedCount": 15,
+      "production": "Tools/windows/Tests/WindowsShell.Tests.ps1 and Tools/windows/Test-ShellSectionManifests.ps1",
+      "cases": [
+        { "originalLines": "4739-4750", "ids": ["section.reject.zero_all", "section.reject.failed", "section.reject.skipped_only"] },
+        { "originalLines": "4751-4761", "ids": ["section.positive-two-invocations"] },
+        { "originalLines": null, "purpose": "Additional refusal cases against the actual section runner", "ids": ["section.reject.missing-second-summary", "section.reject.native-nonzero"] },
+        { "originalLines": "4764-4783", "ids": ["plan.unsharded-catalog", "plan.complete-disjoint-three-shards", "plan.workflow-agreement"] },
+        { "originalLines": "4788-4825", "ids": ["manifest.complete", "manifest.missing-section", "manifest.duplicate-section", "manifest.zero-tests", "manifest.skipped-assignment", "manifest.missing-shard"] }
+      ]
+    },
+    {
+      "unit": "host.zig-resolver",
+      "expectedExpandedCount": 21,
+      "production": "Tools/windows/validate.ps1: Invoke-ZigResolverProbe, Write-ZigResolverDiagnostic, Resolve-ZigVersion",
+      "cases": [
+        { "originalLines": "4851-4862", "ids": ["probe.stdout-stderr-native-exit", "probe.launch-failure-nullable-exit"] },
+        { "originalLines": "4926-4929", "ids": ["resolver.configured-success"] },
+        { "originalLines": "4930-4939", "ids": ["resolver.fallback-order-deduplication"] },
+        { "originalLines": "4941-4946", "ids": ["resolver.native-exit-redacted-fallback"] },
+        { "originalLines": "4947-4963", "ids": ["resolver.env-exit.invalid", "resolver.env-zero-not-new-gate.invalid", "resolver.env-exit.json", "resolver.env-zero-not-new-gate.json"] },
+        { "originalLines": "4965-4980", "ids": ["resolver.launch-exception.version", "resolver.launch-exception.env"] },
+        { "originalLines": "4981-4993", "ids": ["resolver.writer-failure", "resolver.both-writers-fail", "resolver.both-writers-original-missing-guard"] },
+        { "originalLines": "4995-5016", "ids": ["diagnostic.unsafe-version.unicode.version", "diagnostic.unsafe-version.unicode.env", "diagnostic.unsafe-version.over_limit.version", "diagnostic.unsafe-version.over_limit.env"] },
+        { "originalLines": "5017-5023", "ids": ["diagnostic.candidate.userinfo", "diagnostic.candidate.secret", "diagnostic.candidate.over_limit"] }
+      ]
+    }
+  ]
+}

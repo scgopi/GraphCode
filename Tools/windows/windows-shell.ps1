@@ -11,12 +11,16 @@ param(
   [switch] $SkipTrayLive,
   [switch] $Stress,
   [switch] $UseStubDaemon,
+  [ValidateNotNullOrEmpty()]
+  [string] $WorkspaceActions = "1",
   [ValidateRange(0, 1000)]
   [int] $StubResponseDelayMilliseconds = 0,
   [string] $Version
 )
 
 $ErrorActionPreference = "Stop"
+Import-Module (Join-Path $PSScriptRoot "ShellProcessOwnership.psm1")
+$processScope = $null
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $shellRoot = Join-Path $repoRoot "graphcode-windows"
 $packageManifest = Get-Content (Join-Path $shellRoot "build.zig.zon") -Raw
@@ -58,6 +62,7 @@ $shellProcess = $null
 $handoffStage = $null
 $bareZmxStage = $null
 $bareZmxProject = $null
+$bareProcessScope = $null
 $resourceRole = "graphcode-windows"
 $metricSequence = 0
 
@@ -73,6 +78,19 @@ function Assert-Equal([string] $actual, [string] $expected, [string] $label) {
   if ($actual -ne $expected) {
     throw "$label expected $expected but found $actual"
   }
+}
+
+function Start-SmokeProcess([string] $file, [string[]] $arguments, [string] $directory = "",
+    $scope = $processScope, [switch] $CaptureOutput, [switch] $CaptureError) {
+  $start = [Diagnostics.ProcessStartInfo]::new()
+  $start.FileName = (Get-Command $file -ErrorAction Stop).Source
+  $start.UseShellExecute = $false
+  $start.CreateNoWindow = $true
+  $start.WorkingDirectory = if ($directory) { $directory } else { [string]$repoRoot }
+  $start.RedirectStandardOutput = $CaptureOutput
+  $start.RedirectStandardError = $CaptureError
+  foreach ($argument in $arguments) { $start.ArgumentList.Add($argument) }
+  Start-ShellOwnedProcess $scope $start
 }
 
 function New-SmokeZmxRoot([string] $Path) {
@@ -119,6 +137,7 @@ function Get-ZmxSessionRecords {
 function Record-TestOwnedSessions {
   $records = @(Get-ZmxSessionRecords)
   foreach ($record in $records) {
+    # These CIM observations are telemetry only, never cleanup authority.
     [void] $ownedSessionNames.Add($record.Name)
     [void] $ownedProcessIds.Add($record.Pid)
   }
@@ -161,15 +180,18 @@ function Invoke-ZmxProbe([string[]] $Arguments) {
   $start.RedirectStandardOutput = $true
   $start.RedirectStandardError = $true
   foreach ($argument in $Arguments) { $start.ArgumentList.Add($argument) }
-  $process = [Diagnostics.Process]::Start($start)
-  $output = $process.StandardOutput.ReadToEndAsync()
-  $errors = $process.StandardError.ReadToEndAsync()
+  $process = Start-ShellOwnedProcess $processScope $start
   try {
     if (-not $process.WaitForExit(5000)) {
-      $process.Kill()
+      Stop-ShellOwnedProcess $processScope $process
       throw "zmx probe timed out: $($Arguments -join ' ')"
     }
-    return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $output.Result; Error = $errors.Result }
+    Complete-ShellOwnedProcess $processScope $process
+    return [pscustomobject]@{
+      ExitCode = $process.ExitCode
+      Output = Read-ShellOwnedOutput $processScope $process
+      Error = Read-ShellOwnedOutput $processScope $process -StandardError
+    }
   } finally {
     $process.Dispose()
   }
@@ -193,15 +215,15 @@ function Start-StubLoopSessions {
     $start.WorkingDirectory = [string] $repoRoot
     $start.RedirectStandardError = $true
     foreach ($argument in @("--daemon", $name)) { $start.ArgumentList.Add($argument) }
-    $hostProcess = [Diagnostics.Process]::Start($start)
-    $hostError = $hostProcess.StandardError.ReadToEndAsync()
+    $hostProcess = Start-ShellOwnedProcess $processScope $start
     $stubSessionHosts[$name] = $hostProcess
     [void] $ownedProcessIds.Add($hostProcess.Id)
     [void] $ownedSessionNames.Add($name)
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
       if ($hostProcess.HasExited) {
-        throw "zmx stub host exited ($($hostProcess.ExitCode)): $name; $($hostError.Result)"
+        Complete-ShellOwnedProcess $processScope $hostProcess
+        throw "zmx stub host exited ($($hostProcess.ExitCode)): $name; $(Read-ShellOwnedOutput $processScope $hostProcess -StandardError)"
       }
       $listing = Invoke-ZmxProbe @("ls")
       if ($listing.ExitCode -eq 0 -and $listing.Output -match $livePattern) { break }
@@ -217,14 +239,16 @@ function Start-StubLoopSessions {
 
 function Invoke-ShellProcess([string[]] $arguments, [string] $phase) {
   Start-StubLoopSessions
-  $script:shellProcess = Start-Process -FilePath $app -ArgumentList $arguments -PassThru -WindowStyle Hidden
+  $script:shellProcess = Start-SmokeProcess $app $arguments
   [void] $ownedProcessIds.Add($script:shellProcess.Id)
   Start-Sleep -Milliseconds 250
   Record-TestOwnedSessions
   Write-OwnedResourceMetrics $phase
   $script:shellProcess.WaitForExit()
+  Record-TestOwnedSessions
+  Complete-ShellOwnedProcess $processScope $script:shellProcess
   if ($script:shellProcess.ExitCode -ne 0) {
-    throw "GraphCode Windows shell exited with code $($script:shellProcess.ExitCode)"
+    throw "GraphCode Windows shell exited with code $($script:shellProcess.ExitCode): $(Read-ShellOwnedOutput $processScope $script:shellProcess -StandardError)"
   }
   $script:shellProcess.Dispose()
   $script:shellProcess = $null
@@ -246,6 +270,31 @@ function Get-StageZmxProcesses([string] $stageZmx) {
 # that directory off PATH, no GRAPHCODE_ZMX - and require the scripted workspace actions
 # (New Tab, Split Right, among others) to pass through the same smoke contract, with
 # attach children observed running the staged zmx.
+function New-ShellCleanupFailure($PrimaryFailure, [Exception[]] $CleanupErrors,
+    [string[]] $RetainedRoots) {
+  $primary = if ($PrimaryFailure -is [Management.Automation.ErrorRecord]) {
+    $PrimaryFailure.Exception
+  } else { $PrimaryFailure }
+  if (-not $CleanupErrors.Count -and -not (Test-ShellOwnershipUnproven $primary)) { return $null }
+  $messages = @($CleanupErrors | ForEach-Object Message)
+  if (-not $messages.Count) { $messages = @("Earlier ownership refusal requires retained validation roots") }
+  $roots = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($root in $RetainedRoots) { if ($root) { [void] $roots.Add($root) } }
+  foreach ($exception in @($primary) + @($CleanupErrors)) {
+    while ($exception) {
+      foreach ($root in @($exception.Data["GraphCodeValidationRetainedRoots"])) {
+        if ($root) { [void] $roots.Add($root) }
+      }
+      $exception = $exception.InnerException
+    }
+  }
+  $message = $messages -join "; "
+  $failure = if ($primary) {
+    [InvalidOperationException]::new("Shell failed: $($primary.Message); cleanup unproved: $message", $primary)
+  } else { [InvalidOperationException]::new($message) }
+  Set-ShellOwnershipUnproven $failure @($roots)
+}
+
 function Invoke-BareNameZmxShell {
   $stage = Join-Path $shellRoot "bare-zmx-installed-$PID"
   # A real folder that is not the shell's directory: the loop's project. Terminals start
@@ -253,23 +302,27 @@ function Invoke-BareNameZmxShell {
   $project = Join-Path $shellRoot "bare-zmx-project-$PID"
   $stageShell = Join-Path $stage "graphcode-windows.exe"
   $stageZmx = Join-Path $stage "zmx.exe"
-  $script:bareZmxStage = $stage
-  $script:bareZmxProject = $project
   foreach ($path in @($stage, $project)) {
     if (Test-Path -LiteralPath $path) { throw "Bare-name zmx fixture already exists: $path" }
   }
-  New-Item -ItemType Directory -Path $stage, $project | Out-Null
+  New-Item -ItemType Directory -Path $stage | Out-Null
+  $script:bareZmxStage = $stage
+  New-Item -ItemType Directory -Path $project | Out-Null
+  $script:bareZmxProject = $project
   $process = $null
   $stub = $null
+  $barePrimaryFailure = $null
   $bareStubResult = Join-Path $shellRoot "bare-zmx-stub-result-$PID.json"
   try {
+    $script:bareProcessScope = New-ShellProcessScope
     Copy-Item -LiteralPath $app -Destination $stageShell
     Copy-Item -LiteralPath $env:GRAPHCODE_ZMX -Destination $stageZmx
     Start-StubLoopSessions
     $barePipe = "graphcode-shell-barezmx-$PID"
-    $stub = Start-Process -FilePath "pwsh" -WindowStyle Hidden -PassThru -ArgumentList @(
+    $stub = Start-SmokeProcess "pwsh" @(
       "-NoProfile", "-File", (Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1"),
-      "-PipeName", $barePipe, "-ResultPath", $bareStubResult, "-StubProjectPath", $project)
+      "-PipeName", $barePipe, "-ResultPath", $bareStubResult, "-StubProjectPath", $project) `
+      -scope $bareProcessScope
 
     $start = [Diagnostics.ProcessStartInfo]::new($stageShell)
     $start.WorkingDirectory = $stage
@@ -299,11 +352,8 @@ function Invoke-BareNameZmxShell {
       throw "Bare-name zmx shell has its own directory on PATH"
     }
 
-    $process = [Diagnostics.Process]::new()
-    $process.StartInfo = $start
-    [void] $process.Start()
+    $process = Start-ShellOwnedProcess $bareProcessScope $start
     [void] $ownedProcessIds.Add($process.Id)
-    $stderr = $process.StandardError.ReadToEndAsync()
     $attachSessions = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $shellSessions = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $stageProcessIds = [Collections.Generic.HashSet[int]]::new()
@@ -323,7 +373,7 @@ function Invoke-BareNameZmxShell {
     $deadline = [DateTime]::UtcNow.AddSeconds(90)
     while (-not $process.HasExited) {
       if ([DateTime]::UtcNow -ge $deadline) {
-        Stop-Process -Id $process.Id -Force
+        Stop-ShellOwnedProcess $bareProcessScope $process
         throw "Bare-name zmx smoke did not finish within 90 seconds"
       }
       & $sample
@@ -334,6 +384,8 @@ function Invoke-BareNameZmxShell {
     # daemon outlives the shell, so one last look settles what a sample could miss.
     & $sample
     Record-TestOwnedSessions
+    Complete-ShellOwnedProcess $bareProcessScope $process
+    $stderr = Read-ShellOwnedOutput $bareProcessScope $process -StandardError
     Write-Host ("BARE_NAME_ZMX_EVIDENCE_JSON=" + (@{
           exitCode = $process.ExitCode
           stageProcessCount = $stageProcessIds.Count
@@ -341,7 +393,7 @@ function Invoke-BareNameZmxShell {
           shellSessions = @($shellSessions | Sort-Object)
         } | ConvertTo-Json -Compress))
     if ($process.ExitCode -ne 0) {
-      throw "Bare-name zmx shell smoke exited with code $($process.ExitCode): $($stderr.Result)"
+      throw "Bare-name zmx shell smoke exited with code $($process.ExitCode): $stderr"
     }
     if ($stageProcessIds.Count -eq 0) {
       throw "Bare-name zmx shell never ran the staged zmx.exe; the layout was not exercised"
@@ -361,28 +413,36 @@ function Invoke-BareNameZmxShell {
     if (@($bareEvidence.commands) -notcontains "openProject" -or [bool] $bareEvidence.error) {
       throw "Bare-name zmx stub did not serve the folder project: $($bareEvidence.error)"
     }
+  } catch {
+    $barePrimaryFailure = $_
+    throw
   } finally {
-    if ($process) {
-      if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
-      $process.Dispose()
+    $bareCleanupErrors = [Collections.Generic.List[Exception]]::new()
+    if ($bareProcessScope) {
+      try { Close-ShellProcessScope $bareProcessScope } catch { $bareCleanupErrors.Add($_.Exception) }
     }
-    if ($stub -and -not $stub.HasExited) { Stop-Process -Id $stub.Id -Force -ErrorAction SilentlyContinue }
+    if (-not $bareCleanupErrors.Count -and -not (Test-ShellOwnershipUnproven $barePrimaryFailure)) {
+      try { Remove-BareNameZmxStage } catch { $bareCleanupErrors.Add($_.Exception) }
+    }
+    $bareCleanupFailure = New-ShellCleanupFailure $barePrimaryFailure $bareCleanupErrors.ToArray() @($bareZmxStage, $bareZmxProject)
+    if ($bareCleanupFailure) { throw $bareCleanupFailure }
     Remove-Item -LiteralPath $bareStubResult -Force -ErrorAction SilentlyContinue
-    Remove-BareNameZmxStage
   }
   $global:LASTEXITCODE = 0
 }
 
 function Remove-BareNameZmxStage {
   $stage = $script:bareZmxStage
-  if ($script:bareZmxProject) {
-    Remove-Item -LiteralPath $script:bareZmxProject -Recurse -Force -ErrorAction SilentlyContinue
-  }
   if (-not $stage -or -not (Test-Path -LiteralPath $stage)) { return }
   $stageZmx = Join-Path $stage "zmx.exe"
-  Record-TestOwnedSessions
-  foreach ($zmxProcess in @(Get-StageZmxProcesses $stageZmx)) {
-    Stop-Process -Id ([int] $zmxProcess.ProcessId) -Force -ErrorAction SilentlyContinue
+  if ($bareProcessScope -and -not $bareProcessScope.Closed) { throw "Bare-name stage cleanup requires verified owned-job exit" }
+  $survivors = @(Get-StageZmxProcesses $stageZmx)
+  if ($survivors.Count) {
+    throw (Set-ShellOwnershipUnproven ([InvalidOperationException]::new(
+      "UNATTESTED_SURVIVORS: staged zmx paths observed after job cleanup; no termination attempted: $($survivors.ProcessId -join ',')")) @($stage, $bareZmxProject))
+  }
+  if ($script:bareZmxProject) {
+    Remove-Item -LiteralPath $script:bareZmxProject -Recurse -Force -ErrorAction SilentlyContinue
   }
   for ($attempt = 0; $attempt -lt 20; $attempt++) {
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
@@ -429,19 +489,20 @@ function Assert-PinnedCleanWorktree(
 
 function Assert-NoOrphanShellProcesses {
   $processes = @(
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Get-CimInstance Win32_Process -ErrorAction Stop |
       Where-Object {
         $_.CommandLine -and (Test-TestSessionProcess $_)
       }
   )
   if ($processes.Count -ne 0) {
-    throw "Windows shell cleanup left orphan processes: $($processes.ProcessId -join ', ')"
+    throw "UNATTESTED_SURVIVORS: shell session observations after owned-job cleanup; no termination attempted: $($processes.ProcessId -join ', ')"
   }
 }
 
 Assert-PinnedCleanWorktree $WinghosttyRoot $pins.winghostty.sha "Winghostty"
 Assert-PinnedCleanWorktree $ZmxRoot $pins.zmx.sha "zmx"
 
+$primaryFailure = $null
 try {
   if (-not $SkipBuild) {
     Invoke-Native "Pinned provider artifacts" {
@@ -466,13 +527,20 @@ try {
   if (-not (Test-Path -LiteralPath $app)) {
     throw "GraphCode Windows shell executable is missing: $app"
   }
-  $reportedVersion = (& $app --version 2>$null | Select-Object -First 1).Trim()
+  $processScope = New-ShellProcessScope
+  $versionProcess = Start-SmokeProcess $app @("--version") -CaptureOutput -CaptureError
+  if (-not $versionProcess.WaitForExit(5000)) {
+    Stop-ShellOwnedProcess $processScope $versionProcess
+    throw "Shell version query timed out"
+  }
+  Complete-ShellOwnedProcess $processScope $versionProcess
+  $reportedVersion = ((Read-ShellOwnedOutput $processScope $versionProcess) -split "\r?\n" | Select-Object -First 1).Trim()
   if ($reportedVersion -ne $Version) {
     throw "GraphCode Windows shell version mismatch: expected $Version, executable reports $reportedVersion"
   }
   $env:GRAPHCODE_ZMX = Join-Path $ZmxRoot "zig-out\bin\zmx.exe"
   $env:GRAPHCODE_GATE_CWD = $repoRoot
-  $env:GRAPHCODE_SHELL_WORKSPACE_ACTIONS = "1"
+  $env:GRAPHCODE_SHELL_WORKSPACE_ACTIONS = $WorkspaceActions
   New-SmokeZmxRoot $smokeZmxDir
   $env:ZMX_DIR = $smokeZmxDir
   $env:GRAPHCODE_WORKSPACE_LAYOUT = $workspaceLayoutBase
@@ -483,7 +551,7 @@ try {
     Remove-Item -LiteralPath $stubResult -Force -ErrorAction SilentlyContinue
     $pipeName = "graphcode-shell-stub-$PID"
     $stubScript = Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1"
-    $stubProcess = Start-Process -FilePath "pwsh" -WindowStyle Hidden -PassThru -ArgumentList @(
+    $stubProcess = Start-SmokeProcess "pwsh" @(
       "-NoProfile",
       "-File",
       $stubScript,
@@ -554,7 +622,7 @@ try {
     }
     Remove-Item -LiteralPath $busyResult,$busyError -Force -ErrorAction SilentlyContinue
     $busyPipeName = "graphcode-shell-busy-$PID"
-    $busyStubProcess = Start-Process -FilePath "pwsh" -WindowStyle Hidden -PassThru -ArgumentList @(
+    $busyStubProcess = Start-SmokeProcess "pwsh" @(
       "-NoProfile",
       "-File",
       $stubScript,
@@ -566,21 +634,22 @@ try {
     )
     $env:GRAPHCODE_DAEMON_PIPE = "\\.\pipe\$busyPipeName"
     $env:GRAPHCODE_SHELL_EXPECT_TRANSPORT_ERROR = "1"
-    $busyApp = Start-Process -FilePath $app -ArgumentList @("--smoke") -PassThru `
-      -RedirectStandardError $busyError
+    $busyApp = Start-SmokeProcess $app @("--smoke") -CaptureError
     [void] $busyApp.Handle
     if (-not $busyApp.WaitForExit(8000)) {
-      Stop-Process -Id $busyApp.Id -Force
+      Stop-ShellOwnedProcess $processScope $busyApp
       throw "Busy daemon smoke blocked the UI beyond the bounded timeout"
     }
     $busyApp.WaitForExit()
     $busyApp.Refresh()
     Record-TestOwnedSessions
+    Complete-ShellOwnedProcess $processScope $busyApp
     $busyEvidence = Get-Content -LiteralPath $busyResult -Raw | ConvertFrom-Json
     if (-not [bool] $busyEvidence.busyObserved) {
       throw "Busy daemon smoke did not accept a non-reading connection"
     }
-    $busyErrorText = Get-Content -LiteralPath $busyError -Raw
+    $busyErrorText = Read-ShellOwnedOutput $processScope $busyApp -StandardError
+    [IO.File]::WriteAllText($busyError, $busyErrorText)
     if ($busyErrorText -notmatch "(?i)Smoke daemon status: .*daemon") {
       throw "Busy daemon smoke did not post a daemon transport error"
     }
@@ -593,8 +662,7 @@ try {
     Remove-Item -LiteralPath $inputError -Force -ErrorAction SilentlyContinue
     Start-StubLoopSessions
     $inputDeadline = [DateTime]::UtcNow.AddSeconds(8)
-    $inputApp = Start-Process -FilePath $app -ArgumentList @("--smoke") -PassThru `
-      -RedirectStandardError $inputError
+    $inputApp = Start-SmokeProcess $app @("--smoke") -CaptureError
     [void] $inputApp.Handle
     [void] $ownedProcessIds.Add($inputApp.Id)
     $shellProcess = $inputApp
@@ -619,15 +687,17 @@ try {
     $remainingMilliseconds = [Math]::Max(
       0, [int]($inputDeadline - [DateTime]::UtcNow).TotalMilliseconds)
     if ([DateTime]::UtcNow -ge $inputDeadline -or -not $inputApp.WaitForExit($remainingMilliseconds)) {
-      if (-not $inputApp.HasExited) { Stop-Process -Id $inputApp.Id -Force }
+      if (-not $inputApp.HasExited) { Stop-ShellOwnedProcess $processScope $inputApp }
       throw "Large paste/non-reading attach smoke blocked the UI beyond the bounded timeout"
     }
     $inputApp.WaitForExit()
     $inputApp.Refresh()
+    Record-TestOwnedSessions
+    Complete-ShellOwnedProcess $processScope $inputApp
     $inputExitCode = $inputApp.ExitCode
+    [IO.File]::WriteAllText($inputError, (Read-ShellOwnedOutput $processScope $inputApp -StandardError))
     $inputApp.Dispose()
     $shellProcess = $null
-    Record-TestOwnedSessions
     if ($null -eq $inputExitCode) {
       throw "Large paste/non-reading attach smoke completed without an observable exit code"
     }
@@ -648,8 +718,10 @@ try {
         throw "Daemon handoff runtime is missing $name"
       }
     }
-    $handoffStage = Join-Path $shellRoot "daemon-handoff-live-$PID"
-    New-Item -ItemType Directory -Force -Path $handoffStage | Out-Null
+    $stage = Join-Path $shellRoot "daemon-handoff-live-$PID"
+    if (Test-Path -LiteralPath $stage) { throw "Handoff stage already exists: $stage" }
+    New-Item -ItemType Directory -Path $stage | Out-Null
+    $handoffStage = $stage
     Copy-Item -LiteralPath $app -Destination (Join-Path $handoffStage "graphcode-windows.exe") -Force
     Get-ChildItem -LiteralPath $runtime -File |
       Where-Object { $_.Name -in @("graphcoded.exe", "graphcode.exe") -or $_.Extension -ieq ".dll" } |
@@ -660,38 +732,25 @@ try {
     }
   }
   Record-TestOwnedSessions
-  Write-Host "Windows shell smoke/stress: PASS"
+} catch {
+  $primaryFailure = $_
+  throw
 }
 finally {
-  if ($stubProcess -and -not $stubProcess.HasExited) {
-    Stop-Process -Id $stubProcess.Id -Force
+  $cleanupFailure = $null
+  $cleanupErrors = [Collections.Generic.List[Exception]]::new()
+  foreach ($scope in @($bareProcessScope, $processScope)) {
+    if ($scope) {
+      try { Close-ShellProcessScope $scope } catch { $cleanupErrors.Add($_.Exception) }
+    }
   }
-  if ($busyStubProcess -and -not $busyStubProcess.HasExited) {
-    Stop-Process -Id $busyStubProcess.Id -Force
+  try { Assert-NoOrphanShellProcesses } catch { $cleanupErrors.Add($_.Exception) }
+  if (-not $cleanupErrors.Count -and -not (Test-ShellOwnershipUnproven $primaryFailure)) {
+    try { Remove-BareNameZmxStage } catch { $cleanupErrors.Add($_.Exception) }
   }
-  if ($env:GRAPHCODE_ZMX -and (Test-Path -LiteralPath $env:GRAPHCODE_ZMX)) {
-    $treeProcessIds = Get-ProcessTreeIds @($ownedProcessIds)
-    foreach ($processId in $treeProcessIds) {
-      [void] $ownedProcessIds.Add($processId)
-    }
-    foreach ($session in @($ownedSessionNames)) {
-      & $env:GRAPHCODE_ZMX kill --force $session *> $null
-    }
-    foreach ($processId in @($ownedProcessIds)) {
-      if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
-        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
-      }
-    }
-    $orphanTestDaemons = @(
-      Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object {
-          $_.Name -match "(?i)^zmx(?:\.exe)?$" -and
-          (Test-TestSessionProcess $_)
-        }
-    )
-    foreach ($process in $orphanTestDaemons) {
-      Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
-    }
+  $cleanupFailure = New-ShellCleanupFailure $primaryFailure $cleanupErrors.ToArray() @($smokeZmxDir, $bareZmxStage, $bareZmxProject, $handoffStage)
+  if ($cleanupFailure) {
+    Write-Host "SHELL_CLEANUP_UNPROVEN=$($cleanupFailure.Message); retained=$smokeZmxDir,$bareZmxStage,$handoffStage"
   }
   Remove-Item Env:GRAPHCODE_ZMX -ErrorAction SilentlyContinue
   Remove-Item Env:GRAPHCODE_GATE_CWD -ErrorAction SilentlyContinue
@@ -701,7 +760,7 @@ finally {
     $env:ZMX_DIR = $oldZmxDir
   }
   foreach ($hostProcess in $stubSessionHosts.Values) { $hostProcess.Dispose() }
-  if (Test-Path -LiteralPath $smokeZmxDir) {
+  if (-not $cleanupFailure -and (Test-Path -LiteralPath $smokeZmxDir)) {
     Remove-Item -LiteralPath $smokeZmxDir -Recurse -Force
   }
   if ($null -eq $oldSessionPrefix) {
@@ -749,16 +808,20 @@ finally {
   } else {
     $env:GRAPHCODE_WORKSPACE_LAYOUT = $oldWorkspaceLayout
   }
-  $layoutStem = [IO.Path]::GetFileNameWithoutExtension($workspaceLayoutBase)
-  Get-ChildItem -LiteralPath $shellRoot -Filter "$layoutStem*.json" -ErrorAction SilentlyContinue |
-    Remove-Item -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $stubResult -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $busyResult,$busyError,$inputError -Force -ErrorAction SilentlyContinue
-  if ($handoffStage) {
-    Remove-Item -LiteralPath $handoffStage -Recurse -Force -ErrorAction SilentlyContinue
+  if (-not $cleanupFailure) {
+    $layoutStem = [IO.Path]::GetFileNameWithoutExtension($workspaceLayoutBase)
+    Get-ChildItem -LiteralPath $shellRoot -Filter "$layoutStem*.json" -ErrorAction SilentlyContinue |
+      Remove-Item -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stubResult -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $busyResult,$busyError,$inputError -Force -ErrorAction SilentlyContinue
+    if ($handoffStage) {
+      Remove-Item -LiteralPath $handoffStage -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
-  Remove-BareNameZmxStage
-  Assert-NoOrphanShellProcesses
+  if ($cleanupFailure) {
+    throw $cleanupFailure
+  }
 }
 
+Write-Host "Windows shell smoke/stress: PASS"
 exit 0

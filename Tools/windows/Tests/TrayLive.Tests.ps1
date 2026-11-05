@@ -4,7 +4,9 @@ param(
   [string] $Executable,
   [Parameter(Mandatory)]
   [string] $PipeName,
-  [int] $ExternalDaemonPid = 0
+  [int] $ExternalDaemonPid = 0,
+  [switch] $AdmissionOnly,
+  [switch] $DpiScopeControl
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,6 +18,7 @@ using System.Runtime.InteropServices;
 
 public static class GraphCodeTrayLiveNative {
   public delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+  public delegate bool MonitorEnumProc(IntPtr monitor, IntPtr hdc, IntPtr rect, IntPtr data);
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
   public struct NotifyIconIdentifier {
     public int cbSize;
@@ -27,6 +30,12 @@ public static class GraphCodeTrayLiveNative {
   public struct Rect { public int left, top, right, bottom; }
   [StructLayout(LayoutKind.Sequential)]
   public struct Point { public int x, y; }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct MonitorInfo {
+    public uint cbSize;
+    public Rect monitor, work;
+    public uint flags;
+  }
   [StructLayout(LayoutKind.Sequential)]
   public struct MouseInput {
     public int dx, dy;
@@ -65,6 +74,65 @@ public static class GraphCodeTrayLiveNative {
   public static extern IntPtr GetProp(IntPtr hwnd, string name);
   [DllImport("user32.dll")]
   public static extern IntPtr MonitorFromPoint(Point point, uint flags);
+  [DllImport("user32.dll")]
+  public static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clip, MonitorEnumProc callback, IntPtr data);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetThreadDpiAwarenessContext();
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetWindowDpiAwarenessContext(IntPtr hwnd);
+  [DllImport("user32.dll")]
+  public static extern int GetAwarenessFromDpiAwarenessContext(IntPtr context);
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+  [DllImport("user32.dll")]
+  private static extern bool AreDpiAwarenessContextsEqual(IntPtr first, IntPtr second);
+  [DllImport("kernel32.dll")]
+  private static extern uint GetCurrentThreadId();
+  private static uint captureThread;
+  private static IntPtr preEntryContext;
+  private static IntPtr savedContext;
+  public static IntPtr EnterPerMonitorV2() {
+    captureThread = GetCurrentThreadId();
+    preEntryContext = GetThreadDpiAwarenessContext();
+    if (preEntryContext == IntPtr.Zero)
+      throw new InvalidOperationException("Cannot capture tray thread DPI context");
+    IntPtr previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
+    int error = Marshal.GetLastWin32Error();
+    IntPtr observed = GetThreadDpiAwarenessContext();
+    savedContext = previous;
+    Console.WriteLine("TRAY_DPI_ENTER captureThread={0} pointerBytes={1} preEntry={2:X} saved={3:X} observed={4:X} setError={5}",
+      captureThread, IntPtr.Size, preEntryContext.ToInt64(), previous.ToInt64(), observed.ToInt64(), error);
+    if (previous == IntPtr.Zero)
+      throw new InvalidOperationException("Cannot enter tray thread PMv2 context: " + error);
+    if (!AreDpiAwarenessContextsEqual(observed, new IntPtr(-4))) {
+      RestoreDpiAwareness(preEntryContext);
+      throw new InvalidOperationException("Tray thread did not admit PMv2 awareness");
+    }
+    // Restore the captured context, not the inherited token returned by the setter.
+    return preEntryContext;
+  }
+  public static void RestoreDpiAwareness(IntPtr previous) {
+    uint restoreThread = GetCurrentThreadId();
+    if (restoreThread != captureThread)
+      throw new InvalidOperationException("Tray DPI scope must restore on its capture thread");
+    if (previous == IntPtr.Zero)
+      throw new InvalidOperationException("Cannot restore an invalid tray thread DPI context");
+    IntPtr before = GetThreadDpiAwarenessContext();
+    IntPtr result = SetThreadDpiAwarenessContext(previous);
+    int error = Marshal.GetLastWin32Error();
+    IntPtr observed = GetThreadDpiAwarenessContext();
+    bool equal = AreDpiAwarenessContextsEqual(observed, previous);
+    Console.WriteLine("TRAY_DPI_RESTORE captureThread={0} restoreThread={1} pointerBytes={2} preEntry={3:X} saved={4:X} argument={5:X} before={6:X} setResult={7:X} setError={8} observed={9:X} equal={10} expectedAwareness={11} observedAwareness={12}",
+      captureThread, restoreThread, IntPtr.Size, preEntryContext.ToInt64(), savedContext.ToInt64(),
+      previous.ToInt64(), before.ToInt64(), result.ToInt64(), error, observed.ToInt64(), equal,
+      GetAwarenessFromDpiAwarenessContext(previous), GetAwarenessFromDpiAwarenessContext(observed));
+    if (result == IntPtr.Zero)
+      throw new InvalidOperationException("Cannot restore tray thread DPI context: native set failed, error=" + error);
+    if (!equal)
+      throw new InvalidOperationException("Cannot restore tray thread DPI context: exact context comparison failed");
+  }
   [DllImport("user32.dll")]
   public static extern uint GetDpiForWindow(IntPtr hwnd);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
@@ -138,14 +206,65 @@ function Assert-TrayIcon([IntPtr] $hwnd) {
   $id.uID = 1
   $rect = [GraphCodeTrayLiveNative+Rect]::new()
   $result = [GraphCodeTrayLiveNative]::Shell_NotifyIconGetRect([ref]$id, [ref]$rect)
+  $script:lastTrayObservation = [ordered]@{
+    hresult = $result
+    rect = [ordered]@{ left=$rect.left; top=$rect.top; right=$rect.right; bottom=$rect.bottom }
+  }
   if ($result -ne 0 -or $rect.right -le $rect.left -or $rect.bottom -le $rect.top) {
     throw "GraphCode tray icon was not discoverable through Shell_NotifyIconGetRect"
   }
   return $rect
 }
 
-function Wait-PhysicalTrayIcon([IntPtr] $hwnd) {
+function Write-TrayAdmissionGeometry(
+  [string] $phase, [IntPtr] $hwnd, $observation, $point, [IntPtr] $monitor,
+  [ValidateSet("REFUSAL", "MEASUREMENT")][string] $kind = "REFUSAL"
+) {
+  if ($null -eq $point -and $null -ne $observation) {
+    $point = [GraphCodeTrayLiveNative+Point]::new()
+    $point.x = [int](($observation.rect.left + $observation.rect.right) / 2)
+    $point.y = [int](($observation.rect.top + $observation.rect.bottom) / 2)
+    $monitor = [GraphCodeTrayLiveNative]::MonitorFromPoint($point, $script:MONITOR_DEFAULTTONULL)
+  }
+  [uint32]$owner = 0
+  [void][GraphCodeTrayLiveNative]::GetWindowThreadProcessId($hwnd, [ref]$owner)
+  $callerContext = [GraphCodeTrayLiveNative]::GetThreadDpiAwarenessContext()
+  $windowContext = [GraphCodeTrayLiveNative]::GetWindowDpiAwarenessContext($hwnd)
+  $monitors = [Collections.Generic.List[object]]::new()
+  $callback = [GraphCodeTrayLiveNative+MonitorEnumProc]{
+    param($handle, $hdc, $bounds, $data)
+    $info = [GraphCodeTrayLiveNative+MonitorInfo]::new()
+    $info.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($info)
+    $read = [GraphCodeTrayLiveNative]::GetMonitorInfo($handle, [ref]$info)
+    $monitors.Add([ordered]@{
+      handle=$handle.ToInt64(); infoRead=$read
+      bounds=[ordered]@{ left=$info.monitor.left; top=$info.monitor.top; right=$info.monitor.right; bottom=$info.monitor.bottom }
+      work=[ordered]@{ left=$info.work.left; top=$info.work.top; right=$info.work.right; bottom=$info.work.bottom }
+    })
+    return $true
+  }
+  $enumerated = [GraphCodeTrayLiveNative]::EnumDisplayMonitors(
+    [IntPtr]::Zero, [IntPtr]::Zero, $callback, [IntPtr]::Zero)
+  $diagnostic = [ordered]@{
+    phase=$phase; callerPid=$PID; ownerPid=$owner; hwnd=$hwnd.ToInt64(); iconId=1
+    observation=$observation
+    midpoint=if ($null -ne $point) { [ordered]@{ x=$point.x; y=$point.y } } else { $null }
+    monitorFromPoint=$monitor.ToInt64(); monitorsEnumerated=$enumerated; monitors=$monitors.ToArray()
+    callerDpiContext=$callerContext.ToInt64()
+    callerDpiAwareness=[GraphCodeTrayLiveNative]::GetAwarenessFromDpiAwarenessContext($callerContext)
+    windowDpiContext=$windowContext.ToInt64()
+    windowDpiAwareness=[GraphCodeTrayLiveNative]::GetAwarenessFromDpiAwarenessContext($windowContext)
+    windowDpi=[GraphCodeTrayLiveNative]::GetDpiForWindow($hwnd)
+    coordinateSpace="Win32 return values in the recorded caller DPI context; no conversion applied"
+  }
+  Write-Host ("TRAY_ADMISSION_${kind}_JSON=" + (ConvertTo-Json -InputObject $diagnostic -Depth 6 -Compress))
+}
+
+function Wait-PhysicalTrayIcon([IntPtr] $hwnd, [string] $phase) {
   for ($i = 0; $i -lt 30; $i++) {
+    $script:lastTrayObservation = $null
+    $point = $null
+    $monitor = [IntPtr]::Zero
     try {
       $rect = Assert-TrayIcon $hwnd
       $point = [GraphCodeTrayLiveNative+Point]::new()
@@ -154,7 +273,8 @@ function Wait-PhysicalTrayIcon([IntPtr] $hwnd) {
       if ([GraphCodeTrayLiveNative]::FindWindow("Shell_TrayWnd", $null) -eq [IntPtr]::Zero) {
         throw "Shell_TrayWnd is unavailable for tray icon discovery"
       }
-      if ([GraphCodeTrayLiveNative]::MonitorFromPoint($point, $script:MONITOR_DEFAULTTONULL) -eq [IntPtr]::Zero) {
+      $monitor = [GraphCodeTrayLiveNative]::MonitorFromPoint($point, $script:MONITOR_DEFAULTTONULL)
+      if ($monitor -eq [IntPtr]::Zero) {
         throw "Shell_NotifyIconGetRect returned coordinates outside every monitor"
       }
       if ([GraphCodeTrayLiveNative]::GetDpiForWindow($hwnd) -eq 0) {
@@ -162,7 +282,10 @@ function Wait-PhysicalTrayIcon([IntPtr] $hwnd) {
       }
       return $rect
     } catch {
-      if ($i -eq 29) { throw }
+      if ($i -eq 29) {
+        Write-TrayAdmissionGeometry $phase $hwnd $script:lastTrayObservation $point $monitor
+        throw
+      }
       Start-Sleep -Milliseconds 100
     }
   }
@@ -363,7 +486,17 @@ $oldPipe = [Environment]::GetEnvironmentVariable("GRAPHCODE_DAEMON_PIPE")
 $oldRequire = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_REQUIRE_DAEMON")
 $oldTrayTestHook = [Environment]::GetEnvironmentVariable("GRAPHCODE_TRAY_TEST_HOOK")
 $process = $null
+$previousDpiContext = [IntPtr]::Zero
+$primaryFailure = $null
+$trayAssertionsCompleted = $false
 try {
+  $previousDpiContext = [GraphCodeTrayLiveNative]::EnterPerMonitorV2()
+  if ($DpiScopeControl) {
+    Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+    Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+    Add-Type -AssemblyName WindowsBase -ErrorAction Stop
+    return
+  }
   $env:GRAPHCODE_DAEMON_PIPE = "\\.\pipe\$PipeName"
   $env:GRAPHCODE_SHELL_REQUIRE_DAEMON = "0"
   $env:GRAPHCODE_TRAY_TEST_HOOK = "1"
@@ -382,7 +515,12 @@ try {
   }
   $script:trayWindow = $hwnd
   Assert-NoConsoleWindow $process.Id
-  $trayRect = Wait-PhysicalTrayIcon $hwnd
+  $trayRect = Wait-PhysicalTrayIcon $hwnd "initial"
+  if ($AdmissionOnly) {
+    Write-TrayAdmissionGeometry "initial" $hwnd $script:lastTrayObservation -kind "MEASUREMENT"
+    Write-Output "TRAY_ADMISSION_MEASUREMENT=admitted"
+    return
+  }
 
   $racer = Start-Process -FilePath $Executable -PassThru
   if (-not $racer.WaitForExit(5000)) { throw "Competing shell start did not complete" }
@@ -394,7 +532,7 @@ try {
 
   Invoke-WindowClose $hwnd
   Wait-WindowVisibility $hwnd $false "WM_CLOSE"
-  $trayRect = Wait-PhysicalTrayIcon $hwnd
+  $trayRect = Wait-PhysicalTrayIcon $hwnd "after-window-close"
 
   Invoke-TrayCallback $hwnd "Open"
   Wait-TrayCallback $hwnd $script:WM_LBUTTONDBLCLK
@@ -426,7 +564,7 @@ try {
   $taskbar = [GraphCodeTrayLiveNative]::RegisterWindowMessage("TaskbarCreated")
   if ($taskbar -eq 0) { throw "Could not register TaskbarCreated" }
   [void][GraphCodeTrayLiveNative]::PostMessage($hwnd, [int]$taskbar, [IntPtr]::Zero, [IntPtr]::Zero)
-  $trayRect = Wait-PhysicalTrayIcon $hwnd
+  $trayRect = Wait-PhysicalTrayIcon $hwnd "after-explorer-loss"
 
   $menu = Get-TrayMenu $hwnd
   Assert-TrayMenuContract $menu
@@ -457,15 +595,52 @@ try {
   if ($ExternalDaemonPid -and -not (Get-Process -Id $ExternalDaemonPid -ErrorAction SilentlyContinue)) {
     throw "External daemon was terminated by tray Exit"
   }
-  Write-Output "Tray live executable tests: PASS"
+  $trayAssertionsCompleted = $true
+} catch {
+  $primaryFailure = $_
+  throw
 } finally {
-  if ($process -and -not $process.HasExited) {
-    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+  $cleanupFailure = $null
+  try {
+    if ($process -and -not $process.HasExited) {
+      Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+    if ($null -eq $oldPipe) { Remove-Item Env:GRAPHCODE_DAEMON_PIPE -ErrorAction SilentlyContinue }
+    else { $env:GRAPHCODE_DAEMON_PIPE = $oldPipe }
+    if ($null -eq $oldRequire) { Remove-Item Env:GRAPHCODE_SHELL_REQUIRE_DAEMON -ErrorAction SilentlyContinue }
+    else { $env:GRAPHCODE_SHELL_REQUIRE_DAEMON = $oldRequire }
+    if ($null -eq $oldTrayTestHook) { Remove-Item Env:GRAPHCODE_TRAY_TEST_HOOK -ErrorAction SilentlyContinue }
+    else { $env:GRAPHCODE_TRAY_TEST_HOOK = $oldTrayTestHook }
+    if ($process) {
+      if (-not $process.WaitForExit(5000)) { throw "Tray owned process cleanup was not confirmed" }
+      Write-Output "TRAY_OWNED_CLEANUP=verified pid=$($process.Id) exited=true"
+    }
+  } catch {
+    $cleanupFailure = $_
   }
-  if ($null -eq $oldPipe) { Remove-Item Env:GRAPHCODE_DAEMON_PIPE -ErrorAction SilentlyContinue }
-  else { $env:GRAPHCODE_DAEMON_PIPE = $oldPipe }
-  if ($null -eq $oldRequire) { Remove-Item Env:GRAPHCODE_SHELL_REQUIRE_DAEMON -ErrorAction SilentlyContinue }
-  else { $env:GRAPHCODE_SHELL_REQUIRE_DAEMON = $oldRequire }
-  if ($null -eq $oldTrayTestHook) { Remove-Item Env:GRAPHCODE_TRAY_TEST_HOOK -ErrorAction SilentlyContinue }
-  else { $env:GRAPHCODE_TRAY_TEST_HOOK = $oldTrayTestHook }
+  try {
+    if ($previousDpiContext -ne [IntPtr]::Zero) {
+      [GraphCodeTrayLiveNative]::RestoreDpiAwareness($previousDpiContext)
+      if ($AdmissionOnly) {
+        Write-Output "TRAY_ADMISSION_DPI_CONTEXT_RESTORED=verified previous=$($previousDpiContext.ToInt64())"
+      }
+    }
+  } catch {
+    if ($null -ne $primaryFailure) {
+      Write-Error -ErrorRecord $_ -ErrorAction Continue
+    } else {
+      if ($null -ne $cleanupFailure) { Write-Error -ErrorRecord $cleanupFailure -ErrorAction Continue }
+      throw
+    }
+  }
+  if ($null -ne $cleanupFailure) {
+    if ($null -ne $primaryFailure) { Write-Error -ErrorRecord $cleanupFailure -ErrorAction Continue }
+    else { throw $cleanupFailure }
+  }
+  if ($DpiScopeControl) {
+    Write-Output "TRAY_DPI_SCOPE_CONTROL=restored"
+  }
+}
+if ($trayAssertionsCompleted) {
+  Write-Output "Tray live executable tests: PASS"
 }

@@ -402,6 +402,14 @@ class Node final : public IRawElementProviderSimple,
       }
     }
     RECT rect{};
+    if (id_ == 0) {
+      if (!GetWindowRect(hwnd, &rect)) return UIA_E_ELEMENTNOTAVAILABLE;
+      value->left = rect.left;
+      value->top = rect.top;
+      value->width = rect.right - rect.left;
+      value->height = rect.bottom - rect.top;
+      return S_OK;
+    }
     GetClientRect(hwnd, &rect);
     POINT origin{0, 0};
     ClientToScreen(hwnd, &origin);

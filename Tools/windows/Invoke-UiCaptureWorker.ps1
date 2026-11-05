@@ -2984,7 +2984,7 @@ function Invoke-CapMatchedScenes {
                 $recovery=$null
                 $cycleRoute=$null
                 $postFixCardFocused=$focusedCapture -and
-                    $matchedCapturePlan.profile -ceq 'PostFixCards'
+                    $matchedCapturePlan.profile -cin @('PostFixCards','PostFixCardsUnselected')
                 if ($scene -cmatch '^s-goal-unwired-') {
                     $wireIdentity="wire-node:$($fixture.graphs[0].project.path):$($state[0].nodeId)"
                     $markIdentity="mark-entry:$($fixture.graphs[0].project.path):$($state[0].nodeId)"

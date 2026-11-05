@@ -18,6 +18,7 @@ const DialogState = struct {
     allocator: std.mem.Allocator,
     kind: Kind,
     promotion_target: SketchPromotion.Target = .goal,
+    promotion_source: SketchPromotion.Source = .sketch,
     promotion_read_failed: bool = false,
     parent: c.HWND,
     result: bool = false,
@@ -1111,14 +1112,16 @@ pub fn promotion(
     target: SketchPromotion.Target,
     context: SketchPromotion.Context,
 ) !?SketchPromotion.Draft {
+    try context.validateTarget(target);
+    const source = try context.source();
     const state = try allocator.create(DialogState);
-    state.* = .{ .allocator = allocator, .kind = .promotion, .parent = parent, .promotion_target = target };
+    state.* = .{ .allocator = allocator, .kind = .promotion, .parent = parent, .promotion_target = target, .promotion_source = source };
     defer {
         freeValues(state);
         allocator.destroy(state);
     }
     try initializePromotion(state, context.first_instruction);
-    const title = try std.fmt.allocPrint(allocator, "Promote {s} to {s}", .{ context.title, switch (target) {
+    const title = try std.fmt.allocPrint(allocator, "{s} {s} to {s}", .{ if (source == .sketch) "Promote" else "Change", context.title, switch (target) {
         .goal => "Goal",
         .turn => "Turn",
         .timed => "Timed",
@@ -1129,6 +1132,12 @@ pub fn promotion(
 }
 
 fn initializePromotion(state: *DialogState, first_instruction: []const u8) !void {
+    if (state.promotion_source == .goal and state.promotion_target == .timed) {
+        state.values[0] = try state.allocator.dupe(u8, "");
+        state.values[1] = try state.allocator.dupe(u8, "hourly");
+        state.values[2] = try state.allocator.dupe(u8, "");
+        return;
+    }
     state.values[0] = try state.allocator.dupe(u8, switch (state.promotion_target) {
         .goal => "",
         .turn => "false",
@@ -1140,7 +1149,14 @@ fn initializePromotion(state: *DialogState, first_instruction: []const u8) !void
 
 fn promotionInput(state: *const DialogState) !SketchPromotion.Input {
     if (state.promotion_read_failed) return error.PromotionFieldReadFailed;
-    var input = SketchPromotion.Input{ .target = state.promotion_target, .first_instruction = state.values[2] };
+    var input = SketchPromotion.Input{ .target = state.promotion_target, .source = state.promotion_source };
+    if (state.promotion_source == .goal and state.promotion_target == .timed) {
+        input.task = state.values[0];
+        input.interval = std.meta.stringToEnum(SketchPromotion.Interval, state.values[1]) orelse return error.InvalidPromotionChoice;
+        input.custom_interval = state.values[2];
+        return input;
+    }
+    input.first_instruction = state.values[2];
     switch (state.promotion_target) {
         .goal => input.goal = state.values[0],
         .turn => {
@@ -1478,6 +1494,12 @@ fn nodePrimaryLabel(state: *const DialogState) []const u8 {
     return NewLoopSheet.primaryLabel(state.values[1]);
 }
 
+fn statePrimaryLabel(state: *const DialogState) []const u8 {
+    if (state.kind == .node) return nodePrimaryLabel(state);
+    if (state.kind == .promotion and state.promotion_source != .sketch) return "Change";
+    return primaryLabel(state.kind);
+}
+
 fn newLoopFieldLabel(loop_type: []const u8, index: usize) []const u8 {
     return switch (index) {
         0 => if (std.mem.eql(u8, loop_type, "sketch")) "" else "Name (optional)",
@@ -1581,7 +1603,7 @@ fn footerActions(state: *DialogState, enabled: bool) [3]SheetFramework.FooterAct
         .{
             .id = ok_id,
             .role = if (state.kind == .worktree_sweep) .destructive else .primary,
-            .measured_text_width = measureTextWidth(host, state, if (state.kind == .node) nodePrimaryLabel(state) else primaryLabel(state.kind)),
+            .measured_text_width = measureTextWidth(host, state, statePrimaryLabel(state)),
             .return_hint = true,
             .enabled = enabled,
         },
@@ -1668,7 +1690,7 @@ fn createSheetControls(state: *DialogState) !void {
         state.recap = createOwnerDrawStatic(body, recap_id);
         setStaticText(state, state.recap, recap);
     } else {
-        createStatic(body, state, formIntro(state.kind), 18, 12, 530, 34, &state.intro);
+        createStatic(body, state, stateFormIntro(state), 18, 12, 530, 34, &state.intro);
         for (0..state.field_count) |index| createField(body, state, index);
         if (state.kind == .node) createAttachmentsSection(body, state);
         if (showsRecap(state.kind)) {
@@ -1684,7 +1706,7 @@ fn createSheetControls(state: *DialogState) !void {
         try createFooterButton(state, reveal_id, "Show in Explorer");
     if (state.kind == .node and state.templates_available)
         try createFooterButton(state, save_template_id, "Save as template…");
-    try createFooterButton(state, ok_id, if (state.kind == .node) nodePrimaryLabel(state) else primaryLabel(state.kind));
+    try createFooterButton(state, ok_id, statePrimaryLabel(state));
     syncValidation(state);
 }
 
@@ -2076,7 +2098,7 @@ fn configureFields(state: *DialogState) void {
         .node => 28,
         .edge => 10,
         .update => 9,
-        .promotion => if (state.promotion_target == .timed) 2 else 1,
+        .promotion => if (state.promotion_target == .timed) (if (state.promotion_source == .goal) 3 else 2) else 1,
         .settings => 2,
         .jump, .template_picker => 1,
         .worktree_policy => 0,
@@ -2121,9 +2143,14 @@ fn configureFields(state: *DialogState) void {
         },
         .promotion => switch (state.promotion_target) {
             .goal => {},
-            .turn, .timed => {
+            .turn => {
                 state.input_kinds[0] = .combo;
-                state.choice_groups[0] = if (state.promotion_target == .turn) .promotion_pause else .promotion_interval;
+                state.choice_groups[0] = .promotion_pause;
+            },
+            .timed => {
+                const index: usize = if (state.promotion_source == .goal) 1 else 0;
+                state.input_kinds[index] = .combo;
+                state.choice_groups[index] = .promotion_interval;
             },
         },
         .template_picker => {
@@ -2172,7 +2199,8 @@ fn updateConditionalVisibility(state: *DialogState) void {
             state.visible[9] = std.mem.eql(u8, state.values[2], "spawn");
         },
         .promotion => if (state.promotion_target == .timed) {
-            state.visible[1] = std.mem.eql(u8, state.values[0], "custom");
+            const interval_index: usize = if (state.promotion_source == .goal) 1 else 0;
+            state.visible[interval_index + 1] = std.mem.eql(u8, state.values[interval_index], "custom");
         },
         else => {},
     }
@@ -2187,6 +2215,15 @@ fn formIntro(kind: Kind) []const u8 {
         .worktree_sweep => "Safe rows start selected. Locked owned rows can be selected and are unlocked before removal. Deleted branch tips are recorded in ~/.graphcode/removed-branches.log.",
         else => "",
     };
+}
+
+fn stateFormIntro(state: *const DialogState) []const u8 {
+    if (state.kind == .promotion) return switch (state.promotion_source) {
+        .goal => "Keep the session, change what ends it — this loop stops working toward its goal.",
+        .timed => "Keep the session, change what ends it — this loop stops its cadence.",
+        .sketch => formIntro(state.kind),
+    };
+    return formIntro(state.kind);
 }
 
 fn fieldLabel(kind: Kind, index: usize) []const u8 {
@@ -2225,7 +2262,12 @@ fn stateFieldLabel(state: *const DialogState, index: usize) []const u8 {
     if (state.kind == .promotion) return switch (state.promotion_target) {
         .goal => "What does done look like?",
         .turn => "When should it pause for you?",
-        .timed => if (index == 0) "How often?" else "Custom interval (30m, 2h, 3d...)",
+        .timed => if (state.promotion_source == .goal and index == 0)
+            "What should each pass do?"
+        else if (index == @as(usize, if (state.promotion_source == .goal) 1 else 0))
+            "How often?"
+        else
+            "Custom interval (30m, 2h, 3d...)",
     };
     if (state.kind == .worktree_sweep and state.display_labels[index].len != 0)
         return state.display_labels[index];
@@ -2256,6 +2298,17 @@ fn fieldHelp(kind: Kind, index: usize) []const u8 {
         else => "",
     };
     return "";
+}
+
+fn stateFieldHelp(state: *const DialogState, index: usize) []const u8 {
+    if (state.kind == .promotion and state.promotion_source == .goal and state.promotion_target == .timed) {
+        return switch (index) {
+            0 => "Its goal is withdrawn, so each pass needs a task of its own.",
+            2 => fieldHelp(.promotion, 1),
+            else => "",
+        };
+    }
+    return fieldHelp(state.kind, index);
 }
 
 fn nodeFieldHelp(index: usize) []const u8 {
@@ -3230,7 +3283,7 @@ fn createField(hwnd: c.HWND, state: *DialogState, index: usize) void {
             _ = c.SetWindowTextW(input, wide.ptr);
         },
     }
-    createStatic(hwnd, state, if (state.kind == .node) nodeFieldHelp(index) else fieldHelp(state.kind, index), 18, 0, 530, 18, &state.helps[index]);
+    createStatic(hwnd, state, if (state.kind == .node) nodeFieldHelp(index) else stateFieldHelp(state, index), 18, 0, 530, 18, &state.helps[index]);
     AppFont.apply(state.helps[index], 12, false);
 }
 
@@ -4135,6 +4188,7 @@ fn validationReason(state: *DialogState) ?[]const u8 {
 fn promotionErrorReason(err: anyerror) []const u8 {
     return switch (err) {
         error.MissingGoal => "Say what done looks like to continue.",
+        error.MissingTask => "Say what each pass does to continue.",
         error.OutOfMemory => "Unable to allocate promotion fields. Nothing has been submitted.",
         else => "Unable to read promotion fields. Review the choices before submitting.",
     };
@@ -5768,6 +5822,106 @@ test "node update cancellation and close return no result" {
         try std.testing.expect(state.closed);
         try std.testing.expectEqualStrings("Goal", state.initial_values[0]);
     }
+}
+
+test "canvas retype form requires a new task while sketch keeps its fallback" {
+    const allocator = std.testing.allocator;
+    var state = DialogState{
+        .allocator = allocator,
+        .kind = .promotion,
+        .promotion_source = .goal,
+        .promotion_target = .timed,
+        .parent = null,
+    };
+    defer freeValues(&state);
+    try initializePromotion(&state, "old note is not a task");
+    configureFields(&state);
+    try std.testing.expectEqual(@as(usize, 3), state.field_count);
+    try std.testing.expectEqualStrings("What should each pass do?", stateFieldLabel(&state, 0));
+    try std.testing.expectEqualStrings("How often?", stateFieldLabel(&state, 1));
+    try std.testing.expect(state.visible[0] and state.visible[1] and !state.visible[2]);
+    try std.testing.expect(validationReason(&state) != null);
+    state.result = true;
+    try std.testing.expectError(error.MissingTask, buildPromotion(&state));
+    if (state.values[0].len != 0) allocator.free(state.values[0]);
+    state.values[0] = try allocator.dupe(u8, " \nCheck the build\u{2003} ");
+    try std.testing.expect(validationReason(&state) == null);
+    var timed = (try buildPromotion(&state)).?;
+    defer timed.deinit(allocator);
+    try std.testing.expectEqualStrings("/loop 1h Check the build", timed.timed);
+
+    if (state.values[1].len != 0) allocator.free(state.values[1]);
+    state.values[1] = try allocator.dupe(u8, "custom");
+    if (state.values[2].len != 0) allocator.free(state.values[2]);
+    state.values[2] = try allocator.dupe(u8, "45m");
+    updateConditionalVisibility(&state);
+    try std.testing.expect(state.visible[2]);
+    var custom = (try buildPromotion(&state)).?;
+    defer custom.deinit(allocator);
+    try std.testing.expectEqualStrings("/loop 45m Check the build", custom.timed);
+    state.promotion_read_failed = true;
+    try std.testing.expectError(error.PromotionFieldReadFailed, buildPromotion(&state));
+    state.result = false;
+    try std.testing.expect((try buildPromotion(&state)) == null);
+
+    var sketch = DialogState{ .allocator = allocator, .kind = .promotion, .promotion_target = .timed, .parent = null };
+    defer freeValues(&sketch);
+    try initializePromotion(&sketch, "");
+    configureFields(&sketch);
+    try std.testing.expectEqual(@as(usize, 2), sketch.field_count);
+    try std.testing.expect(validationReason(&sketch) == null);
+    sketch.result = true;
+    var sketch_draft = (try buildPromotion(&sketch)).?;
+    defer sketch_draft.deinit(allocator);
+    try std.testing.expectEqualStrings("/loop 1h Carry on with what this session has been doing.", sketch_draft.timed);
+}
+
+test "canvas retype form confirms Timed to Goal and labels both directions" {
+    const allocator = std.testing.allocator;
+    var timed = DialogState{
+        .allocator = allocator,
+        .kind = .promotion,
+        .promotion_source = .timed,
+        .promotion_target = .goal,
+        .parent = null,
+    };
+    defer freeValues(&timed);
+    try initializePromotion(&timed, "unused old instruction");
+    configureFields(&timed);
+    try std.testing.expect(timed.sheet == null);
+    try std.testing.expectEqual(@as(usize, 1), timed.field_count);
+    try std.testing.expectEqualStrings("Change", statePrimaryLabel(&timed));
+    try std.testing.expectEqualStrings("What does done look like?", stateFieldLabel(&timed, 0));
+    try std.testing.expect(validationReason(&timed) != null);
+    if (timed.values[0].len != 0) allocator.free(timed.values[0]);
+    timed.values[0] = try allocator.dupe(u8, " \n Finish the migration \u{2003}");
+    try std.testing.expect(validationReason(&timed) == null);
+    applyModalCommand(&timed, .submit);
+    var goal = (try buildPromotion(&timed)).?;
+    defer goal.deinit(allocator);
+    try std.testing.expectEqualStrings("Finish the migration", goal.goal);
+
+    var goal_source = DialogState{
+        .allocator = allocator,
+        .kind = .promotion,
+        .promotion_source = .goal,
+        .promotion_target = .timed,
+        .parent = null,
+    };
+    defer freeValues(&goal_source);
+    try initializePromotion(&goal_source, "");
+    configureFields(&goal_source);
+    try std.testing.expectEqualStrings("Change", statePrimaryLabel(&goal_source));
+    try std.testing.expectEqualStrings("Its goal is withdrawn, so each pass needs a task of its own.", stateFieldHelp(&goal_source, 0));
+    try std.testing.expectEqualStrings("", stateFieldHelp(&goal_source, 1));
+    try std.testing.expectEqualStrings(fieldHelp(.promotion, 1), stateFieldHelp(&goal_source, 2));
+    try std.testing.expectEqual(InputKind.combo, goal_source.input_kinds[1]);
+    try std.testing.expectEqual(ChoiceGroup.promotion_interval, goal_source.choice_groups[1]);
+    applyModalCommand(&goal_source, .cancel);
+    try std.testing.expect((try buildPromotion(&goal_source)) == null);
+
+    const sketch = DialogState{ .allocator = allocator, .kind = .promotion, .parent = null };
+    try std.testing.expectEqualStrings("Promote", statePrimaryLabel(&sketch));
 }
 
 test "sketch promotion native adapter binds one decision and owns accepted fields" {

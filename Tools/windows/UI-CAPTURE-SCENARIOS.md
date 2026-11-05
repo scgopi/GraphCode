@@ -386,7 +386,18 @@ the live UIA gate, after a bounded exact-status wait, and refuses a non-foregrou
 shell or an owned native dialog before injecting Escape.
 This is bounded review evidence, not an automatic parity-ledger promotion.
 
-Both profiles require the exact 185-case real-zmx
+`FocusedProfile=PostFixCardsUnselected` admits only
+`s-goal-unwired-unselected` and `s-main-cycle-unselected`, after/current-source,
+classified `POSTFIX_CARD_UNSELECTED_FOCUSED_VALIDATION_V1` with
+`officialParityEvidence=false`. It reuses the same disposable scene executor:
+Goal retains the Wire arm/cancel receipt and Main retains the separate Inspect
+Button/footer-reason hierarchy. It does not execute selected scenes, Mark-entry
+mutation or the selected-only cycle activation route. The four-scene
+`PostFixCards` profile is unchanged. Unknown, extra, selected, duplicate,
+wrong-phase/classification, historical-baseline and invalid-provenance inputs
+remain refused. Profile admission does not authorize a capture.
+
+All three profiles require the exact 185-case real-zmx
 preflight, a clean current source head/tree, hash-bound current binaries, PMv2
 physical admission, raw unresampled geometry, individual image privacy review,
 the numbered process journal, and zero-survivor release.

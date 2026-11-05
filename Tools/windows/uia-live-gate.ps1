@@ -5,1388 +5,24 @@ param(
   [string[]] $ArgumentList = @(),
   [switch]$SidebarParityOnly,
   [switch]$UnwiredRecoveryOnly,
-  [switch]$CycleHierarchyOnly
+  [switch]$CycleHierarchyOnly,
+  [string] $DeleteSelectFailureReceipt = $env:GRAPHCODE_UIA_DELETE_SELECT_FAILURE_RECEIPT
 )
 
 $ErrorActionPreference = "Stop"
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
-Add-Type -AssemblyName System.Drawing
-Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Windows.Automation;
-public static class GraphCodeUiaGateState {
-  public static volatile bool LiveObserved;
-  public static volatile bool NamePropertyObserved;
-  public static volatile bool FocusObserved;
-  public static int LiveEvents;
-  public static int NamePropertyEvents;
-  public static int SelectedEvents;
-  public static int AddedEvents;
-  public static int RemovedEvents;
-  public static int TogglePropertyEvents;
-  public static uint LastEditClearExpected;
-  public static uint LastEditClearSent;
-  public static uint LastEditTextExpected;
-  public static uint LastEditTextSent;
-  public static bool LastEditUsedMessageFallback;
-  public static string LiveSourceAutomationId;
-  public static string LiveSourceName;
-  public static string LiveSourceRuntimeId;
-  public static string NamePropertySourceAutomationId;
-  public static string FocusSourceAutomationId;
-  public static string SelectionSourceAutomationId;
-  public static string SelectionSourceRuntimeId;
-  public static string TogglePropertySourceAutomationId;
-  public static readonly AutomationEventHandler LiveHandler = HandleLive;
-  public static readonly AutomationPropertyChangedEventHandler NamePropertyHandler = HandleNameProperty;
-  public static readonly AutomationFocusChangedEventHandler FocusHandler = HandleFocus;
-  public static readonly AutomationEventHandler SelectedHandler = HandleSelected;
-  public static readonly AutomationEventHandler AddedHandler = HandleAdded;
-  public static readonly AutomationEventHandler RemovedHandler = HandleRemoved;
-  public static readonly AutomationPropertyChangedEventHandler TogglePropertyHandler = HandleToggleProperty;
-  private static void HandleLive(object sender, AutomationEventArgs eventArgs) {
-    var element = sender as AutomationElement;
-    if (element == null) return;
-    LiveSourceAutomationId = element.Current.AutomationId;
-    LiveSourceName = element.Current.Name;
-    LiveSourceRuntimeId = String.Join(",", element.GetRuntimeId());
-    LiveEvents++;
-    LiveObserved = true;
-  }
-  private static void HandleNameProperty(object sender, AutomationPropertyChangedEventArgs eventArgs) {
-    var element = sender as AutomationElement;
-    if (element != null) NamePropertySourceAutomationId = element.Current.AutomationId;
-    NamePropertyEvents++;
-    NamePropertyObserved = true;
-  }
-  private static void HandleFocus(object sender, AutomationFocusChangedEventArgs eventArgs) {
-    var element = sender as AutomationElement;
-    if (element != null) FocusSourceAutomationId = element.Current.AutomationId;
-    FocusObserved = true;
-  }
-  private static void HandleSelected(object sender, AutomationEventArgs eventArgs) {
-    var element = sender as AutomationElement;
-    if (element != null) {
-      SelectionSourceAutomationId = element.Current.AutomationId;
-      SelectionSourceRuntimeId = String.Join(",", element.GetRuntimeId());
-    }
-    SelectedEvents++;
-  }
-  private static void HandleAdded(object sender, AutomationEventArgs eventArgs) {
-    var element = sender as AutomationElement;
-    if (element != null) {
-      SelectionSourceAutomationId = element.Current.AutomationId;
-      SelectionSourceRuntimeId = String.Join(",", element.GetRuntimeId());
-    }
-    AddedEvents++;
-  }
-  private static void HandleRemoved(object sender, AutomationEventArgs eventArgs) {
-    var element = sender as AutomationElement;
-    if (element != null) {
-      SelectionSourceAutomationId = element.Current.AutomationId;
-      SelectionSourceRuntimeId = String.Join(",", element.GetRuntimeId());
-    }
-    RemovedEvents++;
-  }
-  private static void HandleToggleProperty(object sender, AutomationPropertyChangedEventArgs eventArgs) {
-    var element = sender as AutomationElement;
-    if (element != null) TogglePropertySourceAutomationId = element.Current.AutomationId;
-    TogglePropertyEvents++;
-  }
-  [DllImport("user32.dll", SetLastError = true)]
-  private static extern bool PostMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
-  [DllImport("user32.dll")]
-  private static extern IntPtr SendMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
-  [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", SetLastError = true)]
-  private static extern IntPtr SendMessageTimeout(
-    IntPtr window, uint message, UIntPtr wParam, IntPtr lParam,
-    uint flags, uint timeoutMilliseconds, out UIntPtr result
-  );
-  [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageW")]
-  private static extern IntPtr SendMessageString(IntPtr window, uint message, UIntPtr wParam, string lParam);
-  [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageW")]
-  private static extern IntPtr SendMessageText(
-    IntPtr window, uint message, UIntPtr wParam, StringBuilder lParam
-  );
-  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-  private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr childAfter, string className, string windowName);
-  private delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
-  [DllImport("user32.dll")]
-  private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
-  [DllImport("user32.dll")]
-  private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
-  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-  private static extern int GetClassName(IntPtr window, StringBuilder className, int capacity);
-  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-  private static extern bool SetWindowText(IntPtr window, string text);
-  [DllImport("user32.dll")]
-  private static extern int GetDlgCtrlID(IntPtr window);
-  [DllImport("user32.dll")]
-  private static extern IntPtr GetDlgItem(IntPtr dialog, int controlId);
-  [DllImport("user32.dll")]
-  private static extern IntPtr SetFocus(IntPtr window);
-  [DllImport("user32.dll")]
-  private static extern IntPtr GetFocus();
-  [DllImport("user32.dll", SetLastError = true)]
-  private static extern bool SetForegroundWindow(IntPtr window);
-  [DllImport("user32.dll")]
-  private static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll", SetLastError = true)]
-  private static extern bool BringWindowToTop(IntPtr window);
-  [DllImport("kernel32.dll")]
-  private static extern uint GetCurrentThreadId();
-  [DllImport("kernel32.dll")]
-  private static extern void Sleep(uint milliseconds);
-  [DllImport("user32.dll", SetLastError = true)]
-  private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
-  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-  private static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
-  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-  private static extern int GetWindowTextLength(IntPtr window);
-  [DllImport("user32.dll")]
-  private static extern bool ShowWindow(IntPtr window, int command);
-  [DllImport("user32.dll")]
-  private static extern IntPtr SetActiveWindow(IntPtr window);
-  [DllImport("user32.dll")]
-  private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
-  [DllImport("user32.dll")]
-  private static extern bool IsWindowVisible(IntPtr window);
-  [DllImport("user32.dll")]
-  private static extern bool IsWindowEnabled(IntPtr window);
-  [DllImport("user32.dll")]
-  private static extern int GetMenuItemCount(IntPtr menu);
-  [DllImport("user32.dll")]
-  private static extern uint GetMenuItemID(IntPtr menu, int position);
-  [DllImport("user32.dll")]
-  private static extern uint GetMenuState(IntPtr menu, uint item, uint flags);
-  [DllImport("user32.dll")]
-  private static extern bool GetMenuItemRect(IntPtr window, IntPtr menu, uint position, out RECT rect);
-  [DllImport("user32.dll", SetLastError = true)]
-  private static extern bool SetCursorPos(int x, int y);
-  [DllImport("user32.dll", SetLastError = true)]
-  private static extern bool GetCursorPos(out ScreenPoint point);
-  [StructLayout(LayoutKind.Sequential)]
-  private struct MouseInput {
-    public int X, Y;
-    public uint MouseData, Flags, Time;
-    public UIntPtr ExtraInfo;
-  }
-  [StructLayout(LayoutKind.Sequential)]
-  private struct Input {
-    public uint Type;
-    public MouseInput Mouse;
-  }
-  [DllImport("user32.dll", SetLastError = true)]
-  private static extern uint SendInput(uint count, Input[] inputs, int size);
-  [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetMenuStringW")]
-  private static extern int GetMenuString(IntPtr menu, uint item, StringBuilder text, int max, uint flags);
-  // The File/Loop/Terminal/Workspace/View/Help bar is a real SetMenu menu bar,
-  // not a TrackPopupMenu popup, so (unlike the popup context menu below) its
-  // live enabled state is readable directly through the Win32 menu API against
-  // GetMenu(shell) -- no MN_GETHMENU / popup-window workaround required.
-  // MF_BYCOMMAND (0) searches the whole menu tree for the command identifier.
-  public static uint MenuCommandState(IntPtr menuBar, uint command) {
-    if (menuBar == IntPtr.Zero) return 0xFFFFFFFF;
-    return GetMenuState(menuBar, command, 0x0000);
-  }
-  public static IntPtr GetMenuBar(IntPtr window) {
-    return GetMenu(window);
-  }
-  public static IntPtr FindPopupMenuWindow(uint processId) {
-    IntPtr result = IntPtr.Zero;
-    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
-      uint owner;
-      GetWindowThreadProcessId(window, out owner);
-      if (owner != processId) return true;
-      var actualClass = new StringBuilder(256);
-      GetClassName(window, actualClass, actualClass.Capacity);
-      if (!String.Equals(actualClass.ToString(), "#32768", StringComparison.Ordinal)) return true;
-      if (!IsWindowVisible(window)) return true;
-      result = window;
-      return false;
-    }, IntPtr.Zero);
-    return result;
-  }
-  public static IntPtr FindVisibleOwnedSheetByContentClass(
-      uint processId, IntPtr expectedOwner, string contentClass) {
-    IntPtr result = IntPtr.Zero;
-    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
-      uint owner;
-      GetWindowThreadProcessId(window, out owner);
-      if (owner == processId && IsWindowVisible(window) &&
-          GetWindow(window, 4) == expectedOwner &&
-          String.Equals(WindowClass(window), "GraphCodeSheetHost", StringComparison.Ordinal) &&
-          String.Equals(SheetContentClass(window), contentClass, StringComparison.Ordinal)) {
-        result = window;
-        return false;
-      }
-      return true;
-    }, IntPtr.Zero);
-    return result;
-  }
-  public static int CountVisibleOwnedSheetsByContentClass(
-      uint processId, IntPtr expectedOwner, string contentClass) {
-    int count = 0;
-    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
-      uint owner;
-      GetWindowThreadProcessId(window, out owner);
-      if (owner == processId && IsWindowVisible(window) &&
-          GetWindow(window, 4) == expectedOwner &&
-          String.Equals(WindowClass(window), "GraphCodeSheetHost", StringComparison.Ordinal) &&
-          String.Equals(SheetContentClass(window), contentClass, StringComparison.Ordinal)) {
-        count++;
-      }
-      return true;
-    }, IntPtr.Zero);
-    return count;
-  }
-  public static IntPtr FindVisibleOwnedSheet(uint processId, string title) {
-    IntPtr result = IntPtr.Zero;
-    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
-      uint owner;
-      GetWindowThreadProcessId(window, out owner);
-      if (owner == processId && IsWindowVisible(window) &&
-          String.Equals(WindowClass(window), "GraphCodeSheetHost", StringComparison.Ordinal) &&
-          String.Equals(WindowTitle(window), title, StringComparison.Ordinal)) {
-        result = window;
-        return false;
-      }
-      return true;
-    }, IntPtr.Zero);
-    return result;
-  }
-  // MN_GETHMENU. The live UIA tree exposes a popup menu only as an empty Pane
-  // with no MenuItem children, so the menu itself is read through the Win32
-  // menu API against the real HMENU the shell handed to TrackPopupMenu.
-  public static IntPtr PopupMenuHandle(IntPtr popup) {
-    if (popup == IntPtr.Zero) return IntPtr.Zero;
-    return SendMessage(popup, 0x01E1, UIntPtr.Zero, IntPtr.Zero);
-  }
-  public static IntPtr FindPopupForMenu(uint processId, IntPtr menu) {
-    IntPtr result = IntPtr.Zero;
-    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
-      uint owner;
-      GetWindowThreadProcessId(window, out owner);
-      if (owner == processId && IsWindowVisible(window) &&
-          String.Equals(ClassOf(window), "#32768", StringComparison.Ordinal) &&
-          PopupMenuHandle(window) == menu) {
-        result = window;
-        return false;
-      }
-      return true;
-    }, IntPtr.Zero);
-    return result;
-  }
-  public static bool HoverPopupMenuItem(IntPtr owner, IntPtr menu, int position) {
-    RECT item;
-    if (menu == IntPtr.Zero || !GetMenuItemRect(owner, menu, (uint)position, out item)) return false;
-    int x = item.Right - Math.Min(12, (item.Right - item.Left) / 2);
-    int y = (item.Top + item.Bottom) / 2;
-    if (!SetCursorPos(x, y))
-      throw new InvalidOperationException(String.Format("SetCursorPos for submenu failed: Win32Error={0}", Marshal.GetLastWin32Error()));
-    ScreenPoint at;
-    if (!GetCursorPos(out at)) return false;
-    uint ownerProcess;
-    GetWindowThreadProcessId(owner, out ownerProcess);
-    IntPtr popup = FindPopupForMenu(ownerProcess, menu);
-    if (popup == IntPtr.Zero) return false;
-    var client = new ScreenPoint { X = x, Y = y };
-    if (!ScreenToClient(popup, ref client)) return false;
-    SendMessage(popup, 0x0200, UIntPtr.Zero, MouseLParam(client.X, client.Y));
-    bool hilite = false;
-    for (int attempt = 0; attempt < 50 && !hilite; attempt++) {
-      hilite = (GetMenuState(menu, (uint)position, 0x0400) & 0x0080) != 0;
-      if (!hilite) Sleep(10);
-    }
-    return at.X == x && at.Y == y && hilite;
-  }
-  // Keyboard reveal of a real submenu: hilite the parent item (MN_SELECTITEM)
-  // and post VK_RIGHT, the same navigation a keyboard user performs. Unlike a
-  // WM_COMMAND posted to the shell (which TrackPopupMenu/TPM_RETURNCMD menus
-  // never route), this opens the shell's own submenu popup.
-  public static bool RevealSubmenuByKeyboard(IntPtr popup, IntPtr menu, int position) {
-    if (popup == IntPtr.Zero || menu == IntPtr.Zero || !IsWindowVisible(popup)) return false;
-    SendMessage(popup, 0x01E5, (UIntPtr)position, IntPtr.Zero);
-    if ((GetMenuState(menu, (uint)position, 0x0400) & 0x0080) == 0) return false;
-    return PostMessage(popup, 0x0100, (UIntPtr)0x27, IntPtr.Zero) &&
-      PostMessage(popup, 0x0101, (UIntPtr)0x27, IntPtr.Zero);
-  }
-  public static int PopupMenuItemCount(IntPtr menu) {
-    if (menu == IntPtr.Zero) return -1;
-    return GetMenuItemCount(menu);
-  }
-  public static uint PopupMenuItemId(IntPtr menu, int position) {
-    if (menu == IntPtr.Zero) return 0;
-    return GetMenuItemID(menu, position);
-  }
-  public static string PopupMenuItemText(IntPtr menu, int position) {
-    if (menu == IntPtr.Zero) return "";
-    var text = new StringBuilder(512);
-    GetMenuString(menu, (uint)position, text, text.Capacity, 0x0400);
-    return text.ToString();
-  }
-  public static uint PopupMenuItemState(IntPtr menu, int position) {
-    if (menu == IntPtr.Zero) return 0xFFFFFFFF;
-    return GetMenuState(menu, (uint)position, 0x0400);
-  }
-  // MainWindow.wm_uia_context_menu (WM_APP + 44).
-  public static bool PostContextMenu(IntPtr window, uint target) {
-    return PostMessage(window, 0x802C, (UIntPtr)target, IntPtr.Zero);
-  }
-  // MainWindow.wm_uia_present_form (WM_APP + 45).
-  public static bool PostPresentForm(IntPtr window, uint form) {
-    return PostMessage(window, 0x802D, (UIntPtr)form, IntPtr.Zero);
-  }
-  public static bool DismissPopupMenu(IntPtr popup, IntPtr owner) {
-    bool posted = popup != IntPtr.Zero &&
-      PostMessage(popup, 0x0100, (UIntPtr)0x1B, IntPtr.Zero);
-    if (!posted && owner != IntPtr.Zero) {
-      SendMessage(owner, 0x001F, UIntPtr.Zero, IntPtr.Zero);
-    }
-    return posted;
-  }
-  public static void CancelPopupMenu(IntPtr owner) {
-    if (owner != IntPtr.Zero) PostMessage(owner, 0x001F, UIntPtr.Zero, IntPtr.Zero);
-  }
-  public static IntPtr FindChild(IntPtr parent, string className) {
-    return FindWindowEx(parent, IntPtr.Zero, className, null);
-  }
-  public static IntPtr FindTopLevel(string className, uint processId) {
-    IntPtr result = IntPtr.Zero;
-    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
-      uint owner;
-      GetWindowThreadProcessId(window, out owner);
-      if (owner != processId) return true;
-      var actualClass = new StringBuilder(256);
-      GetClassName(window, actualClass, actualClass.Capacity);
-      if (!String.Equals(actualClass.ToString(), className, StringComparison.Ordinal)) return true;
-      result = window;
-      return false;
-    }, IntPtr.Zero);
-    return result;
-  }
-  public static string[] GetListItems(IntPtr list) {
-    if (list == IntPtr.Zero) return new string[0];
-    int count = (int)SendMessage(list, 0x018B, UIntPtr.Zero, IntPtr.Zero);
-    var result = new string[count];
-    for (int index = 0; index < count; index++) {
-      int length = (int)SendMessage(list, 0x018A, (UIntPtr)index, IntPtr.Zero);
-      var text = new StringBuilder(length + 1);
-      SendMessageText(list, 0x0189, (UIntPtr)index, text);
-      result[index] = text.ToString();
-    }
-    return result;
-  }
-  public static bool PostFixtureMutation(IntPtr window, uint mutation) {
-    return PostMessage(window, 0x802A, (UIntPtr)mutation, IntPtr.Zero);
-  }
-  public static bool PostPaletteRefresh(IntPtr window) {
-    return PostMessage(window, 0x802B, UIntPtr.Zero, IntPtr.Zero);
-  }
-  public static bool PostTaggedExitCollision(IntPtr window) {
-    return PostMessage(window, 0x0111, new UIntPtr(0x8000000000001008UL), IntPtr.Zero);
-  }
-  public static bool PostKeyboard(IntPtr window, uint key) {
-    return PostMessage(window, 0x0100, (UIntPtr)key, IntPtr.Zero) &&
-      PostMessage(window, 0x0101, (UIntPtr)key, IntPtr.Zero);
-  }
-  public static bool SendReturn(IntPtr window) {
-    if (window == IntPtr.Zero) return false;
-    SendMessage(window, 0x0100, (UIntPtr)0x0D, IntPtr.Zero);
-    return true;
-  }
-  public static bool SendCommand(IntPtr window, uint command) {
-    if (window == IntPtr.Zero) return false;
-    UIntPtr result;
-    return SendMessageTimeout(
-      window, 0x0111, (UIntPtr)command, IntPtr.Zero,
-      0x0001 | 0x0002, 5000, out result
-    ) != IntPtr.Zero;
-  }
-  public static bool ClickButton(IntPtr button) {
-    if (button == IntPtr.Zero) return false;
-    SendMessage(button, 0x00F5, UIntPtr.Zero, IntPtr.Zero);
-    return true;
-  }
-  public static int GetCheckState(IntPtr window) {
-    if (window == IntPtr.Zero) return -1;
-    return (int)SendMessage(window, 0x00F0, UIntPtr.Zero, IntPtr.Zero);
-  }
-  public static bool FocusControl(IntPtr parent, IntPtr control) {
-    if (parent == IntPtr.Zero || control == IntPtr.Zero) return false;
-    ActivateWindow(parent);
-    uint ignoredProcessId;
-    uint parentThread = GetWindowThreadProcessId(parent, out ignoredProcessId);
-    uint currentThread = GetCurrentThreadId();
-    bool attached = currentThread != parentThread &&
-      AttachThreadInput(currentThread, parentThread, true);
-    try {
-      SetFocus(control);
-      return IsForegroundWindow(parent) && GetFocus() == control;
-    } finally {
-      if (attached) AttachThreadInput(currentThread, parentThread, false);
-    }
-  }
-  public static IntPtr FocusedControlInDialog(IntPtr parent) {
-    if (parent == IntPtr.Zero) return IntPtr.Zero;
-    uint ignoredProcessId;
-    uint parentThread = GetWindowThreadProcessId(parent, out ignoredProcessId);
-    uint currentThread = GetCurrentThreadId();
-    bool attached = currentThread != parentThread &&
-      AttachThreadInput(currentThread, parentThread, true);
-    try {
-      return GetFocus();
-    } finally {
-      if (attached) AttachThreadInput(currentThread, parentThread, false);
-    }
-  }
-  public static bool IsControlOwnedBy(IntPtr parent, IntPtr control, int controlId) {
-    return parent != IntPtr.Zero && control != IntPtr.Zero &&
-      GetDlgCtrlID(control) == controlId && GetAncestor(control, 2) == parent;
-  }
-  public static int ControlIdOf(IntPtr control) {
-    return control == IntPtr.Zero ? 0 : GetDlgCtrlID(control);
-  }
-  public static bool HasVisibleBounds(IntPtr window) {
-    RECT rect;
-    return window != IntPtr.Zero && IsWindowVisible(window) &&
-      GetWindowRect(window, out rect) && rect.Right > rect.Left && rect.Bottom > rect.Top;
-  }
-  public static string LastActivationDiagnostic = "not attempted";
-  public static bool ActivateWindow(IntPtr window) {
-    if (window == IntPtr.Zero) {
-      LastActivationDiagnostic = "invalid target HWND";
-      return false;
-    }
-    IntPtr foreground = GetForegroundWindow();
-    uint ignoredForegroundProcessId;
-    uint foregroundThread = foreground == IntPtr.Zero ? 0 :
-      GetWindowThreadProcessId(foreground, out ignoredForegroundProcessId);
-    uint ignoredTargetProcessId;
-    uint targetThread = GetWindowThreadProcessId(window, out ignoredTargetProcessId);
-    uint currentThread = GetCurrentThreadId();
-    bool needsForegroundAttach = foregroundThread != 0 && currentThread != foregroundThread;
-    bool attachForeground = !needsForegroundAttach ||
-      AttachThreadInput(currentThread, foregroundThread, true); int foregroundAttachError = Marshal.GetLastWin32Error();
-    bool needsTargetAttach = currentThread != targetThread;
-    bool attachTarget = !needsTargetAttach ||
-      AttachThreadInput(currentThread, targetThread, true); int targetAttachError = Marshal.GetLastWin32Error();
-    try {
-      ShowWindow(window, 9);
-      bool broughtToTop = BringWindowToTop(window);
-      int bringError = Marshal.GetLastWin32Error();
-      keybd_event(0x12, 0, 0, UIntPtr.Zero);
-      keybd_event(0x12, 0, 0x0002, UIntPtr.Zero);
-      SetActiveWindow(window);
-      bool foregroundSet = SetForegroundWindow(window); int foregroundError = Marshal.GetLastWin32Error();
-      bool observed = IsForegroundWindow(window);
-      LastActivationDiagnostic = String.Format(
-        "AttachThreadInput(foreground)={0} GetLastError={1} AttachThreadInput(target)={2} GetLastError={3} BringWindowToTop={4} GetLastError={5} SetForegroundWindow={6} GetLastError={7} (FALSE can leave no meaningful last error) observedForeground={8}",
-        attachForeground, needsForegroundAttach && !attachForeground ? foregroundAttachError : 0,
-        attachTarget, needsTargetAttach && !attachTarget ? targetAttachError : 0,
-        broughtToTop, broughtToTop ? 0 : bringError,
-        foregroundSet, foregroundSet ? 0 : foregroundError, observed
-      );
-      return observed;
-    } finally {
-      if (needsTargetAttach && attachTarget) AttachThreadInput(currentThread, targetThread, false);
-      if (needsForegroundAttach && attachForeground) AttachThreadInput(currentThread, foregroundThread, false);
-    }
-  }
-  public static bool IsForegroundWindow(IntPtr window) {
-    return window != IntPtr.Zero && GetForegroundWindow() == window;
-  }
-  public static IntPtr CurrentForegroundWindow() {
-    return GetForegroundWindow();
-  }
-  public static uint WindowProcessId(IntPtr window) {
-    if (window == IntPtr.Zero) return 0;
-    uint processId;
-    GetWindowThreadProcessId(window, out processId);
-    return processId;
-  }
-  public static string WindowClass(IntPtr window) {
-    if (window == IntPtr.Zero) return "";
-    var text = new StringBuilder(256);
-    GetClassName(window, text, text.Capacity);
-    return text.ToString();
-  }
-  public static string WindowTitle(IntPtr window) {
-    if (window == IntPtr.Zero) return "";
-    int length = GetWindowTextLength(window);
-    var text = new StringBuilder(length + 1);
-    GetWindowText(window, text, text.Capacity);
-    return text.ToString();
-  }
-  public static void HideWindow(IntPtr window) {
-    if (window != IntPtr.Zero) ShowWindow(window, 0);
-  }
-  public static void HideProcessWindows(uint processId) {
-    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
-      uint owner;
-      GetWindowThreadProcessId(window, out owner);
-      if (owner == processId) HideWindow(window);
-      return true;
-    }, IntPtr.Zero);
-  }
-  // Diagnostic only (Tools/windows/uia-live-gate.ps1's Get-DirectChildren
-  // exhaustion path): enumerates every top-level window currently owned by
-  // processId with its class, visibility, and title, so a failure that
-  // reports MainWindowHandle == 0 can be told apart as window-destroyed
-  // (empty result), window-hidden (a result exists but is not visible), or
-  // handle-churn (a visible, healthy-looking window exists under a handle
-  // Process.MainWindowHandle no longer reports). Does not filter or assert
-  // anything - it is read verbatim into a log line.
-  public static string[] DescribeTopLevelWindows(uint processId) {
-    var results = new System.Collections.ArrayList();
-    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
-      uint owner;
-      GetWindowThreadProcessId(window, out owner);
-      if (owner != processId) return true;
-      var classText = new StringBuilder(256);
-      GetClassName(window, classText, classText.Capacity);
-      int titleLength = GetWindowTextLength(window);
-      var titleText = new StringBuilder(titleLength + 1);
-      GetWindowText(window, titleText, titleText.Capacity);
-      bool visible = IsWindowVisible(window);
-      results.Add(window.ToInt64() + ":" + classText.ToString() + ":" +
-        (visible ? "visible" : "hidden") + ":" + titleText.ToString());
-      return true;
-    }, IntPtr.Zero);
-    return (string[])results.ToArray(typeof(string));
-  }
-  public static bool PostMouseClick(IntPtr window) {
-    return PostMessage(window, 0x0201, UIntPtr.Zero, IntPtr.Zero);
-  }
-  // A modal disables its owner for as long as it is up. Win32 refuses a caption
-  // close against a WS_DISABLED window, so the owner must be observed enabled
-  // again before a close can be attributed to the shell rather than to a modal
-  // that has not finished tearing down.
-  public static bool WindowIsEnabled(IntPtr window) {
-    return IsWindowEnabled(window);
-  }
-  public static bool WindowIsVisible(IntPtr window) {
-    return window != IntPtr.Zero && IsWindowVisible(window);
-  }
-  public static IntPtr WindowOwner(IntPtr window) {
-    return window == IntPtr.Zero ? IntPtr.Zero : GetWindow(window, 4);
-  }
-  public static bool IsCaptionlessSheet(IntPtr window) {
-    if (window == IntPtr.Zero ||
-        !String.Equals(WindowClass(window), "GraphCodeSheetHost", StringComparison.Ordinal))
-      return false;
-    ulong style = unchecked((ulong)GetWindowLongPtr(window, -16).ToInt64());
-    return (style & 0x80000000UL) != 0 && (style & 0x00C00000UL) == 0;
-  }
-  public static string SheetContentClass(IntPtr window) {
-    if (window == IntPtr.Zero ||
-        !String.Equals(WindowClass(window), "GraphCodeSheetHost", StringComparison.Ordinal))
-      return "";
-    IntPtr viewport = FindWindowEx(window, IntPtr.Zero, "GraphCodeSheetViewport", null);
-    if (viewport == IntPtr.Zero) return "";
-    string[] contentClasses = new[] {
-      "GraphCodeWindowsDialogContent",
-      "GraphCodeNativeForm",
-      "GraphCodeProductSettings",
-      "GraphCodeWorkspaceManager",
-      "GraphCodeRepositoryIngressDialog",
-      "GraphCodeRepositoryOperationDialog",
-      "GraphCodeCodespaceIngressDialog",
-      "GraphCodeUpdateOffer",
-      "GraphCodeUpdateInstall"
-    };
-    foreach (string contentClass in contentClasses)
-      if (FindWindowEx(viewport, IntPtr.Zero, contentClass, null) != IntPtr.Zero)
-        return contentClass;
-    return "";
-  }
-  public static IntPtr FindVisibleProcessWindow(uint processId, string title) {
-    IntPtr result = IntPtr.Zero;
-    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
-      uint owner;
-      GetWindowThreadProcessId(window, out owner);
-      if (owner == processId && IsWindowVisible(window) &&
-          String.Equals(WindowTitle(window), title, StringComparison.Ordinal)) {
-        result = window;
-        return false;
-      }
-      return true;
-    }, IntPtr.Zero);
-    return result;
-  }
-  // Real client-coordinate mouse messages posted directly to the target window,
-  // matching the same WM_MOUSEMOVE/WM_LBUTTONDOWN/WM_LBUTTONUP messages the OS
-  // delivers for genuine mouse input, without moving the shared desktop's real
-  // cursor (multiple fleet sessions share this desktop). PostMouseButtonAt sets
-  // the MK_LBUTTON flag in wParam, matching the wParam a real WM_LBUTTONDOWN/UP
-  // carries; ClickAt below (and its existing sidebar-update-banner caller) keep
-  // working unchanged since App.zig's click handling only decodes the lParam
-  // x/y, not the button-state bits in wParam.
-  private static IntPtr MouseLParam(int x, int y) {
-    return (IntPtr)(((y & 0xFFFF) << 16) | (x & 0xFFFF));
-  }
-  public static bool PostMouseButtonAt(IntPtr window, uint message, int x, int y) {
-    return PostMessage(window, message, (UIntPtr)0x0001, MouseLParam(x, y));
-  }
-  public static bool ClickAt(IntPtr window, int x, int y) {
-    return PostMouseButtonAt(window, 0x0201, x, y) && PostMouseButtonAt(window, 0x0202, x, y);
-  }
-  public static bool PostMouseMoveAt(IntPtr window, int clientX, int clientY) {
-    return PostMessage(window, 0x0200, UIntPtr.Zero, MouseLParam(clientX, clientY));
-  }
-  public static bool PostMouseDragMoveAt(IntPtr window, int clientX, int clientY) {
-    return PostMessage(window, 0x0200, (UIntPtr)0x0001, MouseLParam(clientX, clientY));
-  }
-  public static IntPtr SendMouseButtonAt(IntPtr window, uint message, int clientX, int clientY) {
-    return SendMessage(window, message, (UIntPtr)0x0001, MouseLParam(clientX, clientY));
-  }
-  public static bool PostMouseClickAt(IntPtr window, int clientX, int clientY) {
-    return PostMouseButtonAt(window, 0x0201, clientX, clientY) &&
-      PostMouseButtonAt(window, 0x0202, clientX, clientY);
-  }
-  public static bool PostRightClickAt(IntPtr window, int clientX, int clientY) {
-    IntPtr point = MouseLParam(clientX, clientY);
-    return PostMessage(window, 0x0204, (UIntPtr)0x0002, point) &&
-      PostMessage(window, 0x0205, UIntPtr.Zero, point);
-  }
-  public static int[] ClickOwnedScreenRectangle(IntPtr owner, int left, int top, int right, int bottom, bool rightClick) {
-    if (!WindowIsVisible(owner) || right <= left || bottom <= top)
-      throw new InvalidOperationException("Owned rectangle is not visibly hittable");
-    var point = new ScreenPoint { X = (left + right) / 2, Y = (top + bottom) / 2 };
-    IntPtr hit = WindowFromPoint(point);
-    if (hit == IntPtr.Zero || GetAncestor(hit, 2) != owner)
-      throw new InvalidOperationException("Live rectangle is covered by another top-level window");
-    if (!SetCursorPos(point.X, point.Y))
-      throw new InvalidOperationException("Unable to move cursor into owned live rectangle");
-    ScreenPoint actual;
-    if (!GetCursorPos(out actual) || actual.X != point.X || actual.Y != point.Y)
-      throw new InvalidOperationException("Owned live-rectangle cursor position differs");
-    var inputs = new Input[] {
-      new Input { Type = 0, Mouse = new MouseInput { Flags = rightClick ? 0x0008u : 0x0002u } },
-      new Input { Type = 0, Mouse = new MouseInput { Flags = rightClick ? 0x0010u : 0x0004u } }
-    };
-    uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input)));
-    if (sent != inputs.Length)
-      throw new InvalidOperationException(String.Format("Owned rectangle SendInput sent {0}/{1}", sent, inputs.Length));
-    return new int[] { left, top, right, bottom, actual.X, actual.Y, (int)sent, inputs.Length };
-  }
-  public static bool PostOwnedScreenPoint(IntPtr owner, int screenX, int screenY, bool rightClick) {
-    if (!WindowIsVisible(owner)) return false;
-    var point = new ScreenPoint { X = screenX, Y = screenY };
-    IntPtr hit = WindowFromPoint(point);
-    if (hit == IntPtr.Zero || GetAncestor(hit, 2) != owner || !ScreenToClient(owner, ref point))
-      return false;
-    if (rightClick) {
-      return PostMessage(owner, 0x0204, (UIntPtr)0x0002, MouseLParam(point.X, point.Y)) &&
-        PostMessage(owner, 0x0205, UIntPtr.Zero, MouseLParam(point.X, point.Y));
-    }
-    return PostMessage(owner, 0x0201, (UIntPtr)0x0001, MouseLParam(point.X, point.Y)) &&
-      PostMessage(owner, 0x0202, UIntPtr.Zero, MouseLParam(point.X, point.Y));
-  }
-  public sealed class PopupItemHit {
-    public int Position, ItemId, Left, Top, Right, Bottom;
-    public int ScreenX, ScreenY, ClientX, ClientY, CursorBeforeX, CursorBeforeY;
-    public int CursorAtX, CursorAtY;
-    public bool Hilite, UsedKeyboardFallback, UsedSelectItemFallback;
-    public bool HiliteAtEnterFallback, HiliteBeforeEnter;
-  }
-  public static PopupItemHit ClickPopupMenuItem(IntPtr popup, IntPtr owner, int position, int commandId) {
-    if (popup == IntPtr.Zero || position < 0) return null;
-    IntPtr menu = PopupMenuHandle(popup);
-    RECT item;
-    if (menu == IntPtr.Zero || !GetMenuItemRect(owner, menu, (uint)position, out item) ||
-        item.Right <= item.Left || item.Bottom <= item.Top ||
-        PopupMenuItemId(menu, position) != (uint)commandId) return null;
-    int screenX = (item.Left + item.Right) / 2;
-    int screenY = (item.Top + item.Bottom) / 2;
-    if (screenX < item.Left || screenX >= item.Right ||
-        screenY < item.Top || screenY >= item.Bottom) return null;
-    var point = new ScreenPoint {
-      X = screenX,
-      Y = screenY
-    };
-    if (!ScreenToClient(popup, ref point)) return null;
-    ScreenPoint before, at;
-    if (!GetCursorPos(out before))
-      throw new InvalidOperationException(String.Format("GetCursorPos before popup click failed: Win32Error={0}", Marshal.GetLastWin32Error()));
-    if (!SetCursorPos(screenX, screenY))
-      throw new InvalidOperationException(String.Format("SetCursorPos for popup click failed: Win32Error={0}", Marshal.GetLastWin32Error()));
-    if (!GetCursorPos(out at))
-      throw new InvalidOperationException(String.Format("GetCursorPos after popup move failed: Win32Error={0}", Marshal.GetLastWin32Error()));
-    if (at.X != screenX || at.Y != screenY)
-      throw new InvalidOperationException(String.Format("Popup cursor landed at ({0},{1}), expected ({2},{3})", at.X, at.Y, screenX, screenY));
-    SendMessage(popup, 0x0200, UIntPtr.Zero, MouseLParam(point.X, point.Y));
-    bool hilite = false;
-    for (int attempt = 0; attempt < 50 && !hilite; attempt++) {
-      hilite = (GetMenuState(menu, (uint)position, 0x0400) & 0x0080) != 0;
-      if (!hilite) Sleep(10);
-    }
-    bool selectItemFallback = false;
-    if (!hilite) {
-      SendMessage(popup, 0x01E5, (UIntPtr)position, IntPtr.Zero);
-      selectItemFallback = true;
-      for (int attempt = 0; attempt < 50 && !hilite; attempt++) {
-        hilite = (GetMenuState(menu, (uint)position, 0x0400) & 0x0080) != 0;
-        if (!hilite) Sleep(10);
-      }
-    }
-    if (!hilite)
-      throw new InvalidOperationException("Popup item did not acknowledge hover before click");
-    var inputs = new[] {
-      new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0002 } },
-      new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0004 } }
-    };
-    uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input)));
-    if (sent != inputs.Length)
-      throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} popup mouse events: Win32Error={2}", sent, inputs.Length, Marshal.GetLastWin32Error()));
-    for (int attempt = 0; attempt < 20 && IsWindowVisible(popup); attempt++) Sleep(10);
-    bool keyboardFallback = false;
-    bool hiliteAtEnterFallback = false;
-    bool hiliteBeforeEnter = false;
-    if (IsWindowVisible(popup)) {
-      // Injected clicks can be dropped (or held) by the desktop's input stack,
-      // and the menu can lose its hover hilite meanwhile. Enter with no hilited
-      // item ends TrackPopupMenu with command 0: the popup closes exactly as if
-      // the item had been chosen, but no command reaches the shell. Re-assert
-      // the intended item and prove its hilite immediately before Enter.
-      hiliteAtEnterFallback = (GetMenuState(menu, (uint)position, 0x0400) & 0x0080) != 0;
-      SendMessage(popup, 0x01E5, (UIntPtr)position, IntPtr.Zero);
-      hiliteBeforeEnter = (GetMenuState(menu, (uint)position, 0x0400) & 0x0080) != 0;
-    }
-    if (IsWindowVisible(popup)) {
-      if (!hiliteBeforeEnter)
-        throw new InvalidOperationException(String.Format("Popup item {0} was not hilited before the Enter fallback (hilite at fallback={1})", commandId, hiliteAtEnterFallback));
-      keyboardFallback =
-        PostMessage(popup, 0x0100, (UIntPtr)0x0D, IntPtr.Zero) &&
-        PostMessage(popup, 0x0101, (UIntPtr)0x0D, IntPtr.Zero);
-      if (!keyboardFallback)
-        throw new InvalidOperationException(String.Format("Popup Enter fallback was rejected: Win32Error={0}", Marshal.GetLastWin32Error()));
-    }
-    return new PopupItemHit {
-      Position = position, ItemId = commandId, Left = item.Left, Top = item.Top,
-      Right = item.Right, Bottom = item.Bottom,
-      ScreenX = screenX, ScreenY = screenY, ClientX = point.X, ClientY = point.Y,
-      CursorBeforeX = before.X, CursorBeforeY = before.Y,
-      CursorAtX = at.X, CursorAtY = at.Y, Hilite = hilite,
-      UsedKeyboardFallback = keyboardFallback,
-      UsedSelectItemFallback = selectItemFallback,
-      HiliteAtEnterFallback = hiliteAtEnterFallback,
-      HiliteBeforeEnter = hiliteBeforeEnter
-    };
-  }
-  // Sidebar.updateBannerRect/updateBannerAt are pixel-only hit-test geometry with
-  // no UIA identity of their own, so a genuine click requires the real live client
-  // height rather than an assumed window size.
-  public static int ClientHeight(IntPtr window) {
-    RECT rect;
-    if (window == IntPtr.Zero || !GetClientRect(window, out rect)) return 0;
-    return rect.Bottom - rect.Top;
-  }
-  // Posts the WM_MOUSEWHEEL the OS delivers to the window under the cursor. Its
-  // lParam is in screen coordinates; delta is in wheel units (negative scrolls
-  // content up, so the sidebar advances).
-  [DllImport("user32.dll")]
-  private static extern bool ClientToScreen(IntPtr window, ref ScreenPoint point);
-  public static bool WheelAt(IntPtr window, int clientX, int clientY, int delta) {
-    var point = new ScreenPoint { X = clientX, Y = clientY };
-    if (window == IntPtr.Zero || !ClientToScreen(window, ref point)) return false;
-    return PostMessage(window, 0x020A, new UIntPtr((uint)((delta & 0xFFFF) << 16)), MouseLParam(point.X, point.Y));
-  }
-  [StructLayout(LayoutKind.Sequential)]
-  private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
-  [DllImport("user32.dll")]
-  private static extern bool GetClientRect(IntPtr window, out RECT rect);
-  [DllImport("user32.dll")]
-  private static extern IntPtr GetMenu(IntPtr window);
-  [DllImport("user32.dll")]
-  private static extern IntPtr GetSubMenu(IntPtr menu, int position);
-  public static IntPtr NativeMenu(IntPtr window) {
-    return window == IntPtr.Zero ? IntPtr.Zero : GetMenu(window);
-  }
-  public static IntPtr NativeSubMenu(IntPtr menu, int position) {
-    return menu == IntPtr.Zero ? IntPtr.Zero : GetSubMenu(menu, position);
-  }
-  // App.zig only rebuilds recent_folders (and the rest of the native chrome)
-  // from the live GraphModel on WM_INITMENUPOPUP - the same message real
-  // Windows sends right before a menu bar popup is displayed. Reading the
-  // HMENU without first sending this leaves it holding whatever was current
-  // the last time a menu was actually opened (or, at startup, an empty
-  // "No recent folders" placeholder installed before the fixture loaded).
-  // Sending it here reproduces the exact real trigger, not a shortcut.
-  public static void RefreshNativeMenuFromLiveModel(IntPtr window, IntPtr menu) {
-    SendMessage(window, 0x0117, (UIntPtr)(ulong)menu.ToInt64(), IntPtr.Zero);
-  }
-  [StructLayout(LayoutKind.Sequential)]
-  public struct ScreenPoint { public int X; public int Y; }
-  [DllImport("user32.dll")]
-  private static extern bool ScreenToClient(IntPtr window, ref ScreenPoint point);
-  [DllImport("user32.dll")]
-  private static extern bool IsIconic(IntPtr window);
-  public static bool IsWindowMinimized(IntPtr window) { return IsIconic(window); }
-  public static bool ScreenToClientPoint(IntPtr window, int screenX, int screenY, out int clientX, out int clientY) {
-    var point = new ScreenPoint { X = screenX, Y = screenY };
-    bool ok = ScreenToClient(window, ref point);
-    clientX = point.X;
-    clientY = point.Y;
-    return ok;
-  }
-  public static int[] ClientScreenBounds(IntPtr window) {
-    RECT rect;
-    if (window == IntPtr.Zero || !GetClientRect(window, out rect)) return null;
-    var topLeft = new ScreenPoint { X = rect.Left, Y = rect.Top };
-    var bottomRight = new ScreenPoint { X = rect.Right, Y = rect.Bottom };
-    if (!ClientToScreen(window, ref topLeft) || !ClientToScreen(window, ref bottomRight))
-      return null;
-    return new[] { topLeft.X, topLeft.Y, bottomRight.X, bottomRight.Y };
-  }
-  public static bool PostCommand(IntPtr window, uint command) {
-    return PostMessage(window, 0x0111, (UIntPtr)command, IntPtr.Zero);
-  }
-  public static bool PostClose(IntPtr window) {
-    return PostMessage(window, 0x0010, UIntPtr.Zero, IntPtr.Zero);
-  }
-  public static bool SetFirstEditText(IntPtr parent, string text) {
-    var edit = FindWindowEx(parent, IntPtr.Zero, "Edit", null);
-    if (edit == IntPtr.Zero || !SetWindowText(edit, text)) return false;
-    ulong command = ((ulong)0x0300 << 16) | (uint)GetDlgCtrlID(edit);
-    SendMessage(parent, 0x0111, (UIntPtr)command, edit);
-    return true;
-  }
-  public static bool SetEditTextById(IntPtr parent, int controlId, string text) {
-    var edit = ControlById(parent, controlId);
-    // Cross-process SetWindowText only updates the stored caption; WM_SETTEXT reaches the EDIT buffer.
-    if (edit == IntPtr.Zero || SendMessageString(edit, 0x000C, UIntPtr.Zero, text) == IntPtr.Zero) return false;
-    ulong command = ((ulong)0x0300 << 16) | (uint)controlId;
-    SendMessage(parent, 0x0111, (UIntPtr)command, edit);
-    return true;
-  }
-  public static string EditTextById(IntPtr parent, int controlId) {
-    var edit = ControlById(parent, controlId);
-    if (edit == IntPtr.Zero) return null;
-    return EditBufferText(edit);
-  }
-  private static string EditBufferText(IntPtr edit) {
-    // Cross-process GetWindowText returns the stored caption; WM_GETTEXT reads the EDIT buffer.
-    int length = (int)SendMessage(edit, 0x000E, UIntPtr.Zero, IntPtr.Zero);
-    var text = new StringBuilder(length + 1);
-    SendMessageText(edit, 0x000D, (UIntPtr)text.Capacity, text);
-    return text.ToString();
-  }
-  public static string FirstEditText(IntPtr parent) {
-    var edit = ControlById(parent, 9100);
-    if (edit == IntPtr.Zero) edit = ControlById(parent, 9904);
-    if (edit == IntPtr.Zero) edit = FindWindowEx(parent, IntPtr.Zero, "Edit", null);
-    if (edit == IntPtr.Zero) return null;
-    return EditBufferText(edit);
-  }
-  // Node creation sheet helpers. Every click below is a real cursor move plus
-  // SendInput at the live window rectangle of the target control, and the
-  // window under that point is checked first so a covered or mis-scaled target
-  // fails instead of silently clicking something else.
-  [DllImport("user32.dll")]
-  private static extern bool GetWindowRect(IntPtr window, out RECT rect);
-  [DllImport("user32.dll")]
-  private static extern IntPtr WindowFromPoint(ScreenPoint point);
-  private delegate bool EnumChildProc(IntPtr window, IntPtr parameter);
-  [DllImport("user32.dll")]
-  private static extern bool EnumChildWindows(IntPtr parent, EnumChildProc callback, IntPtr parameter);
-  [StructLayout(LayoutKind.Sequential)]
-  private struct KeybdInput {
-    public ushort VirtualKey, ScanCode;
-    public uint Flags, Time;
-    public UIntPtr ExtraInfo;
-  }
-  // INPUT is a union sized by MOUSEINPUT; the trailing padding keeps this
-  // keyboard record the same size so SendInput accepts cbSize.
-  [StructLayout(LayoutKind.Sequential)]
-  private struct KeyInputRecord {
-    public uint Type;
-    public KeybdInput Key;
-    public uint Pad0, Pad1;
-  }
-  [DllImport("user32.dll", SetLastError = true, EntryPoint = "SendInput")]
-  private static extern uint SendKeyInputs(uint count, KeyInputRecord[] inputs, int size);
-  [DllImport("user32.dll", SetLastError = true, EntryPoint = "SystemParametersInfoW")]
-  private static extern bool SystemParametersInfoRect(uint action, uint param, out RECT rect, uint winIni);
-  [DllImport("user32.dll")]
-  private static extern IntPtr GetAncestor(IntPtr window, uint flags);
-  [DllImport("user32.dll")]
-  private static extern IntPtr RealChildWindowFromPoint(IntPtr parent, ScreenPoint clientPoint);
-  [DllImport("user32.dll")]
-  private static extern IntPtr GetWindow(IntPtr window, uint command);
-  [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
-  private static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
-  public sealed class ControlClick {
-    public int ControlId, Left, Top, Right, Bottom, ScreenX, ScreenY;
-    public int CursorBeforeX, CursorBeforeY, CursorAtX, CursorAtY;
-    public bool HitTarget;
-    public int WindowAtPointId;
-    public string WindowAtPointClass, WindowAtPointRootClass, WindowAtPointText;
-    public int WindowAtPointProcessId;
-    public int RealChildId;
-    public string RealChildClass, RealChildText;
-    public bool SameTopLevel;
-    public bool VisibleEmpty;
-    public int WorkLeft, WorkTop, WorkRight, WorkBottom;
-    public bool OutsideWorkArea;
-    public int CenterX, CenterY;
-    public bool CenterHitTarget;
-    public string WindowAtCenterClass, WindowAtCenterRootClass;
-    public bool ScanUsed;
-    public int ScannedPoints, CoveredPoints;
-    public int CoveringId, CoveringLeft, CoveringTop, CoveringRight, CoveringBottom;
-    public string CoveringClass, CoveringText;
-    public string[] Samples;
-    public string[] CoveringWindows;
-    public int[][] UncoveredRectangles;
-    public int[] ChosenUncoveredRectangle;
-    public bool NarrowUncovered;
-  }
-  public static int[][] SubtractCoveredRectangles(int[] visible, int[][] covers) {
-    var remaining = new System.Collections.ArrayList();
-    if (visible[2] > visible[0] && visible[3] > visible[1]) remaining.Add(visible);
-    foreach (int[] cover in covers) {
-      var next = new System.Collections.ArrayList();
-      foreach (int[] piece in remaining) {
-        int left = Math.Max(piece[0], cover[0]), top = Math.Max(piece[1], cover[1]);
-        int right = Math.Min(piece[2], cover[2]), bottom = Math.Min(piece[3], cover[3]);
-        if (left >= right || top >= bottom) { next.Add(piece); continue; }
-        if (piece[0] < left) next.Add(new[] { piece[0], piece[1], left, piece[3] });
-        if (right < piece[2]) next.Add(new[] { right, piece[1], piece[2], piece[3] });
-        if (piece[1] < top) next.Add(new[] { left, piece[1], right, top });
-        if (bottom < piece[3]) next.Add(new[] { left, bottom, right, piece[3] });
-      }
-      remaining = next;
-    }
-    var result = new int[remaining.Count][];
-    remaining.CopyTo(result);
-    Array.Sort(result, delegate(int[] a, int[] b) {
-      long areaA = (long)(a[2] - a[0]) * (a[3] - a[1]);
-      long areaB = (long)(b[2] - b[0]) * (b[3] - b[1]);
-      int byArea = areaB.CompareTo(areaA);
-      if (byArea != 0) return byArea;
-      int byTop = a[1].CompareTo(b[1]);
-      return byTop != 0 ? byTop : a[0].CompareTo(b[0]);
-    });
-    return result;
-  }
-  private static IntPtr ResolveChild(IntPtr dialog, ScreenPoint point) {
-    var clientPoint = point;
-    if (!ScreenToClient(dialog, ref clientPoint)) return IntPtr.Zero;
-    return RealChildWindowFromPoint(dialog, clientPoint);
-  }
-  private static bool ResolvesToControl(IntPtr target, IntPtr dialog, ScreenPoint point) {
-    IntPtr atPoint = WindowFromPoint(point);
-    if (atPoint == IntPtr.Zero || GetAncestor(atPoint, 2) != GetAncestor(target, 2)) return false;
-    var clientPoint = point;
-    if (!ScreenToClient(dialog, ref clientPoint)) return false;
-    return RealChildWindowFromPoint(dialog, clientPoint) == target;
-  }
-  private static string ClassOf(IntPtr window) {
-    if (window == IntPtr.Zero) return "";
-    var name = new StringBuilder(128);
-    GetClassName(window, name, name.Capacity);
-    return name.ToString();
-  }
-  public static int[] WindowBounds(IntPtr window) {
-    RECT rect;
-    if (window == IntPtr.Zero || !GetWindowRect(window, out rect)) return null;
-    return new[] { rect.Left, rect.Top, rect.Right, rect.Bottom };
-  }
-  public static IntPtr ControlById(IntPtr parent, int controlId) {
-    if (parent == IntPtr.Zero) return IntPtr.Zero;
-    IntPtr direct = GetDlgItem(parent, controlId);
-    if (direct != IntPtr.Zero) return direct;
-    if (!String.Equals(ClassOf(parent), "GraphCodeSheetHost", StringComparison.Ordinal))
-      return IntPtr.Zero;
-    IntPtr viewport = FindWindowEx(parent, IntPtr.Zero, "GraphCodeSheetViewport", null);
-    if (viewport == IntPtr.Zero) return IntPtr.Zero;
-    string[] contentClasses = new[] {
-      "GraphCodeWindowsDialogContent",
-      "GraphCodeNativeForm",
-      "GraphCodeProductSettings",
-      "GraphCodeWorkspaceManager",
-      "GraphCodeRepositoryIngressDialog",
-      "GraphCodeRepositoryOperationDialog",
-      "GraphCodeCodespaceIngressDialog",
-      "GraphCodeUpdateOffer",
-      "GraphCodeUpdateInstall"
-    };
-    foreach (string contentClass in contentClasses) {
-      IntPtr content = FindWindowEx(viewport, IntPtr.Zero, contentClass, null);
-      if (content == IntPtr.Zero) continue;
-      IntPtr nested = GetDlgItem(content, controlId);
-      if (nested != IntPtr.Zero) return nested;
-    }
-    return IntPtr.Zero;
-  }
-  public static ControlClick ClickScreenPoint(IntPtr target) {
-    RECT rect;
-    if (target == IntPtr.Zero || !GetWindowRect(target, out rect) ||
-        rect.Right <= rect.Left || rect.Bottom <= rect.Top) return null;
-    RECT work;
-    if (!SystemParametersInfoRect(0x0030, 0, out work, 0))
-      throw new InvalidOperationException(String.Format("SPI_GETWORKAREA failed: Win32Error={0}", Marshal.GetLastWin32Error()));
-    var rectCenter = new ScreenPoint { X = (rect.Left + rect.Right) / 2, Y = (rect.Top + rect.Bottom) / 2 };
-    IntPtr atRectCenter = WindowFromPoint(rectCenter);
-    // A user clicks the part of a control they can see. When the control lies
-    // inside the work area this is exactly its centre; only when it crosses the
-    // work-area edge does the point move into the visible portion. A control with
-    // no visible portion is reported as VisibleEmpty and never clicked.
-    int visibleLeft = Math.Max(rect.Left, work.Left), visibleTop = Math.Max(rect.Top, work.Top);
-    int visibleRight = Math.Min(rect.Right, work.Right), visibleBottom = Math.Min(rect.Bottom, work.Bottom);
-    var center = new ScreenPoint { X = (visibleLeft + visibleRight) / 2, Y = (visibleTop + visibleBottom) / 2 };
-    bool visibleEmpty = visibleRight <= visibleLeft || visibleBottom <= visibleTop;
-    IntPtr atPoint = visibleEmpty ? IntPtr.Zero : WindowFromPoint(center);
-    IntPtr rootAtPoint = atPoint == IntPtr.Zero ? IntPtr.Zero : GetAncestor(atPoint, 2);
-    uint ownerProcess = 0;
-    if (rootAtPoint != IntPtr.Zero) GetWindowThreadProcessId(rootAtPoint, out ownerProcess);
-    // Real mouse input skips HTTRANSPARENT children such as plain static text;
-    // cross-process WindowFromPoint does not. RealChildWindowFromPoint applies
-    // the same rule within the dialog, and the top-level check still rejects
-    // any other window (for example the taskbar) covering the point.
-    IntPtr dialog = GetAncestor(target, 1);
-    IntPtr realChild = IntPtr.Zero;
-    if (!visibleEmpty && dialog != IntPtr.Zero) {
-      var clientPoint = center;
-      if (ScreenToClient(dialog, ref clientPoint)) realChild = RealChildWindowFromPoint(dialog, clientPoint);
-    }
-    bool sameTopLevel = rootAtPoint != IntPtr.Zero && rootAtPoint == GetAncestor(target, 2);
-    var hit = new ControlClick {
-      ControlId = GetDlgCtrlID(target), Left = rect.Left, Top = rect.Top, Right = rect.Right,
-      Bottom = rect.Bottom, ScreenX = center.X, ScreenY = center.Y,
-      HitTarget = !visibleEmpty && sameTopLevel && realChild == target,
-      VisibleEmpty = visibleEmpty,
-      WindowAtPointId = atPoint == IntPtr.Zero ? 0 : GetDlgCtrlID(atPoint),
-      WindowAtPointClass = ClassOf(atPoint),
-      WindowAtPointText = atPoint == IntPtr.Zero ? "" : EditBufferText(atPoint),
-      WindowAtPointRootClass = ClassOf(rootAtPoint),
-      WindowAtPointProcessId = (int)ownerProcess,
-      RealChildId = realChild == IntPtr.Zero ? 0 : GetDlgCtrlID(realChild),
-      RealChildClass = ClassOf(realChild),
-      RealChildText = realChild == IntPtr.Zero ? "" : EditBufferText(realChild),
-      SameTopLevel = sameTopLevel,
-      WorkLeft = work.Left, WorkTop = work.Top, WorkRight = work.Right, WorkBottom = work.Bottom,
-      OutsideWorkArea = rect.Left < work.Left || rect.Top < work.Top || rect.Right > work.Right || rect.Bottom > work.Bottom,
-      CenterX = rectCenter.X, CenterY = rectCenter.Y,
-      CenterHitTarget = atRectCenter == target,
-      WindowAtCenterClass = ClassOf(atRectCenter),
-      WindowAtCenterRootClass = ClassOf(atRectCenter == IntPtr.Zero ? IntPtr.Zero : GetAncestor(atRectCenter, 2))
-    };
-    // Subtract visible siblings above the target in Z order. A narrow uncovered
-    // strip can fall between grid rows, so try the largest residual rectangle
-    // before scanning the fixed grid as a diagnostic fallback.
-    if (!hit.HitTarget && !visibleEmpty && dialog != IntPtr.Zero) {
-      IntPtr covering = realChild != IntPtr.Zero && realChild != target && realChild != dialog ? realChild : atPoint;
-      RECT coveringRect;
-      if (covering != IntPtr.Zero && GetWindowRect(covering, out coveringRect)) {
-        hit.CoveringLeft = coveringRect.Left; hit.CoveringTop = coveringRect.Top;
-        hit.CoveringRight = coveringRect.Right; hit.CoveringBottom = coveringRect.Bottom;
-      }
-      hit.CoveringId = covering == IntPtr.Zero ? 0 : GetDlgCtrlID(covering);
-      hit.CoveringClass = ClassOf(covering);
-      hit.CoveringText = covering == IntPtr.Zero ? "" : EditBufferText(covering);
-      var covers = new System.Collections.ArrayList();
-      var coveringWindows = new System.Collections.ArrayList();
-      for (IntPtr sibling = GetWindow(target, 3); sibling != IntPtr.Zero; sibling = GetWindow(sibling, 3)) {
-        RECT siblingRect;
-        if (!IsWindowVisible(sibling) || !GetWindowRect(sibling, out siblingRect)) continue;
-        int left = Math.Max(visibleLeft, siblingRect.Left), top = Math.Max(visibleTop, siblingRect.Top);
-        int right = Math.Min(visibleRight, siblingRect.Right), bottom = Math.Min(visibleBottom, siblingRect.Bottom);
-        if (left >= right || top >= bottom) continue;
-        var overlapCenter = new ScreenPoint { X = (left + right) / 2, Y = (top + bottom) / 2 };
-        if (ResolveChild(dialog, overlapCenter) != sibling) continue;
-        covers.Add(new[] { siblingRect.Left, siblingRect.Top, siblingRect.Right, siblingRect.Bottom });
-        coveringWindows.Add(String.Format("{0}|{1}|{2}|{3},{4},{5},{6}", GetDlgCtrlID(sibling),
-          ClassOf(sibling), EditBufferText(sibling), siblingRect.Left, siblingRect.Top, siblingRect.Right, siblingRect.Bottom));
-      }
-      hit.CoveringWindows = (string[])coveringWindows.ToArray(typeof(string));
-      hit.UncoveredRectangles = SubtractCoveredRectangles(new[] { visibleLeft, visibleTop, visibleRight, visibleBottom },
-        (int[][])covers.ToArray(typeof(int[])));
-      foreach (int[] piece in hit.UncoveredRectangles) {
-        var candidate = new ScreenPoint { X = (piece[0] + piece[2]) / 2, Y = (piece[1] + piece[3]) / 2 };
-        if (!ResolvesToControl(target, dialog, candidate)) continue;
-        if (piece[2] - piece[0] < 3 || piece[3] - piece[1] < 3) {
-          hit.NarrowUncovered = true;
-          continue;
-        }
-        center = candidate;
-        hit.ScreenX = candidate.X; hit.ScreenY = candidate.Y;
-        hit.HitTarget = true;
-        hit.ScanUsed = true;
-        hit.ChosenUncoveredRectangle = piece;
-        break;
-      }
-      int width = visibleRight - visibleLeft, height = visibleBottom - visibleTop;
-      var samples = new string[15];
-      for (int row = 1; row <= 3; row++) {
-        for (int column = 1; column <= 5; column++) {
-          var candidate = new ScreenPoint { X = visibleLeft + column * width / 6, Y = visibleTop + row * height / 4 };
-          IntPtr resolved = ResolveChild(dialog, candidate);
-          bool uncovered = ResolvesToControl(target, dialog, candidate);
-          if (uncovered && hit.NarrowUncovered) uncovered = false;
-          samples[hit.ScannedPoints++] = String.Format("{0},{1}|{2}|{3}|{4}|{5}", candidate.X, candidate.Y,
-            resolved == IntPtr.Zero ? 0 : GetDlgCtrlID(resolved), ClassOf(resolved), uncovered ? "control" : "covered",
-            resolved == IntPtr.Zero ? "" : EditBufferText(resolved));
-          if (!uncovered) {
-            hit.CoveredPoints++;
-          } else if (!hit.HitTarget) {
-            center = candidate;
-            hit.ScreenX = candidate.X; hit.ScreenY = candidate.Y;
-            hit.HitTarget = true;
-            hit.ScanUsed = true;
-          }
-        }
-      }
-      hit.Samples = samples;
-    }
-    if (!hit.HitTarget) return hit;
-    ScreenPoint before, at;
-    if (!GetCursorPos(out before))
-      throw new InvalidOperationException(String.Format("GetCursorPos before control click failed: Win32Error={0}", Marshal.GetLastWin32Error()));
-    if (!SetCursorPos(center.X, center.Y))
-      throw new InvalidOperationException(String.Format("SetCursorPos for control click failed: Win32Error={0}", Marshal.GetLastWin32Error()));
-    if (!GetCursorPos(out at))
-      throw new InvalidOperationException(String.Format("GetCursorPos after control move failed: Win32Error={0}", Marshal.GetLastWin32Error()));
-    if (at.X != center.X || at.Y != center.Y)
-      throw new InvalidOperationException(String.Format("Control cursor landed at ({0},{1}), expected ({2},{3})", at.X, at.Y, center.X, center.Y));
-    hit.CursorBeforeX = before.X; hit.CursorBeforeY = before.Y;
-    hit.CursorAtX = at.X; hit.CursorAtY = at.Y;
-    var inputs = new[] {
-      new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0002 } },
-      new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0004 } }
-    };
-    uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input)));
-    if (sent != inputs.Length)
-      throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} control mouse events: Win32Error={2}", sent, inputs.Length, Marshal.GetLastWin32Error()));
-    return hit;
-  }
-  public static int SendKeyInput(ushort virtualKey, int count) {
-    if (count <= 0) return 0;
-    var inputs = new KeyInputRecord[count * 2];
-    for (int index = 0; index < count; index++) {
-      inputs[index * 2] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = virtualKey } };
-      inputs[index * 2 + 1] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = virtualKey, Flags = 0x0002 } };
-    }
-    uint sent = SendKeyInputs((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(KeyInputRecord)));
-    if (sent != inputs.Length)
-      throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} key events (cbSize={2}): Win32Error={3}", sent, inputs.Length, Marshal.SizeOf(typeof(KeyInputRecord)), Marshal.GetLastWin32Error()));
-    return count;
-  }
-  public static bool TypeEditTextById(IntPtr parent, int controlId, string text) {
-    LastEditClearExpected = LastEditClearSent = 0;
-    LastEditTextExpected = LastEditTextSent = 0;
-    LastEditUsedMessageFallback = false;
-    IntPtr edit = ControlById(parent, controlId);
-    if (edit == IntPtr.Zero || !FocusControl(parent, edit)) return false;
-    SendMessage(edit, 0x00B1, UIntPtr.Zero, new IntPtr(-1));
-    var clear = new KeyInputRecord[2];
-    clear[0] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x2E } };
-    clear[1] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x2E, Flags = 2 } };
-    LastEditClearExpected = (uint)clear.Length;
-    LastEditClearSent = SendKeyInputs(LastEditClearExpected, clear, Marshal.SizeOf(typeof(KeyInputRecord)));
-    if (LastEditClearSent != LastEditClearExpected) return false;
-    bool cleared = String.IsNullOrEmpty(EditBufferText(edit));
-    var records = new KeyInputRecord[text.Length * 2];
-    int offset = 0;
-    foreach (char character in text) {
-      records[offset++] = new KeyInputRecord { Type = 1, Key = new KeybdInput { ScanCode = character, Flags = 4 } };
-      records[offset++] = new KeyInputRecord { Type = 1, Key = new KeybdInput { ScanCode = character, Flags = 6 } };
-    }
-    LastEditTextExpected = (uint)records.Length;
-    if (records.Length > 0) {
-      LastEditTextSent = SendKeyInputs(LastEditTextExpected, records, Marshal.SizeOf(typeof(KeyInputRecord)));
-      if (LastEditTextSent != LastEditTextExpected) return false;
-    }
-    bool matched = cleared && String.Equals(EditTextById(parent, controlId), text, StringComparison.Ordinal);
-    if (!matched) {
-      SendMessageString(edit, 0x000C, UIntPtr.Zero, text);
-      LastEditUsedMessageFallback = true;
-      matched = String.Equals(EditTextById(parent, controlId), text, StringComparison.Ordinal);
-    }
-    return matched;
-  }
-  public static int[] VisibleChildIds(IntPtr parent, int first, int last) {
-    var buffer = new int[Math.Max(0, last - first + 1)];
-    int found = 0;
-    for (int id = first; id <= last; id++) {
-      IntPtr child = ControlById(parent, id);
-      if (child != IntPtr.Zero && IsWindowVisible(child)) buffer[found++] = id;
-    }
-    var result = new int[found];
-    Array.Copy(buffer, result, found);
-    return result;
-  }
-  public static string[] VisibleStaticTexts(IntPtr parent) {
-    var buffer = new string[256];
-    int found = 0;
-    if (parent == IntPtr.Zero) return new string[0];
-    EnumChildWindows(parent, delegate(IntPtr window, IntPtr parameter) {
-      var actualClass = new StringBuilder(64);
-      GetClassName(window, actualClass, actualClass.Capacity);
-      if (String.Equals(actualClass.ToString(), "Static", StringComparison.OrdinalIgnoreCase) &&
-          IsWindowVisible(window) && found < buffer.Length) {
-        buffer[found++] = EditBufferText(window);
-      }
-      return true;
-    }, IntPtr.Zero);
-    var result = new string[found];
-    Array.Copy(buffer, result, found);
-    return result;
-  }
-  public static string WindowTextOf(IntPtr window) {
-    return window == IntPtr.Zero ? null : EditBufferText(window);
-  }
-  public static string ComboSelection(IntPtr parent, int controlId) {
-    IntPtr combo = ControlById(parent, controlId);
-    if (combo == IntPtr.Zero) return null;
-    int index = (int)SendMessage(combo, 0x0147, UIntPtr.Zero, IntPtr.Zero);
-    if (index < 0) return index + "|";
-    int length = (int)SendMessage(combo, 0x0149, (UIntPtr)index, IntPtr.Zero);
-    var text = new StringBuilder(Math.Max(length, 0) + 1);
-    SendMessageText(combo, 0x0148, (UIntPtr)index, text);
-    return index + "|" + text.ToString();
-  }
+Import-Module -Name (Join-Path $PSScriptRoot "ShellProcessOwnership.psm1") -ErrorAction Stop
+$validationAssemblyPath = $env:GRAPHCODE_VALIDATION_ASSEMBLY
+if (-not $validationAssemblyPath) {
+  $validationAssemblyPath = & (Join-Path $PSScriptRoot "Build-CompiledValidationRunner.ps1")
 }
-"@ -ReferencedAssemblies @(
-  [System.Windows.Automation.AutomationElement].Assembly.Location,
-  [System.Windows.Automation.AutomationEventArgs].Assembly.Location
-)
-
-Add-Type -TypeDefinition @"
-using System;
-using System.Diagnostics;
-using System.Runtime.InteropServices;
-using System.Text;
-public static class GraphCodeUiaHostInfo {
-  private const int UOI_NAME = 2;
-  [DllImport("user32.dll")]
-  private static extern IntPtr GetProcessWindowStation();
-  [DllImport("user32.dll")]
-  private static extern IntPtr GetThreadDesktop(uint threadId);
-  [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-  private static extern bool GetUserObjectInformation(
-    IntPtr handle, int index, StringBuilder info, uint length, out uint needed
-  );
-  [DllImport("kernel32.dll")]
-  private static extern uint GetCurrentThreadId();
-  [DllImport("kernel32.dll", SetLastError = true)]
-  private static extern bool ProcessIdToSessionId(uint processId, out uint sessionId);
-  [DllImport("user32.dll")]
-  private static extern uint GetGuiResources(IntPtr process, uint flags);
-  private static string ObjectName(IntPtr handle) {
-    if (handle == IntPtr.Zero) return null;
-    var name = new StringBuilder(256);
-    uint needed;
-    if (!GetUserObjectInformation(handle, UOI_NAME, name, (uint)(name.Capacity * 2), out needed))
-      return null;
-    return name.ToString();
-  }
-  public static string CurrentWindowStationName() {
-    return ObjectName(GetProcessWindowStation());
-  }
-  public static string CurrentDesktopName() {
-    return ObjectName(GetThreadDesktop(GetCurrentThreadId()));
-  }
-  public static uint CurrentSessionId() {
-    uint sessionId;
-    if (!ProcessIdToSessionId((uint)Process.GetCurrentProcess().Id, out sessionId))
-      throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-    return sessionId;
-  }
-  public static uint GuiResourceCount(int processId, uint flags) {
-    using (var process = Process.GetProcessById(processId))
-      return GetGuiResources(process.Handle, flags);
-  }
+foreach ($requiredType in @(
+    "GraphCode.Windows.UiaWindowActivation", "GraphCodeUiaGateState", "GraphCodeUiaHostInfo",
+    "GraphCodeUiaAttribution", "GraphCodeMultiProjectEditNative", "GraphCodeMultiProjectRenameNative",
+    "GraphCode.Validation.Ownership.StandaloneProcessJob", "GraphCode.Validation.Ownership.UiaOwnedStreamCapture"
+  )) {
+  & (Join-Path $PSScriptRoot "Import-CompiledValidationAssembly.ps1") `
+    -AssemblyPath $validationAssemblyPath -RequiredType $requiredType | Out-Null
 }
-"@
-
-# Wait-timeout attribution. Reads only the foreground window's owning process
-# id/name and class (never another application's title or content), every
-# top-level window owned by the shell process, and a PrintWindow capture of the
-# shell's own window (not a screen copy, so no other application is captured).
-Add-Type -TypeDefinition @"
-using System;
-using System.Collections.Generic;
-using System.Runtime.InteropServices;
-using System.Text;
-public static class GraphCodeUiaAttribution {
-  private delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
-  [DllImport("user32.dll")]
-  private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
-  [DllImport("user32.dll")]
-  private static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll")]
-  private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
-  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-  private static extern int GetClassName(IntPtr window, StringBuilder className, int capacity);
-  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-  private static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
-  [DllImport("user32.dll")]
-  private static extern bool IsWindowVisible(IntPtr window);
-  [DllImport("user32.dll")]
-  private static extern bool IsWindowEnabled(IntPtr window);
-  [DllImport("user32.dll")]
-  private static extern bool IsHungAppWindow(IntPtr window);
-  [DllImport("user32.dll")]
-  private static extern IntPtr GetWindow(IntPtr window, uint command);
-  [StructLayout(LayoutKind.Sequential)]
-  public struct Rect { public int Left, Top, Right, Bottom; }
-  [DllImport("user32.dll")]
-  private static extern bool GetWindowRect(IntPtr window, out Rect rect);
-  [DllImport("user32.dll")]
-  public static extern bool PrintWindow(IntPtr window, IntPtr hdc, uint flags);
-  public sealed class WindowRecord {
-    public long Handle; public long Owner; public string ClassName; public string Title;
-    public bool Visible, Enabled, Hung; public int Left, Top, Right, Bottom;
-  }
-  private static string ClassOf(IntPtr window) {
-    var text = new StringBuilder(256);
-    GetClassName(window, text, text.Capacity);
-    return text.ToString();
-  }
-  public static long ForegroundHandle() { return GetForegroundWindow().ToInt64(); }
-  public static uint ProcessOf(IntPtr window) {
-    if (window == IntPtr.Zero) return 0;
-    uint processId;
-    GetWindowThreadProcessId(window, out processId);
-    return processId;
-  }
-  public static string ClassName(IntPtr window) {
-    return window == IntPtr.Zero ? "" : ClassOf(window);
-  }
-  public static Rect Bounds(IntPtr window) {
-    Rect rect;
-    if (window == IntPtr.Zero || !GetWindowRect(window, out rect)) return new Rect();
-    return rect;
-  }
-  // Titles are read only for windows owned by processId (the gate's own shell).
-  public static WindowRecord[] ProcessWindows(uint processId) {
-    var results = new List<WindowRecord>();
-    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
-      uint owner;
-      GetWindowThreadProcessId(window, out owner);
-      if (owner != processId) return true;
-      var title = new StringBuilder(512);
-      GetWindowText(window, title, title.Capacity);
-      Rect rect;
-      GetWindowRect(window, out rect);
-      results.Add(new WindowRecord {
-        Handle = window.ToInt64(), Owner = GetWindow(window, 4).ToInt64(),
-        ClassName = ClassOf(window), Title = title.ToString(),
-        Visible = IsWindowVisible(window), Enabled = IsWindowEnabled(window),
-        Hung = IsHungAppWindow(window),
-        Left = rect.Left, Top = rect.Top, Right = rect.Right, Bottom = rect.Bottom
-      });
-      return true;
-    }, IntPtr.Zero);
-    return results.ToArray();
-  }
-}
-"@
 
 $script:uiaAttributionDirectory = $null
 $script:uiaAttributionSequence = 0
@@ -1529,6 +165,61 @@ function Require([bool] $condition, [string] $message) {
   if (-not $condition) { throw $message }
 }
 
+function Wait-UiaUnwiredRecoveryVisibility($root, $rawWalker, $process, $wire, $mark) {
+  $wireId = [string]$wire.Current.AutomationId
+  $markId = [string]$mark.Current.AutomationId
+  Require ($process.Id -gt 0 -and
+    $wire.Current.ProcessId -eq $process.Id -and $mark.Current.ProcessId -eq $process.Id -and
+    $wireId.StartsWith("wire-node-", [StringComparison]::Ordinal) -and
+    $markId.StartsWith("mark-entry-", [StringComparison]::Ordinal) -and
+    $wire.Current.Name -ceq "Wire it up" -and $mark.Current.Name -ceq "Mark as entry") `
+    "Unwired recovery source controls did not belong to the owned graph"
+  function Test-RecoveryVisibility($wire, $mark, $graph, [int] $owner, [string] $wireId, [string] $markId) {
+    if ($null -eq $wire -or $null -eq $mark -or $null -eq $graph -or
+        $graph.Current.ProcessId -ne $owner -or $graph.Current.AutomationId -cne "graph" -or
+        $wire.Current.ProcessId -ne $owner -or $mark.Current.ProcessId -ne $owner -or
+        $wire.Current.AutomationId -cne $wireId -or $mark.Current.AutomationId -cne $markId -or
+        $wire.Current.Name -cne "Wire it up" -or $mark.Current.Name -cne "Mark as entry" -or
+        $graph.Current.IsOffscreen) { return $false }
+    $graphBounds = $graph.Current.BoundingRectangle
+    if ($graphBounds.IsEmpty -or $graphBounds.Width -le 0 -or $graphBounds.Height -le 0) { return $false }
+    foreach ($control in @($wire, $mark)) {
+      if ($control.Current.IsOffscreen) { return $false }
+      $bounds = $control.Current.BoundingRectangle
+      if ($bounds.IsEmpty -or $bounds.Width -le 0 -or $bounds.Height -le 0 -or
+          $bounds.Left -lt $graphBounds.Left -or $bounds.Top -lt $graphBounds.Top -or
+          $bounds.Right -gt $graphBounds.Right -or $bounds.Bottom -gt $graphBounds.Bottom) { return $false }
+    }
+    return $true
+  }
+  $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+  Require ($null -ne $graph -and $graph.Current.ProcessId -eq $process.Id -and
+    $graph.Current.AutomationId -ceq "graph") "Unwired recovery graph did not belong to the owned shell"
+  if (Test-RecoveryVisibility $wire $mark $graph $process.Id $wireId $markId) {
+    return [ordered]@{ root = $root; graph = $graph; wire = $wire; mark = $mark }
+  }
+  $fitRecovery = Find-FragmentByIdWithRetry $root "fit-canvas" $rawWalker
+  Require ($null -ne $fitRecovery -and $fitRecovery.Current.ProcessId -eq $process.Id -and
+    $fitRecovery.Current.AutomationId -ceq "fit-canvas" -and $fitRecovery.Current.Name -ceq "Fit canvas" -and
+    $fitRecovery.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and
+    $fitRecovery.Current.IsEnabled -and -not $fitRecovery.Current.IsOffscreen) `
+    "Unwired recovery could not acquire the owned visible Fit canvas action"
+  $fitRecovery.GetCurrentPattern(
+    [System.Windows.Automation.InvokePattern]::Pattern
+  ).Invoke()
+  for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    $root = Wait-ForRootReconnect $process @($rawWalker)
+    $graph = Find-FragmentById $root "graph" $rawWalker
+    $wire = Find-FragmentById $root $wireId $rawWalker
+    $mark = Find-FragmentById $root $markId $rawWalker
+    if (Test-RecoveryVisibility $wire $mark $graph $process.Id $wireId $markId) {
+      return [ordered]@{ root = $root; graph = $graph; wire = $wire; mark = $mark }
+    }
+    if ($attempt -lt 39) { Start-Sleep -Milliseconds 100 }
+  }
+  Require $false "Unwired recovery actions remained unavailable after Fit canvas"
+}
+
 function Test-MultiProjectOwnedSheetIdentity(
   $identity,
   [int] $expectedProcessId,
@@ -1575,6 +266,156 @@ function Test-UpdateBannerClickTarget(
     $target.right -is [double] -and $target.bottom -is [double] -and
     $target.right -gt $target.left -and $target.bottom -gt $target.top -and
     $shellStatus -ceq "Update offer deferred"
+}
+
+function Get-DeleteTargetDiagnosticValue([hashtable] $budget, [scriptblock] $readValue) {
+  if ($budget.reads -ge 11 -or $budget.clock.ElapsedMilliseconds -ge 500) {
+    return [ordered]@{ state = "unavailable"; reason = "diagnostic-budget" }
+  }
+  $budget.reads++
+  try {
+    $value = & $readValue
+    if ($budget.clock.ElapsedMilliseconds -ge 500) {
+      return [ordered]@{ state = "unavailable"; reason = "diagnostic-budget" }
+    }
+    if ($null -eq $value) { return [ordered]@{ state = "unavailable" } }
+    return [ordered]@{ state = "available"; value = $value }
+  } catch {
+    return [ordered]@{ state = "unavailable"; hresult = $_.Exception.HResult }
+  }
+}
+
+function Get-DeleteTargetIdentityHash([string] $identity) {
+  if ([string]::IsNullOrEmpty($identity) -or $identity.Length -gt 4096) {
+    throw [ArgumentException]::new("Diagnostic identity is absent or exceeds its bound")
+  }
+  return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+    [Text.Encoding]::UTF8.GetBytes($identity)))
+}
+
+function Write-DeleteTargetSelectFailure(
+  $target, $selection, [string] $expectedIdentity, [int] $expectedProcessId,
+  [IntPtr] $expectedWindow, [Management.Automation.ErrorRecord] $failure,
+  [string] $receiptPath
+) {
+  $budget = @{ reads = 0; clock = [Diagnostics.Stopwatch]::StartNew() }
+  $untrusted = [ordered]@{ state = "unavailable"; reason = "untrusted-identity" }
+  $processId = Get-DeleteTargetDiagnosticValue $budget {
+    $value = $target.Current.ProcessId
+    if ($value -isnot [int]) { throw "Process identity is unavailable" }
+    $value
+  }
+  $owned = $processId.state -ceq "available" -and $expectedProcessId -gt 0 -and $processId.value -eq $expectedProcessId
+  $identity = if ($owned) {
+    Get-DeleteTargetDiagnosticValue $budget { Get-DeleteTargetIdentityHash $target.Current.AutomationId }
+  } else { $untrusted }
+  $expectedHash = try {
+    [ordered]@{ state = "available"; value = Get-DeleteTargetIdentityHash $expectedIdentity }
+  } catch { [ordered]@{ state = "unavailable" } }
+  $matches = $identity.state -ceq "available" -and $expectedHash.state -ceq "available" -and
+    $identity.value -ceq $expectedHash.value
+  $record = [ordered]@{
+    expectedProcessId = $expectedProcessId; expectedWindow = $expectedWindow.ToInt64()
+    automationIdHash = $identity; expectedAutomationIdHash = $expectedHash
+    identityMatches = if ($identity.state -ceq "available" -and $expectedHash.state -ceq "available") {
+      $identity.value -ceq $expectedHash.value
+    } else { $null }
+    processId = $processId
+    ownedProcess = if ($processId.state -ceq "available") { $processId.value -eq $expectedProcessId } else { $null }
+    runtimeIdHash = $untrusted; runtimeComparison = "unavailable-no-preselect-snapshot"
+    bounds = $untrusted; offscreen = $untrusted; enabled = $untrusted; selected = $untrusted
+    parent = $untrusted
+    retired = @{ state = "unavailable"; reason = "not-exposed" }
+    active = @{ state = "unavailable"; reason = "not-exposed" }
+    invokable = @{ state = "unavailable"; reason = "not-exposed" }
+    providerBranch = @{ state = "unavailable"; reason = "not-exposed" }
+    exceptionHResults = @(); exceptionChainTruncated = $false
+  }
+  if ($owned -and $matches) {
+    $record.runtimeIdHash = Get-DeleteTargetDiagnosticValue $budget {
+      $runtime = @($target.GetRuntimeId())
+      if ($runtime.Count -eq 0 -or $runtime.Count -gt 64) { throw "Runtime identity exceeds diagnostic bound" }
+      foreach ($part in $runtime) {
+        if ($part -isnot [int]) { throw "Runtime identity is not an integer vector" }
+      }
+      Get-DeleteTargetIdentityHash ($runtime -join ",")
+    }
+    $record.bounds = Get-DeleteTargetDiagnosticValue $budget {
+      $bounds = $target.Current.BoundingRectangle
+      $values = @($bounds.Left, $bounds.Top, $bounds.Width, $bounds.Height)
+      foreach ($value in $values) {
+        if ($value -isnot [double] -or [double]::IsNaN($value) -or [double]::IsInfinity($value)) {
+          throw "Bounds are unavailable or nonfinite"
+        }
+      }
+      [ordered]@{ left = [double]$values[0]; top = [double]$values[1]; width = [double]$values[2]; height = [double]$values[3] }
+    }
+    foreach ($field in @("offscreen", "enabled", "selected")) {
+      $record[$field] = Get-DeleteTargetDiagnosticValue $budget {
+        $value = switch ($field) {
+          "offscreen" { $target.Current.IsOffscreen }
+          "enabled" { $target.Current.IsEnabled }
+          "selected" { $selection.Current.IsSelected }
+        }
+        if ($value -isnot [bool]) { throw "Boolean property is unavailable" }
+        $value
+      }
+    }
+    # This provider returns row.parent through the held selection pattern.
+    $container = Get-DeleteTargetDiagnosticValue $budget { $selection.Current.SelectionContainer }
+    if ($container.state -ceq "available") {
+      $record.parent = [ordered]@{
+        state = "available"; classification = "selection-container"
+        processId = Get-DeleteTargetDiagnosticValue $budget {
+          $value = $container.value.Current.ProcessId
+          if ($value -isnot [int]) { throw "Parent process identity is unavailable" }
+          $value
+        }
+        controlTypeId = $untrusted; classNameHash = $untrusted
+      }
+      if ($record.parent.processId.state -ceq "available" -and
+          $record.parent.processId.value -eq $expectedProcessId) {
+        $record.parent.controlTypeId = Get-DeleteTargetDiagnosticValue $budget {
+          $value = $container.value.Current.ControlType.Id
+          if ($value -isnot [int]) { throw "Parent role is unavailable" }
+          $value
+        }
+        $record.parent.classNameHash = Get-DeleteTargetDiagnosticValue $budget {
+          Get-DeleteTargetIdentityHash $container.value.Current.ClassName
+        }
+      }
+    } else {
+      $record.parent = [ordered]@{ state = "unavailable"; reason = "selection-container-unavailable" }
+    }
+  }
+  $exception = $failure.Exception
+  for ($index = 0; $null -ne $exception -and $index -lt 4; $index++) {
+    $record.exceptionHResults += [int]$exception.HResult
+    $exception = $exception.InnerException
+  }
+  $record.exceptionChainTruncated = $null -ne $exception
+  $record.readCount = $budget.reads
+  $record.readLimit = 11
+  $record.budgetMilliseconds = 500
+  $record.elapsedMilliseconds = $budget.clock.ElapsedMilliseconds
+  $json = $record | ConvertTo-Json -Depth 6 -Compress
+  $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+  if ($bytes.Length -gt 8192) { throw "Delete Select receipt exceeds 8192 bytes" }
+  Write-Host ("UIA_DELETE_TARGET_SELECT_FAILURE=" + $json)
+  if ([string]::IsNullOrWhiteSpace($receiptPath)) {
+    Write-Host "UIA_DELETE_TARGET_SELECT_TELEMETRY_FAILURE=receipt-path-unconfigured"
+    return
+  }
+  $stream = $null
+  try {
+    $stream = [IO.FileStream]::new($receiptPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush($true)
+  } finally {
+    if ($null -ne $stream) { $stream.Dispose() }
+  }
+  Write-Host ("UIA_DELETE_TARGET_SELECT_RECEIPT=flushed bytes={0} sha256={1}" -f
+    $bytes.Length, [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)))
 }
 
 function Get-UiaOwnedSheetIdentity($element) {
@@ -1868,6 +709,89 @@ function ConvertTo-PopupMenuEvidence($items) {
   })
 }
 
+function Restore-DeleteLoopCanvas(
+  $process,
+  $root,
+  [IntPtr] $ownerWindow,
+  [string] $automationId,
+  $walker
+) {
+  Require (Ensure-ShellForeground $ownerWindow "Delete Loop Show in Graph") `
+    "Delete Loop could not acquire its owned foreground before Show in Graph"
+  $workspace = Wait-ForGraphChildren $root $walker `
+    { $_.Current.AutomationId -match '^workspace-show-graph-' } `
+    { param($items) @($items).Count -eq 1 }
+  $showGraph = @($workspace.Items | Where-Object {
+    $_.Current.AutomationId -match '^workspace-show-graph-' -and
+    $_.Current.Name -ceq "Show in Graph" -and
+    $_.Current.ProcessId -eq $process.Id -and -not $_.Current.IsOffscreen
+  })
+  Require ($showGraph.Count -eq 1) "Delete Loop omitted its visible owned Show in Graph action"
+  $showGraph[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $root = Wait-ForRootReconnect $process @($walker)
+  $card = Find-FragmentByIdWithRetry $root $automationId $walker
+  Require ($null -ne $card -and $card.Current.AutomationId -ceq $automationId -and
+    $card.Current.ProcessId -eq $process.Id) "Delete Loop lost its same owned card after Show in Graph"
+  $fit = Find-FragmentByIdWithRetry $root "fit-canvas" $walker
+  Require ($null -ne $fit -and $fit.Current.AutomationId -ceq "fit-canvas" -and
+    $fit.Current.Name -ceq "Fit canvas" -and $fit.Current.ProcessId -eq $process.Id) `
+    "Delete Loop graph reentry omitted the exact owned Fit Canvas action"
+  $fit.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $visible = Wait-ForGraphChildren $root $walker `
+    { $_.Current.AutomationId -ceq $automationId -or $_.Current.AutomationId -match '^workspace-show-graph-' } `
+    { param($items)
+      @($items | Where-Object { $_.Current.AutomationId -match '^workspace-show-graph-' }).Count -eq 0 -and
+      @($items | Where-Object { $_.Current.AutomationId -ceq $automationId -and
+        $_.Current.ProcessId -eq $process.Id -and -not $_.Current.IsOffscreen }).Count -eq 1 }
+  $visibleCard = @($visible.Items | Where-Object { $_.Current.AutomationId -ceq $automationId })
+  Require ($null -ne $visible.Graph -and $visible.Graph.Current.ProcessId -eq $process.Id -and
+    $visibleCard.Count -eq 1 -and $visibleCard[0].Current.AutomationId -ceq $automationId -and
+    $visibleCard[0].Current.ProcessId -eq $process.Id -and -not $visibleCard[0].Current.IsOffscreen -and
+    @($visible.Items | Where-Object { $_.Current.AutomationId -match '^workspace-show-graph-' }).Count -eq 0) `
+    "Delete Loop same card did not return to its visible canvas after Show in Graph and Fit Canvas"
+  Require ($visibleCard[0].GetCurrentPattern(
+    [System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected) `
+    "Delete Loop Show in Graph changed the selected card identity"
+  return (Wait-ForRootReconnect $process @($walker))
+}
+
+function Open-CanvasCardContextMenu(
+  $process,
+  $root,
+  [IntPtr] $ownerWindow,
+  [string] $automationId,
+  $walker,
+  [string] $label
+) {
+  Require (Ensure-ShellForeground $ownerWindow "$label context menu") `
+    "GraphCode shell did not reacquire foreground before the $label context menu"
+  $card = Find-FragmentByIdWithRetry $root $automationId $walker
+  Require ($null -ne $card) "$label context menu lost its stable card"
+  Require ($card.Current.AutomationId -ceq $automationId -and
+    $card.Current.ProcessId -eq $process.Id -and -not $card.Current.IsOffscreen) `
+    "$label context menu card identity, process or visibility changed"
+  $canvas = Find-FragmentByIdWithRetry $root "graph" $walker
+  Require ($null -ne $canvas) "$label context menu lost its canvas"
+  $bounds = $card.Current.BoundingRectangle
+  $canvasBounds = $canvas.Current.BoundingRectangle
+  $cardRect = @($bounds.Left, $bounds.Top, $bounds.Right, $bounds.Bottom)
+  $canvasRect = @($canvasBounds.Left, $canvasBounds.Top, $canvasBounds.Right, $canvasBounds.Bottom)
+  Require (@(@($cardRect) + @($canvasRect) | Where-Object {
+    [double]::IsNaN($_) -or [double]::IsInfinity($_)
+  }).Count -eq 0) "$label context menu requires finite measured bounds"
+  $visible = Get-MultiProjectClippedRectangle $cardRect $canvasRect
+  $x = [int](($visible[0] + $visible[2]) / 2)
+  $y = [int](($visible[1] + $visible[3]) / 2)
+  Require ($x -ge $visible[0] -and $x -lt $visible[2] -and
+    $y -ge $visible[1] -and $y -lt $visible[3]) `
+    "$label context menu card has no interior screen point"
+  Require ([GraphCodeUiaGateState]::PostOwnedScreenPoint($ownerWindow, $x, $y, $true)) `
+    "$label context menu stable-card right-click was rejected"
+  $popup = Wait-ForPopupMenu $process $ownerWindow $label
+  Require ($popup -ne [IntPtr]::Zero) "$label context menu did not open"
+  return $popup
+}
+
 function Read-CanvasContextMenu(
   [System.Diagnostics.Process] $process,
   [IntPtr] $ownerWindow,
@@ -2024,25 +948,6 @@ function Wait-ForDesktopElementGone(
   return $null -eq $element
 }
 
-function Hide-TestProviderZmxWindows {
-  if (-not $env:GRAPHCODE_ZMX) { return }
-  $providerZmx = [IO.Path]::GetFullPath($env:GRAPHCODE_ZMX)
-  foreach ($process in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-      Where-Object {
-        $_.Name -match "(?i)^zmx(?:\.exe)?$" -and
-        (([string]$_.ExecutablePath) -eq $providerZmx -or
-         ([string]$_.CommandLine) -like "*$providerZmx*")
-      })) {
-    [GraphCodeUiaGateState]::HideProcessWindows([uint32]$process.ProcessId)
-  }
-  $foreground = [GraphCodeUiaGateState]::CurrentForegroundWindow()
-  $foregroundTitle = [GraphCodeUiaGateState]::WindowTitle($foreground)
-  if ($foregroundTitle -eq $providerZmx -or
-      $foregroundTitle -like "*\zmx.exe") {
-    [GraphCodeUiaGateState]::HideWindow($foreground)
-  }
-}
-
 function Test-FocusedElementIdentity(
   [System.Windows.Automation.AutomationElement] $candidate,
   [System.Windows.Automation.AutomationElement] $expected,
@@ -2072,11 +977,9 @@ function Retain-FocusWithRetry(
   [int] $Attempts = 600
 ) {
   $candidate = $null
-  Hide-TestProviderZmxWindows
   Start-Sleep -Milliseconds 250
   Write-Host "UIA_FOCUS_DIAGNOSTICS phase=$label $(Get-FocusDiagnostics $window)"
   for ($index = 0; $index -lt $Attempts; $index++) {
-    Hide-TestProviderZmxWindows
     $activated = [GraphCodeUiaGateState]::ActivateWindow($window)
     Start-Sleep -Milliseconds 50
     try {
@@ -2101,6 +1004,49 @@ function Retain-FocusWithRetry(
   return [pscustomobject]@{ Focused = $null; Candidate = $candidate }
 }
 
+function Wait-UiaSupervisedForeground(
+  $process,
+  [IntPtr] $window,
+  [int] $TimeoutMilliseconds = 60000
+) {
+  $environment = [Environment]::GetEnvironmentVariables("Process")
+  if (-not $environment.Contains("GRAPHCODE_UIA_SUPERVISED_FOREGROUND")) { return }
+  Require ($environment["GRAPHCODE_UIA_SUPERVISED_FOREGROUND"] -ceq "1") `
+    "Supervised foreground mode requires the explicit process-only value 1"
+  $heldHandle = $process.Handle
+  $ownedId = $process.Id
+  Require ($heldHandle -ne [IntPtr]::Zero -and $window -ne [IntPtr]::Zero -and $ownedId -gt 0) `
+    "Supervised foreground admission requires the retained launch identity"
+  $watch = [Diagnostics.Stopwatch]::StartNew()
+  $announced = $false
+  while ($watch.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+    $process.Refresh()
+    Require ($process.Handle -eq $heldHandle -and -not $process.HasExited -and $process.Id -eq $ownedId -and
+      $process.MainWindowHandle -eq $window) "Supervised foreground retained process/window identity changed"
+    Require ([GraphCodeUiaGateState]::WindowProcessId($window) -eq $ownedId -and
+      [GraphCodeUiaGateState]::WindowClass($window) -ceq "GraphCodeWindowsShell" -and
+      [GraphCodeUiaGateState]::WindowOwner($window) -eq [IntPtr]::Zero -and
+      [GraphCodeUiaGateState]::WindowIsVisible($window) -and
+      [GraphCodeUiaGateState]::WindowIsEnabled($window) -and $process.Responding) `
+      "Supervised foreground requires the healthy visible enabled owned top-level window"
+    if (-not $announced) {
+      $record = [ordered]@{
+        mode = "supervised-or-tool-assisted"; processId = $ownedId; window = Format-WindowHandle $window
+        title = [GraphCodeUiaGateState]::WindowTitle($window); timeoutMilliseconds = $TimeoutMilliseconds
+      }
+      Write-Host ("UIA_AWAIT_OWNED_FOREGROUND=" + ($record | ConvertTo-Json -Compress))
+      [Console]::Out.Flush()
+      $announced = $true
+    }
+    if ([GraphCodeUiaGateState]::IsForegroundWindow($window) -and $watch.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+      Write-Host "UIA_OWNED_FOREGROUND_ADMITTED=mode=supervised-or-tool-assisted processId=$ownedId window=$(Format-WindowHandle $window) elapsedMilliseconds=$($watch.ElapsedMilliseconds)"
+      return
+    }
+    Start-Sleep -Milliseconds 50
+  }
+  throw "Supervised foreground admission timed out without the exact owned foreground window"
+}
+
 function Ensure-ShellForeground(
   [IntPtr] $window,
   [string] $label,
@@ -2113,12 +1059,8 @@ function Ensure-ShellForeground(
   # command/UIA path that depends on the shell being foreground, retrying
   # within a bounded deadline instead of assuming a prior activation holds.
   #
-  # Only fall back to ActivateWindow's invasive Alt-tap foreground-lock
-  # bypass (keybd_event + SetForegroundWindow) when the shell does not
-  # already hold true foreground ownership: that trick injects a global
-  # synthetic Alt key press/release, and issuing it when it is not needed
-  # (the shell is already foreground) races the very next native window
-  # this gate creates and can desynchronize its subsequent close handling.
+  # Activation never injects keys or attaches another foreground input queue.
+  # A denied foreground request remains an explicit bounded failure.
   if ([GraphCodeUiaGateState]::IsForegroundWindow($window)) {
     return $true
   }
@@ -2126,7 +1068,6 @@ function Ensure-ShellForeground(
   $deadline = $startedUtc.AddMilliseconds($TimeoutMilliseconds)
   $acquired = $false
   do {
-    Hide-TestProviderZmxWindows
     $activated = [GraphCodeUiaGateState]::ActivateWindow($window)
     $acquired = $activated -and [GraphCodeUiaGateState]::IsForegroundWindow($window)
     if (-not $acquired) {
@@ -3046,6 +1987,36 @@ function Test-ScreenPixelNear(
   }
 }
 
+function Test-UiaNativeRootChrome($root, $candidate, [string[]]$runtimeIds, [string[]]$chromeIds) {
+  if($root.window -le 0 -or $root.processId -le 0 -or $root.nativeProcessId -ne $root.processId -or
+      $root.owner -ne 0 -or $root.class -cne 'GraphCodeWindowsShell' -or
+      $root.automationId -cne 'graphcode-root' -or [string]::IsNullOrWhiteSpace($root.runtime)){
+    return $false
+  }
+  $role=switch -CaseSensitive ($candidate.automationId) {
+    'TitleBar' {'ControlType.TitleBar'}
+    'MenuBar' {'ControlType.MenuBar'}
+    default {return $false}
+  }
+  if($candidate.processId -ne $root.processId -or $candidate.role -cne $role -or
+      $candidate.class -cne '' -or $candidate.nativeWindow -ne 0 -or
+      $candidate.nativeProcessId -ne 0 -or $candidate.nativeClass -cne '' -or
+      $candidate.parentWindow -ne $root.window -or $candidate.parentRuntime -cne $root.runtime -or
+      $candidate.isControlElement -ne $true -or $candidate.isContentElement -ne $false -or
+      [string]::IsNullOrWhiteSpace($candidate.runtime) -or $candidate.runtime -ceq $root.runtime -or
+      @($runtimeIds|Where-Object {$_ -ceq $candidate.runtime}).Count -ne 1 -or
+      @($chromeIds|Where-Object {$_ -ceq $candidate.automationId}).Count -ne 1){
+    return $false
+  }
+  $parts=$candidate.runtime.Split(',')
+  if($parts.Count -ne 3 -or $parts[1] -cne [string]$root.window){return $false}
+  $a=@($root.bounds);$b=@($candidate.bounds)
+  if($a.Count -ne 4 -or $b.Count -ne 4){return $false}
+  foreach($value in @($a+$b)){if(-not [double]::IsFinite([double]$value)){return $false}}
+  return ($a[2] -gt $a[0] -and $a[3] -gt $a[1] -and $b[2] -gt $b[0] -and $b[3] -gt $b[1] -and
+    $b[0] -ge $a[0] -and $b[1] -ge $a[1] -and $b[2] -le $a[2] -and $b[3] -le $a[3])
+}
+
 function Assert-FragmentLinks(
   [System.Windows.Automation.AutomationElement] $parent,
   [System.Windows.Automation.TreeWalker] $walker,
@@ -3056,8 +2027,76 @@ function Assert-FragmentLinks(
   $allowedNativeIds = if ($label -match "root$") { @("4601", "4602") } else { @() }
   $unexpectedIds = @($allChildren | ForEach-Object { $_.Current.AutomationId } |
     Where-Object { $_ -and $_ -notin $expectedIds -and $_ -notin $allowedNativeIds })
+  if ($unexpectedIds.Count -gt 0 -and $label -match "root$") {
+    try {
+      $diagnosticClock = [Diagnostics.Stopwatch]::StartNew()
+      $candidateIds = @("TitleBar", "MenuBar")
+      $knownChildren = @($allChildren | Where-Object { $_.Current.AutomationId -cin $candidateIds })
+      $rootProcessId = $parent.Current.ProcessId
+      $rootWindow = [IntPtr]::new([long]$parent.Current.NativeWindowHandle)
+      Require ($parent.Current.AutomationId -ceq 'graphcode-root' -and $rootProcessId -gt 0 -and
+        [GraphCodeUiaGateState]::WindowProcessId($rootWindow) -eq $rootProcessId -and
+        [GraphCodeUiaGateState]::WindowClass($rootWindow) -ceq 'GraphCodeWindowsShell') `
+        'Unexpected-root diagnosis requires exact owned shell root'
+      $projection = [Collections.Generic.List[object]]::new()
+      foreach ($candidate in @($knownChildren | Select-Object -First 2)) {
+        Require ($diagnosticClock.ElapsedMilliseconds -lt 5000) 'Unexpected-root diagnostic control budget expired'
+        $current = $candidate.Current
+        $row = [ordered]@{ automationId = $current.AutomationId; processId = $current.ProcessId }
+        if ($current.ProcessId -eq $rootProcessId -and
+            [GraphCodeUiaGateState]::WindowProcessId($rootWindow) -eq $rootProcessId) {
+          $native = [IntPtr]::new([long]$current.NativeWindowHandle)
+          $actualParent = $walker.GetParent($candidate)
+          $row.class = $current.ClassName
+          $row.role = $current.ControlType.ProgrammaticName
+          $row.runtime = $candidate.GetRuntimeId() -join ','
+          $row.parentRuntime = $actualParent.GetRuntimeId() -join ','
+          $row.parentWindow = [long]$actualParent.Current.NativeWindowHandle
+          $row.isControlElement = $current.IsControlElement
+          $row.isContentElement = $current.IsContentElement
+          $row.bounds = @($current.BoundingRectangle.Left, $current.BoundingRectangle.Top,
+            $current.BoundingRectangle.Right, $current.BoundingRectangle.Bottom)
+          $row.nativeWindow = $native.ToInt64()
+          $row.nativeProcessId = [GraphCodeUiaGateState]::WindowProcessId($native)
+          if ($native -eq [IntPtr]::Zero -or $row.nativeProcessId -eq $rootProcessId) {
+            $row.nativeClass = [GraphCodeUiaGateState]::WindowClass($native)
+          }
+          Require ($diagnosticClock.ElapsedMilliseconds -lt 5000) 'Unexpected-root diagnostic control budget expired'
+        }
+        $projection.Add($row)
+      }
+      $rootSnapshot=@{window=$rootWindow.ToInt64();processId=$rootProcessId
+        nativeProcessId=[GraphCodeUiaGateState]::WindowProcessId($rootWindow)
+        owner=[GraphCodeUiaGateState]::WindowOwner($rootWindow).ToInt64()
+        class=[GraphCodeUiaGateState]::WindowClass($rootWindow);automationId=$parent.Current.AutomationId
+        runtime=($parent.GetRuntimeId() -join ',');bounds=[GraphCodeUiaGateState]::WindowBounds($rootWindow)}
+      if($knownChildren.Count -le 2){
+        $runtimeIds=@($allChildren|ForEach-Object {$_.GetRuntimeId() -join ','})
+        $chromeIds=@($knownChildren|ForEach-Object {$_.Current.AutomationId})
+        $validatedChrome=@($projection|Where-Object {
+          Test-UiaNativeRootChrome $rootSnapshot $_ $runtimeIds $chromeIds
+        }|ForEach-Object {$_.automationId})
+        Require ($diagnosticClock.ElapsedMilliseconds -lt 5000) 'Unexpected-root diagnostic control budget expired'
+        $unexpectedIds=@($unexpectedIds|Where-Object {$_ -cnotin $validatedChrome})
+      }
+      if($unexpectedIds.Count -gt 0){Write-Host ("UIA_FRAGMENT_ROOT_UNEXPECTED_STRUCTURE=" + ([ordered]@{
+        observed = [DateTimeOffset]::Now.ToString('o'); label = $label
+        rootProcessId = $rootProcessId; rootWindow = $rootWindow.ToInt64()
+        rootClass = [GraphCodeUiaGateState]::WindowClass($rootWindow)
+        rootRuntime = ($parent.GetRuntimeId() -join ',')
+        rootBounds = [GraphCodeUiaGateState]::WindowBounds($rootWindow)
+        unexpectedCount = $unexpectedIds.Count; knownCandidateCount = $knownChildren.Count
+        candidateProjectionLimit = 2; truncated = ($knownChildren.Count -gt 2)
+        candidates = $projection.ToArray(); admission = 'exact owned-root native-chrome predicate only'
+      } | ConvertTo-Json -Depth 5 -Compress))}
+    } catch {
+      Write-Warning "Unexpected-root structural diagnosis failed; original child rejection remains: $_"
+    }
+  }
   Require ($unexpectedIds.Count -eq 0) "$label exposed unexpected children: $($unexpectedIds -join ',')"
   $children = @($allChildren | Where-Object { $_.Current.AutomationId -in $expectedIds })
+  Require (@($children|Where-Object {$_.Current.ProcessId -ne $parent.Current.ProcessId}).Count -eq 0) `
+    "$label exposed a foreign required app child"
   $ids = @($children | ForEach-Object { $_.Current.AutomationId })
   Assert-Ids $ids $expectedIds "$label direct children"
   for ($i = 0; $i -lt $children.Count; $i++) {
@@ -3265,67 +2304,66 @@ function Get-UiaOwnedProcessDescendants([int[]] $rootProcessIds) {
   return @($descendants | Sort-Object Depth -Descending)
 }
 
+function Invoke-UiaCleanupActions([scriptblock[]] $actions) {
+  $errors = [Collections.Generic.List[Exception]]::new()
+  foreach ($action in $actions) {
+    try { & $action }
+    catch { $errors.Add($_.Exception) }
+  }
+  if ($errors.Count) {
+    $failure = [AggregateException]::new("UIA cleanup actions failed", $errors.ToArray())
+    if (@($errors | Where-Object { $_.Data["GraphCodeValidationRootRetentionRequired"] -eq $true }).Count) {
+      $tag = New-UiaOwnershipFailure $failure.Message
+      foreach ($key in $tag.Data.Keys) { $failure.Data[$key] = $tag.Data[$key] }
+      $failure.Data["GraphCodeValidationRetainedRoots"] = @(
+        @($tag.Data["GraphCodeValidationRetainedRoots"]) +
+        @($errors | ForEach-Object { $_.Data["GraphCodeValidationRetainedRoots"] }) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique
+      )
+    }
+    throw $failure
+  }
+}
+
 function Stop-UiaOwnedProcessTrees([Diagnostics.Process[]] $rootProcesses) {
   $roots = @($rootProcesses | Where-Object { $null -ne $_ })
-  if ($roots.Count -eq 0) { return }
-  $rootIds = @($roots | ForEach-Object { $_.Id })
-  $descendants = @(Get-UiaOwnedProcessDescendants $rootIds)
-  Write-Host ("UIA_OWNED_PROCESS_TREE=" + (@($descendants | ForEach-Object {
-    [ordered]@{
-      processId = $_.ProcessId
-      parentProcessId = $_.ParentProcessId
-      name = $_.Name
-      executablePath = Protect-UiaStartupDiagnosticText $_.ExecutablePath
-      depth = $_.Depth
-    }
-  } | ConvertTo-Json -Compress -Depth 4)))
-  foreach ($descendant in $descendants) {
-    $current = Get-CimInstance Win32_Process -Filter `
-      "ProcessId = $($descendant.ProcessId)" -ErrorAction Stop
-    if ($null -eq $current) { continue }
-    if ([string]$current.Name -cne $descendant.Name -or
-        [string]$current.CreationDate -cne [string]$descendant.CreationDate) {
-      continue
-    }
-    $child = Get-Process -Id $descendant.ProcessId -ErrorAction SilentlyContinue
-    if ($child) {
-      try {
-        if (-not $child.HasExited) { $child.Kill() }
-      } catch [InvalidOperationException] {
-        if (-not $child.HasExited) { throw }
-      }
-      if (-not $child.WaitForExit(5000)) {
-        throw "Owned descendant process $($descendant.ProcessId) did not exit after termination"
-      }
-      $child.Dispose()
-    }
+  $captures = @($script:UiaGateOwnedCaptures | Where-Object { $null -ne $_ })
+  if ($roots.Count -eq 0 -and $captures.Count -eq 0) {
+    Write-Host "UIA_PROCESS_TREE_CLEANUP=not_needed no owned launch was registered"
+    return
   }
+  $errors = [Collections.Generic.List[Exception]]::new()
   foreach ($root in $roots) {
-    try {
-      if (-not $root.HasExited) { $root.Kill() }
-    } catch [InvalidOperationException] {
-      if (-not $root.HasExited) { throw }
-    }
-    if (-not $root.HasExited) {
-      if (-not $root.WaitForExit(5000)) {
-        throw "Owned UIA shell process $($root.Id) did not exit after termination"
-      }
+    $owned = @($captures | Where-Object { [Object]::ReferenceEquals($_.process, $root) })
+    if ($owned.Count -ne 1) {
+      $errors.Add((New-UiaOwnershipFailure (
+        "UIA root $($root.Id) has no unique pre-launch owned-job lease. " +
+        "No PID/CIM-discovered descendant was terminated; complete tree cleanup cannot be verified.")))
     }
   }
-  $remaining = @()
-  foreach ($descendant in $descendants) {
-    $current = Get-CimInstance Win32_Process -Filter `
-      "ProcessId = $($descendant.ProcessId)" -ErrorAction Stop
-    if ($null -ne $current -and
-        [string]$current.Name -ceq $descendant.Name -and
-        [string]$current.CreationDate -ceq [string]$descendant.CreationDate) {
-      $remaining += $descendant.ProcessId
+  foreach ($capture in $captures) {
+    if ($capture.cleaned) { continue }
+    try { $null = Complete-MultiProjectCapture $capture $capture.logDirectory }
+    catch { $errors.Add($_.Exception) }
+  }
+  if ($errors.Count) {
+    $failure = [AggregateException]::new("UIA owned-job cleanup failed", $errors.ToArray())
+    if (@($errors | Where-Object { $_.Data["GraphCodeValidationRootRetentionRequired"] -eq $true }).Count) {
+      $tag = New-UiaOwnershipFailure $failure.Message
+      foreach ($key in $tag.Data.Keys) { $failure.Data[$key] = $tag.Data[$key] }
     }
+    throw $failure
   }
-  if ($remaining.Count -gt 0) {
-    throw "Owned UIA descendants remained after teardown: $($remaining -join ',')"
-  }
-  Write-Host "UIA_PROCESS_TREE_CLEANUP=verified roots=$($rootIds -join ',') descendants=$($descendants.Count)"
+  Write-Host "UIA_PROCESS_TREE_CLEANUP=verified ownedJobs=$($captures.Count)"
+}
+
+function New-UiaOwnershipFailure([string] $message) {
+  $failure = [InvalidOperationException]::new($message)
+  $root = [Environment]::GetEnvironmentVariable("GRAPHCODE_VALIDATION_ROOT", "Process")
+  $roots = @(
+    if (-not [string]::IsNullOrWhiteSpace($root)) { $root }
+  )
+  return (ShellProcessOwnership\Set-ShellOwnershipUnproven -Exception $failure -RetainedRoots $roots)
 }
 
 function Stop-UiaOwnedProviderProcesses(
@@ -3337,7 +2375,7 @@ function Stop-UiaOwnedProviderProcesses(
     return
   }
   $expected = [IO.Path]::GetFullPath($providerPath)
-  $owned = @(
+  $observed = @(
     Get-CimInstance Win32_Process -Filter "Name = 'zmx.exe'" -ErrorAction Stop |
       Where-Object {
         $_.ExecutablePath -and
@@ -3345,36 +2383,12 @@ function Stop-UiaOwnedProviderProcesses(
         -not $baseline.Contains("$([int]$_.ProcessId)|$([string]$_.CreationDate)")
       }
   )
-  foreach ($candidate in $owned) {
-    $current = Get-CimInstance Win32_Process -Filter `
-      "ProcessId = $([int]$candidate.ProcessId)" -ErrorAction Stop
-    if ($null -eq $current -or
-        [string]$current.CreationDate -cne [string]$candidate.CreationDate -or
-        -not $current.ExecutablePath -or
-        [IO.Path]::GetFullPath([string]$current.ExecutablePath) -ine $expected) {
-      continue
-    }
-    $process = Get-Process -Id ([int]$candidate.ProcessId) -ErrorAction SilentlyContinue
-    if ($process) {
-      if (-not $process.HasExited) { $process.Kill() }
-      if (-not $process.WaitForExit(5000)) {
-        throw "Owned provider process $($candidate.ProcessId) did not exit after termination"
-      }
-      $process.Dispose()
-    }
+  if ($observed.Count -gt 0) {
+    throw (New-UiaOwnershipFailure (
+      "UIA provider ownership is unproven for observed PIDs $($observed.ProcessId -join ','); " +
+      "path, creation time, and baseline absence are advisory only. No discovered process was terminated."))
   }
-  $remaining = @(
-    Get-CimInstance Win32_Process -Filter "Name = 'zmx.exe'" -ErrorAction Stop |
-      Where-Object {
-        $_.ExecutablePath -and
-        [IO.Path]::GetFullPath([string]$_.ExecutablePath) -ieq $expected -and
-        -not $baseline.Contains("$([int]$_.ProcessId)|$([string]$_.CreationDate)")
-      }
-  )
-  if ($remaining.Count -gt 0) {
-    throw "Owned provider processes remained after teardown: $($remaining.ProcessId -join ',')"
-  }
-  Write-Host "UIA_PROVIDER_PROCESS_CLEANUP=verified terminated=$($owned.Count)"
+  Write-Host "UIA_PROVIDER_PROCESS_CLEANUP=no_candidates_observed terminated=0"
 }
 
 function Get-UiaStartupImageHash([string] $path, [scriptblock] $openRead) {
@@ -4011,6 +3025,246 @@ function Invoke-MultiProjectOwnedStartupFailure(
   }
 }
 
+function Get-UiaSettingsVisibilityDecision($frame, [int] $processId, [int] $id, [string] $name,
+    [bool] $contains = $false) {
+  if ($null -eq $frame -or $frame.identity -ne $true -or $frame.matches -ne 1 -or
+      $frame.stable -ne $true -or $frame.processId -ne $processId -or
+      $frame.controlId -ne $id -or $frame.parent -ne $frame.content -or
+      $(if ($contains) { -not $frame.name.Contains($name) } else { $frame.name -cne $name })) {
+    return @{ready=$false;valid=$false;delta=0}
+  }
+  $box=$frame.bounds; $view=$frame.viewport
+  if ($null -eq $box -or $null -eq $view -or $box.right -le $box.left -or
+      $box.bottom -le $box.top -or $view.right -le $view.left -or $view.bottom -le $view.top -or
+      $box.left -lt $view.left -or $box.right -gt $view.right -or
+      ($box.bottom-$box.top) -gt ($view.bottom-$view.top)) {
+    return @{ready=$false;valid=$false;delta=0}
+  }
+  if ($box.top -lt $view.top) { return @{ready=$false;valid=$true;delta=120} }
+  if ($box.bottom -gt $view.bottom) { return @{ready=$false;valid=$true;delta=-120} }
+  return @{ready=($frame.offscreen -eq $false);valid=($frame.offscreen -eq $false);delta=0}
+}
+
+function Read-UiaSettingsControlSnapshot($dialog, [int] $processId, [IntPtr] $owner,
+    [int] $id, [string] $name, [string] $class, [bool] $contains) {
+  $null=Assert-UiaOwnedSheet $dialog $processId $owner 'GraphCode Settings' `
+    'GraphCodeProductSettings' 'Settings viewport read' $false
+  $sheet=[IntPtr]::new([long]$dialog.Current.NativeWindowHandle)
+  $raw=[System.Windows.Automation.TreeWalker]::RawViewWalker
+  function Read-SettingsChild([IntPtr] $parent, [string] $childClass, [int] $childId,
+      [string] $label, [bool] $substring) {
+    $parentElement=[System.Windows.Automation.AutomationElement]::FromHandle($parent)
+    $child=$raw.GetFirstChild($parentElement); $matches=@(); $visited=0
+    while ($null -ne $child) {
+      Require ($visited -lt 256 -and $child.Current.ProcessId -eq $processId) `
+        'Settings children exceeded their owned bounded census'
+      $handle=[IntPtr]::new([long]$child.Current.NativeWindowHandle)
+      if ($handle -ne [IntPtr]::Zero -and
+          [GraphCodeUiaGateState]::WindowClass($handle) -ceq $childClass -and
+          [GraphCodeUiaGateState]::ControlIdOf($handle) -eq $childId -and
+          ($childId -ne 0 -or [string]::IsNullOrEmpty($label) -or
+           $(if ($substring) { $child.Current.Name.Contains($label) } else { $child.Current.Name -ceq $label }))) {
+        $matches+=,$child
+      }
+      $visited++; $child=$raw.GetNextSibling($child)
+    }
+    Require ($matches.Count -eq 1) "Settings exact child missing or duplicate: $childClass/$childId/$label"
+    $element=$matches[0]; $handle=[IntPtr]::new([long]$element.Current.NativeWindowHandle)
+    $runtime=$element.GetRuntimeId() -join ','
+    $again=[System.Windows.Automation.AutomationElement]::FromHandle($handle)
+    Require ([GraphCodeUiaGateState]::WindowProcessId($handle) -eq $processId -and
+      [GraphCodeUiaGateState]::IsControlOwnedBy($sheet,$handle,$childId) -and
+      [long]$raw.GetParent($again).Current.NativeWindowHandle -eq $parent.ToInt64() -and
+      ($again.GetRuntimeId() -join ',') -ceq $runtime -and $again.Current.ProcessId -eq $processId) `
+      'Settings child has stale identity, foreign PID or wrong direct parent'
+    return $again
+  }
+  $viewport=Read-SettingsChild $sheet 'GraphCodeSheetViewport' 0 '' $false
+  $viewportHandle=[IntPtr]::new([long]$viewport.Current.NativeWindowHandle)
+  $content=Read-SettingsChild $viewportHandle 'GraphCodeProductSettings' 0 '' $false
+  $contentHandle=[IntPtr]::new([long]$content.Current.NativeWindowHandle)
+  $element=Read-SettingsChild $contentHandle $class $id $name $contains
+  $handle=[IntPtr]::new([long]$element.Current.NativeWindowHandle)
+  $box=$element.Current.BoundingRectangle; $view=$viewport.Current.BoundingRectangle
+  return @{
+    identity=$true;matches=1;stable=$true;name=$element.Current.Name;controlId=$id
+    processId=$element.Current.ProcessId;parent=[long]$raw.GetParent($element).Current.NativeWindowHandle
+    content=$contentHandle.ToInt64();viewportHandle=$viewportHandle.ToInt64()
+    offscreen=$element.Current.IsOffscreen;handle=$handle.ToInt64()
+    runtime=($element.GetRuntimeId() -join ',');element=$element
+    bounds=@{left=$box.Left;top=$box.Top;right=$box.Right;bottom=$box.Bottom}
+    viewport=@{left=$view.Left;top=$view.Top;right=$view.Right;bottom=$view.Bottom}
+  }
+}
+
+function Invoke-UiaSettingsScroll([IntPtr] $viewport, [int] $delta) {
+  return [GraphCodeUiaGateState]::WheelAt($viewport,1,1,$delta)
+}
+
+function Wait-UiaSettingsControlVisible($dialog, [int] $processId, [IntPtr] $owner,
+    [int] $id, [string] $name, [string] $class = 'Button', [bool] $contains = $false) {
+  $watch=[Diagnostics.Stopwatch]::StartNew(); $original=$null
+  for ($attempt=0; $attempt -lt 100 -and $watch.ElapsedMilliseconds -lt 5000; $attempt++) {
+    $frame=Read-UiaSettingsControlSnapshot $dialog $processId $owner $id $name $class $contains
+    if ($null -eq $original) { $original=$frame }
+    Require ($frame.handle -eq $original.handle -and $frame.runtime -ceq $original.runtime -and
+      $frame.content -eq $original.content -and $frame.viewportHandle -eq $original.viewportHandle) `
+      "Settings control identity changed while scrolling '$name'"
+    $decision=Get-UiaSettingsVisibilityDecision $frame $processId $id $name $contains
+    Require $decision.valid "Settings invalid owned viewport/control '$name'"
+    if ($decision.ready) { return $frame.element }
+    Require (Invoke-UiaSettingsScroll ([IntPtr]::new([long]$frame.viewportHandle)) $decision.delta) `
+      "Settings native scroll failed for '$name'"
+    Start-Sleep -Milliseconds 50
+  }
+  throw "Settings visible viewport wait failed for '$name' within original 5000ms budget"
+}
+
+function Get-UiaReadonlyEndpointsDecision($snapshot, [int] $processId, [long] $owner,
+    [string] $title, [string] $from, [string] $to) {
+  if ($null -eq $snapshot -or $processId -le 0 -or $owner -le 0 -or
+      $snapshot.handle -le 0 -or $snapshot.processId -ne $processId -or $snapshot.owner -ne $owner -or
+      $snapshot.class -cne 'GraphCodeSheetHost' -or $snapshot.title -cne $title -or
+      $snapshot.captionless -ne $true -or [string]::IsNullOrWhiteSpace($from) -or
+      [string]::IsNullOrWhiteSpace($to) -or $from -ieq $to) { return @{ready=$false} }
+  foreach ($child in @(
+      @{row=$snapshot.viewport;parent=$snapshot.handle;class='GraphCodeSheetViewport'},
+      @{row=$snapshot.content;parent=$snapshot.viewport.handle;class='GraphCodeNativeForm'})) {
+    $row = $child.row
+    if ($null -eq $row -or $row.handle -le 0 -or $row.parent -ne $child.parent -or
+        $row.processId -ne $processId -or $row.class -cne $child.class -or $row.matches -ne 1 -or
+        $row.stable -ne $true -or $row.owned -ne $true -or
+        [string]::IsNullOrWhiteSpace($row.runtime)) { return @{ready=$false} }
+  }
+  $fields = @($snapshot.fields)
+  if ($fields.Count -ne 2) { return @{ready=$false} }
+  for ($index = 0; $index -lt 2; $index++) {
+    $row = $fields[$index]
+    $expected = @($from,$to)[$index]
+    if ($null -eq $row -or $row.handle -le 0 -or $row.parent -ne $snapshot.content.handle -or
+        $row.processId -ne $processId -or $row.semanticProcessId -ne $processId -or
+        $row.controlId -ne (9100+$index) -or $row.class -cne 'Edit' -or $row.matches -ne 1 -or
+        $row.stable -ne $true -or $row.owned -ne $true -or $row.readonly -ne $true -or
+        [string]::IsNullOrWhiteSpace($row.runtime) -or $row.value -ine $expected -or
+        $row.semanticValue -cne $row.value) { return @{ready=$false} }
+  }
+  if ($fields[0].handle -eq $fields[1].handle) { return @{ready=$false} }
+  return @{ready=$true;source=$fields[0].value;target=$fields[1].value}
+}
+
+function Read-UiaReadonlyEdgeEndpoints($dialog, [int] $processId, [IntPtr] $owner, [string] $title) {
+  & (Join-Path $PSScriptRoot 'Import-CompiledValidationAssembly.ps1') `
+    -AssemblyPath $validationAssemblyPath -RequiredType 'GraphCodeMultiProjectEditNative' | Out-Null
+  $sheet = [IntPtr]::new([long]$dialog.Current.NativeWindowHandle)
+  $snapshot = @{
+    handle=$sheet.ToInt64();processId=[GraphCodeUiaGateState]::WindowProcessId($sheet)
+    owner=[GraphCodeUiaGateState]::WindowOwner($sheet).ToInt64()
+    class=[GraphCodeUiaGateState]::WindowClass($sheet);title=[GraphCodeUiaGateState]::WindowTitle($sheet)
+    captionless=[GraphCodeUiaGateState]::IsCaptionlessSheet($sheet)
+  }
+  Require ($snapshot.processId -eq $processId -and $snapshot.owner -eq $owner.ToInt64() -and
+    $snapshot.class -ceq 'GraphCodeSheetHost' -and $snapshot.title -ceq $title -and
+    $snapshot.captionless) 'Readonly endpoint sheet identity changed before reads'
+  $raw = [System.Windows.Automation.TreeWalker]::RawViewWalker
+  function Read-EndpointChild([IntPtr] $parent, [string] $class, [int] $id) {
+    $handle = if ($id -eq 0) { [GraphCodeUiaGateState]::FindChild($parent,$class) }
+      else { [GraphCodeUiaGateState]::ControlById($parent,$id) }
+    Require ($handle -ne [IntPtr]::Zero -and
+      [GraphCodeUiaGateState]::WindowProcessId($handle) -eq $processId -and
+      [GraphCodeUiaGateState]::WindowClass($handle) -ceq $class -and
+      [GraphCodeUiaGateState]::IsControlOwnedBy($sheet,$handle,$id)) 'Exact owned readonly endpoint child missing'
+    $element = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+    $runtime = $element.GetRuntimeId() -join ','
+    $sibling = $raw.GetFirstChild([System.Windows.Automation.AutomationElement]::FromHandle($parent))
+    $visited = 0; $matches = 0
+    while ($null -ne $sibling) {
+      Require ($visited -lt 256 -and $sibling.Current.ProcessId -eq $processId) `
+        'Readonly endpoint children exceeded their owned bounded census'
+      $candidate = [IntPtr]::new([long]$sibling.Current.NativeWindowHandle)
+      if ($candidate -ne [IntPtr]::Zero -and
+          [GraphCodeUiaGateState]::WindowClass($candidate) -ceq $class -and
+          [GraphCodeUiaGateState]::ControlIdOf($candidate) -eq $id) { $matches++ }
+      $visited++; $sibling = $raw.GetNextSibling($sibling)
+    }
+    $again = if ($id -eq 0) { [GraphCodeUiaGateState]::FindChild($parent,$class) }
+      else { [GraphCodeUiaGateState]::ControlById($parent,$id) }
+    $row = @{
+      handle=$handle.ToInt64();parent=[long]$raw.GetParent($element).Current.NativeWindowHandle
+      processId=[GraphCodeUiaGateState]::WindowProcessId($handle);semanticProcessId=$element.Current.ProcessId
+      class=[GraphCodeUiaGateState]::WindowClass($handle);controlId=[GraphCodeUiaGateState]::ControlIdOf($handle)
+      owned=[GraphCodeUiaGateState]::IsControlOwnedBy($sheet,$handle,$id)
+      runtime=$runtime;matches=$matches;stable=($again -eq $handle -and ($element.GetRuntimeId() -join ',') -ceq $runtime)
+    }
+    Require ($row.parent -eq $parent.ToInt64() -and $row.matches -eq 1 -and $row.stable) `
+      'Readonly endpoint child is duplicate, stale or not a direct owned descendant'
+    if ($id -ne 0) {
+      $pattern = $element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+      $row.readonly = $pattern.Current.IsReadOnly
+      $row.semanticValue = $pattern.Current.Value
+      $row.value = [GraphCodeMultiProjectEditNative]::Buffer($handle,100)
+      $row.stable = $row.stable -and [GraphCodeUiaGateState]::ControlById($parent,$id) -eq $handle -and
+        ($element.GetRuntimeId() -join ',') -ceq $runtime
+    }
+    return $row
+  }
+  $snapshot.viewport = Read-EndpointChild $sheet 'GraphCodeSheetViewport' 0
+  $snapshot.content = Read-EndpointChild ([IntPtr]::new($snapshot.viewport.handle)) 'GraphCodeNativeForm' 0
+  $content = [IntPtr]::new($snapshot.content.handle)
+  $snapshot.fields = @((Read-EndpointChild $content 'Edit' 9100),(Read-EndpointChild $content 'Edit' 9101))
+  $decision = Get-UiaReadonlyEndpointsDecision $snapshot $processId $owner.ToInt64() $title `
+    '11111111-1111-4111-8111-111111111111' '22222222-2222-4222-8222-222222222222'
+  Require $decision.ready 'Readonly native/semantic endpoint identity or value changed'
+  Write-Host ('UIA_READONLY_ENDPOINT_EVIDENCE=' + ($snapshot | ConvertTo-Json -Depth 6 -Compress))
+  return $decision
+}
+
+function Get-CardsFixtureRestorationDecision([object[]] $before, [object[]] $after, [int] $processId) {
+  if ($null -eq $before -or $null -eq $after -or $before.Count -eq 0 -or
+      $before.Count -ne $after.Count -or $processId -le 0) {
+    return [pscustomobject]@{ready=$false;failure='missing or changed graph-child census'}
+  }
+  $beforeIds=[Collections.Generic.List[string]]::new()
+  $afterIds=[Collections.Generic.List[string]]::new()
+  for ($index=0; $index -lt $before.Count; $index++) {
+    $left=$before[$index]; $right=$after[$index]
+    foreach ($row in @($left,$right)) {
+      if ($row -isnot [Collections.IDictionary] -or
+          [string]::IsNullOrWhiteSpace($row.automationId) -or
+          $row.processId -ne $processId -or $row.parentId -cne 'graph' -or
+          [string]::IsNullOrWhiteSpace($row.controlType)) {
+        return [pscustomobject]@{ready=$false;failure='invalid graph-child owner, parent or role'}
+      }
+    }
+    if ($beforeIds.Contains($left.automationId) -or $afterIds.Contains($right.automationId)) {
+      return [pscustomobject]@{ready=$false;failure='duplicate graph-child identity'}
+    }
+    $beforeIds.Add($left.automationId); $afterIds.Add($right.automationId)
+    foreach ($field in @('automationId','name','processId','parentId','controlType')) {
+      if ([string]$left[$field] -cne [string]$right[$field]) {
+        return [pscustomobject]@{ready=$false;failure='original ordered graph-child metadata not restored'}
+      }
+    }
+  }
+  return [pscustomobject]@{ready=$true;failure=''}
+}
+
+function Get-CardsCompositeBackDecision([object[]] $items, [string] $expectedId, [int] $processId) {
+  if ([string]::IsNullOrWhiteSpace($expectedId) -or $processId -le 0 -or
+      $null -eq $items -or @($items | Where-Object { $null -eq $_ }).Count) {
+    return [pscustomobject]@{ ready=$false; failure='invalid breadcrumb snapshot' }
+  }
+  $matches = @($items | Where-Object { $_.automationId -ceq $expectedId })
+  if ($matches.Count -ne 1) {
+    return [pscustomobject]@{ ready=$false; failure='expected one exact-parent breadcrumb' }
+  }
+  $back = $matches[0]
+  return [pscustomobject]@{
+    ready=($back.processId -eq $processId -and $back.parentId -ceq 'graph' -and
+      $back.name -ceq 'Back to UIA project')
+    failure='breadcrumb owner, hierarchy or retained project name differs'
+  }
+}
+
 function Get-MultiProjectAutomationId([string] $kind, [string] $path, [string] $nodeId = "") {
   $prefix = switch -CaseSensitive ($kind) {
     "loop" { "loop-row" }
@@ -4021,6 +3275,7 @@ function Get-MultiProjectAutomationId([string] $kind, [string] $path, [string] $
     "overview-worktree-notice" { "canvas-card" }
     "workspace-loop-bar" { "workspace-loop-bar" }
     "workspace-toolbar" { "workspace-toolbar" }
+    "composite-back" { "canvas-card" }
     default { throw "MULTIPROJECT_KIND: unsupported automation identity kind" }
   }
   $identity = if ($nodeId) { "${kind}:${path}:$nodeId" } else { "${kind}:$path" }
@@ -4461,83 +3716,7 @@ function Get-MultiProjectRenameTitle([string] $loopTitle) {
 }
 
 function New-MultiProjectEditNativeApi([string] $expectedTitle = "") {
-  if(-not("GraphCodeMultiProjectEditNative" -as [type])){
-    Add-Type -TypeDefinition @'
-using System;
-using System.Text;
-using System.Diagnostics;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-public static class GraphCodeMultiProjectEditNative {
-  [StructLayout(LayoutKind.Sequential)] private struct Key { public ushort Vk, Scan; public uint Flags, Time; public UIntPtr Extra; }
-  [StructLayout(LayoutKind.Sequential)] private struct Input { public uint Type; public Key Key; public uint Pad0, Pad1; }
-  [StructLayout(LayoutKind.Sequential)] private struct Rect {public int Left,Top,Right,Bottom;}
-  [StructLayout(LayoutKind.Sequential)] private struct GuiInfo {
-    public int Size; public uint Flags; public IntPtr Active,Focus,Capture,MenuOwner,MoveSize,Caret; public Rect CaretRect;
-  }
-  [DllImport("user32.dll", SetLastError=true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
-  [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", SetLastError=true)]
-  private static extern IntPtr Message(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
-  [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", CharSet=CharSet.Unicode, SetLastError=true)]
-  private static extern IntPtr TextMessage(IntPtr window, uint message, UIntPtr wparam, StringBuilder text, uint flags, uint timeout, out UIntPtr result);
-  [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", CharSet=CharSet.Unicode, SetLastError=true)]
-  private static extern IntPtr SetTextMessage(IntPtr window, uint message, UIntPtr wparam, string text, uint flags, uint timeout, out UIntPtr result);
-  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
-  [DllImport("user32.dll",SetLastError=true)] private static extern bool GetGUIThreadInfo(uint thread,ref GuiInfo info);
-  private static uint Remaining(int budget, Stopwatch watch) {
-    long value=budget-watch.ElapsedMilliseconds;
-    if(value<=0) throw new TimeoutException("N3e edit transaction deadline expired");
-    return (uint)value;
-  }
-  private static UIntPtr ReadMessage(IntPtr window,uint message,UIntPtr first,IntPtr last,int budget,Stopwatch watch) {
-    UIntPtr result;
-    if(Message(window,message,first,last,0x23,Remaining(budget,watch),out result)==IntPtr.Zero)
-      throw new Win32Exception(Marshal.GetLastWin32Error(),"N3e edit message unavailable/timed out");
-    return result;
-  }
-  public static string Buffer(IntPtr edit,int budget) {
-    var watch=Stopwatch.StartNew();
-    int length=checked((int)ReadMessage(edit,0x000E,UIntPtr.Zero,IntPtr.Zero,budget,watch).ToUInt64());
-    if(length<0 || length>65536) throw new InvalidOperationException("N3e edit buffer exceeds bound");
-    var text=new StringBuilder(length+1); UIntPtr result;
-    if(TextMessage(edit,0x000D,(UIntPtr)text.Capacity,text,0x23,Remaining(budget,watch),out result)==IntPtr.Zero)
-      throw new Win32Exception(Marshal.GetLastWin32Error(),"N3e WM_GETTEXT unavailable/timed out");
-    return text.ToString();
-  }
-  public static int[] Selection(IntPtr edit,int budget) {
-    var watch=Stopwatch.StartNew(); IntPtr memory=Marshal.AllocHGlobal(8);
-    try {
-      Marshal.WriteInt32(memory,-1); Marshal.WriteInt32(memory,4,-1);
-      ReadMessage(edit,0x00B0,(UIntPtr)memory.ToInt64(),IntPtr.Add(memory,4),budget,watch);
-      return new[]{Marshal.ReadInt32(memory),Marshal.ReadInt32(memory,4)};
-    } finally {Marshal.FreeHGlobal(memory);}
-  }
-  public static void SelectAll(IntPtr edit,int budget) {
-    ReadMessage(edit,0x00B1,UIntPtr.Zero,new IntPtr(-1),budget,Stopwatch.StartNew());
-  }
-  public static void SetText(IntPtr edit,string text,int budget) {
-    UIntPtr result;
-    if(SetTextMessage(edit,0x000C,UIntPtr.Zero,text,0x23,(uint)budget,out result)==IntPtr.Zero)
-      throw new Win32Exception(Marshal.GetLastWin32Error(),"N3e WM_SETTEXT unavailable/timed out");
-  }
-  public static IntPtr FocusOf(IntPtr modal) {
-    uint pid; uint thread=GetWindowThreadProcessId(modal,out pid);
-    var info=new GuiInfo{Size=Marshal.SizeOf(typeof(GuiInfo))};
-    if(thread==0 || !GetGUIThreadInfo(thread,ref info)) throw new Win32Exception(Marshal.GetLastWin32Error(),"N3e GetGUIThreadInfo");
-    return info.Focus;
-  }
-  public static int[] Unicode(string text) {
-    var inputs=new Input[text.Length*2]; int index=0;
-    foreach(char value in text){
-      inputs[index++]=new Input{Type=1,Key=new Key{Scan=value,Flags=4}};
-      inputs[index++]=new Input{Type=1,Key=new Key{Scan=value,Flags=6}};
-    }
-    uint sent=SendInput((uint)inputs.Length,inputs,Marshal.SizeOf(typeof(Input)));
-    return new[]{checked((int)sent),inputs.Length};
-  }
-}
-'@
-  }
+  & (Join-Path $PSScriptRoot "Import-CompiledValidationAssembly.ps1") -AssemblyPath $validationAssemblyPath -RequiredType "GraphCodeMultiProjectEditNative" | Out-Null
   $api=New-MultiProjectRenameNativeApi $expectedTitle
   $api | Add-Member NoteProperty Watch ([Diagnostics.Stopwatch]::StartNew())
   $api | Add-Member NoteProperty LastFocusPostedFallback $false
@@ -4545,6 +3724,7 @@ public static class GraphCodeMultiProjectEditNative {
   $api | Add-Member ScriptMethod Clock {return $this.Watch.ElapsedMilliseconds}
   $api | Add-Member ScriptMethod Title {param($modal,$remaining) [GraphCodeMultiProjectEditNative]::Buffer($modal,$remaining)} -Force
   $api | Add-Member ScriptMethod FocusHandle {param($modal) [GraphCodeMultiProjectEditNative]::FocusOf($modal)}
+  $api | Add-Member ScriptMethod FocusControl {param($modal,$edit) [GraphCodeUiaGateState]::FocusControl($modal,$edit)}
   $api | Add-Member ScriptMethod FocusInsertion {
     param($modal,$point)
     $receipt = @([GraphCodeUiaGateState]::ClickOwnedScreenRectangle(
@@ -4585,11 +3765,9 @@ public static class GraphCodeMultiProjectEditNative {
     }
     $null=Get-MultiProjectEditRemaining $this $started
     $receipt = @($this.FocusInsertion($modal,$point))
-    if ("GraphCodeUiaGateState" -as [type]) {
-      $this.LastFocusControlFallback = [GraphCodeUiaGateState]::FocusControl($modal,$edit)
-      if (-not $this.LastFocusControlFallback) {
-        throw "MULTIPROJECT_EDIT_FOCUS: direct control focus fallback failed"
-      }
+    $this.LastFocusControlFallback = $this.FocusControl($modal,$edit)
+    if (-not $this.LastFocusControlFallback) {
+      throw "MULTIPROJECT_EDIT_FOCUS: direct control focus fallback failed"
     }
     return ,$receipt
   }
@@ -4597,8 +3775,14 @@ public static class GraphCodeMultiProjectEditNative {
   $api | Add-Member ScriptMethod Selection {param($edit,$remaining) [GraphCodeMultiProjectEditNative]::Selection($edit,$remaining)}
   $api | Add-Member ScriptMethod SelectAll {param($edit,$remaining) [GraphCodeMultiProjectEditNative]::SelectAll($edit,$remaining)}
   $api | Add-Member ScriptMethod SetText {param($edit,$text,$remaining) [GraphCodeMultiProjectEditNative]::SetText($edit,$text,$remaining)}
-  $api | Add-Member ScriptMethod Delete {return ,@(([GraphCodeUiaGateState]::SendKeyInput(0x2E,1)*2),2)}
-  $api | Add-Member ScriptMethod Unicode {param($text) return ,@([GraphCodeMultiProjectEditNative]::Unicode($text))}
+  $api | Add-Member ScriptMethod Delete {
+    param($modal,$edit,$expectedProcessId)
+    return ,@(([GraphCodeUiaGateState]::SendKeyInput($modal,$expectedProcessId,$edit,0x2E,1)*2),2)
+  }
+  $api | Add-Member ScriptMethod Unicode {
+    param($text,$modal,$edit,$expectedProcessId)
+    return ,@([GraphCodeUiaGateState]::SendUnicodeInput($modal,$expectedProcessId,$edit,$text))
+  }
   $api | Add-Member ScriptMethod Observe {param($remaining) Start-Sleep -Milliseconds ([Math]::Min(25,$remaining))}
   return $api
 }
@@ -4731,7 +3915,7 @@ function Invoke-MultiProjectSequencedEdit(
     $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
     $null=Get-MultiProjectEditRemaining $api $started
     $record.phase="clear";$record.clearBatches++
-    $record.clear=@($api.Delete())
+    $record.clear=@($api.Delete($modal,$edit,$processId))
     if($record.clear.Count -ne 2 -or $record.clear[0] -isnot [int] -or $record.clear[1] -isnot [int] -or
       $record.clear[0] -ne 2 -or $record.clear[1] -ne 2){throw "MULTIPROJECT_EDIT_COUNTS: clear insertion receipt not2/2"}
     if($null -ne $api.PSObject.Methods["SetText"]){
@@ -4765,7 +3949,7 @@ function Invoke-MultiProjectSequencedEdit(
     $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
     $null=Get-MultiProjectEditRemaining $api $started
     $record.phase="unicode";$record.unicodeBatches++
-    $record.typed=@($api.Unicode($text))
+    $record.typed=@($api.Unicode($text,$modal,$edit,$processId))
     if($record.typed.Count -ne 2 -or $record.typed[0] -isnot [int] -or $record.typed[1] -isnot [int] -or
       $record.typed[0] -ne 2*$text.Length -or $record.typed[1] -ne 2*$text.Length){
       throw "MULTIPROJECT_EDIT_COUNTS: single Unicode insertion receipt incomplete"
@@ -4804,86 +3988,7 @@ function Invoke-MultiProjectSequencedEdit(
 }
 
 function New-MultiProjectRenameNativeApi([string] $expectedTitle = "") {
-  if (-not ("GraphCodeMultiProjectRenameNative" -as [type])) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-public static class GraphCodeMultiProjectRenameNative {
-  [StructLayout(LayoutKind.Sequential)] public struct Point { public int X, Y; }
-  [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
-  [StructLayout(LayoutKind.Sequential)] private struct MonitorInfo {
-    public int Size; public Rect Monitor, Work; public uint Flags;
-  }
-  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr window, uint flags);
-  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point point);
-  [DllImport("user32.dll")] private static extern IntPtr RealChildWindowFromPoint(IntPtr window, Point point);
-  [DllImport("user32.dll", CharSet=CharSet.Unicode)]
-  private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr childAfter, string className, string title);
-  [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="GetClassNameW")]
-  private static extern int GetClassName(IntPtr window, System.Text.StringBuilder name, int capacity);
-  [DllImport("user32.dll", SetLastError=true)] private static extern bool GetClientRect(IntPtr window, out Rect rect);
-  [DllImport("user32.dll", SetLastError=true)] private static extern bool ClientToScreen(IntPtr window, ref Point point);
-  [DllImport("user32.dll", SetLastError=true)] private static extern bool ScreenToClient(IntPtr window, ref Point point);
-  [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
-  [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
-  private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
-  public static int[] ClientBounds(IntPtr window) {
-    Rect rect;
-    if (!GetClientRect(window, out rect)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename GetClientRect");
-    var first = new Point { X=rect.Left, Y=rect.Top };
-    var last = new Point { X=rect.Right, Y=rect.Bottom };
-    if (!ClientToScreen(window, ref first) || !ClientToScreen(window, ref last))
-      throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename ClientToScreen");
-    return new[] { first.X, first.Y, last.X, last.Y };
-  }
-  public static int[] WorkBounds(IntPtr window) {
-    var info = new MonitorInfo { Size=Marshal.SizeOf(typeof(MonitorInfo)) };
-    if (!GetMonitorInfo(MonitorFromWindow(window, 2), ref info))
-      throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename GetMonitorInfo");
-    return new[] { info.Work.Left, info.Work.Top, info.Work.Right, info.Work.Bottom };
-  }
-  private static bool ContainsScreenPoint(IntPtr window, int x, int y) {
-    Rect rect;
-    if (!GetClientRect(window, out rect)) return false;
-    var first = new Point { X=rect.Left, Y=rect.Top };
-    var last = new Point { X=rect.Right, Y=rect.Bottom };
-    if (!ClientToScreen(window, ref first) || !ClientToScreen(window, ref last)) return false;
-    return x >= first.X && x < last.X && y >= first.Y && y < last.Y;
-  }
-  public static IntPtr ChildAt(IntPtr window, int x, int y) {
-    var point = new Point { X=x, Y=y };
-    if (!ScreenToClient(window, ref point)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename ScreenToClient");
-    IntPtr direct = RealChildWindowFromPoint(window, point);
-    var rootClass = new System.Text.StringBuilder(128);
-    var childClass = new System.Text.StringBuilder(128);
-    GetClassName(window, rootClass, rootClass.Capacity);
-    if (direct == IntPtr.Zero &&
-        String.Equals(rootClass.ToString(), "GraphCodeSheetHost", StringComparison.Ordinal)) {
-      IntPtr viewport = FindWindowEx(window, IntPtr.Zero, "GraphCodeSheetViewport", null);
-      if (ContainsScreenPoint(viewport, x, y)) direct = viewport;
-    }
-    GetClassName(direct, childClass, childClass.Capacity);
-    if (!String.Equals(rootClass.ToString(), "GraphCodeSheetHost", StringComparison.Ordinal) ||
-        !String.Equals(childClass.ToString(), "GraphCodeSheetViewport", StringComparison.Ordinal))
-      return direct;
-    IntPtr content = FindWindowEx(direct, IntPtr.Zero, "GraphCodeWindowsDialogContent", null);
-    if (content == IntPtr.Zero) return direct;
-    var viewportPoint = new Point { X=x, Y=y };
-    if (!ScreenToClient(direct, ref viewportPoint))
-      throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename viewport ScreenToClient");
-    IntPtr viewportChild = RealChildWindowFromPoint(direct, viewportPoint);
-    if (viewportChild != content &&
-        !(viewportChild == IntPtr.Zero && ContainsScreenPoint(content, x, y))) return direct;
-    var contentPoint = new Point { X=x, Y=y };
-    if (!ScreenToClient(content, ref contentPoint))
-      throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename content ScreenToClient");
-    IntPtr nested = RealChildWindowFromPoint(content, contentPoint);
-    return nested == IntPtr.Zero ? content : nested;
-  }
-}
-'@
-  }
+  & (Join-Path $PSScriptRoot "Import-CompiledValidationAssembly.ps1") -AssemblyPath $validationAssemblyPath -RequiredType "GraphCodeMultiProjectRenameNative" | Out-Null
   $api = New-Object PSObject
   $api | Add-Member NoteProperty ExpectedTitle $expectedTitle
   $api | Add-Member ScriptMethod ProcessId { param($window) [GraphCodeUiaGateState]::WindowProcessId($window) }
@@ -5418,17 +4523,7 @@ function Test-MultiProjectRenameReceipt($before, $after, [string] $path, [string
 }
 
 function Initialize-MultiProjectProcessJob([string] $sourcePath) {
-  if ("StandaloneProcessJob" -as [type]) { return }
-  $errors = $null
-  $ast = [Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$null, [ref]$errors)
-  if ($errors.Count -ne 0) { throw "MULTIPROJECT_JOB: approved standalone ownership source does not parse" }
-  $definitions = @($ast.FindAll({
-    param($node)
-    $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
-      $node.Value.Contains("public static class StandaloneProcessJob")
-  }, $true))
-  if ($definitions.Count -ne 1) { throw "MULTIPROJECT_JOB: exact approved job ownership definition missing" }
-  Add-Type $definitions[0].Value
+  & (Join-Path $PSScriptRoot "Import-CompiledValidationAssembly.ps1") -AssemblyPath $validationAssemblyPath -RequiredType "GraphCode.Validation.Ownership.StandaloneProcessJob" | Out-Null
 }
 
 function Wait-MultiProjectCapture($capture, [int] $timeoutMilliseconds = 5000) {
@@ -5458,51 +4553,61 @@ function Complete-MultiProjectCapture($capture, [string] $logDirectory, [int] $t
   $drained = $false
   try {
     if ($capture.assigned) {
-      [StandaloneProcessJob]::Terminate($capture.job)
+      [GraphCode.Validation.Ownership.StandaloneProcessJob]::Terminate($capture.job)
       $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
-      [StandaloneProcessJob]::WaitForEmpty($capture.job, $remaining)
-      $empty = [StandaloneProcessJob]::Active($capture.job) -eq 0
+      [GraphCode.Validation.Ownership.StandaloneProcessJob]::WaitForEmpty($capture.job, $remaining)
+      $empty = [GraphCode.Validation.Ownership.StandaloneProcessJob]::Active($capture.job) -eq 0
       if (-not $empty) { throw "owned job census is not empty" }
-    } elseif ($capture.rootProcess -and -not $capture.rootProcess.HasExited) {
-      if ($capture.rootProcess.StartTime.ToUniversalTime().Ticks -ne $capture.rootStartUtcTicks) {
-        throw "unassigned root identity changed"
-      }
-      Stop-Process -Id $capture.rootPID -Force
+    } else {
+      # The assignment barrier was never released; only the retained launcher exists.
+      if ($capture.rootProcess -and -not $capture.rootProcess.HasExited) { $capture.rootProcess.Kill() }
+      $empty = $true
     }
     $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
-    $exited = $capture.rootProcess.WaitForExit($remaining)
+    $exited = -not $capture.rootProcess -or $capture.rootProcess.WaitForExit($remaining)
     if (-not $exited) { throw "root did not exit within shared teardown deadline" }
     if ($capture.process -and $capture.process -ne $capture.rootProcess) {
       $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
-      if (-not $capture.process.WaitForExit($remaining)) { throw "retained target did not exit within shared teardown deadline" }
+      if (-not $capture.process.WaitForExit($remaining)) {
+        $exited = $false
+        throw "retained target did not exit within shared teardown deadline"
+      }
     }
   } catch { $errors.Add("owned exit/quiescence: $($_.Exception.Message)") }
   try {
-    if ($capture.stdout -and $capture.stderr) {
+    $readers = @(@($capture.stdout, $capture.stderr) | Where-Object { $null -ne $_ })
+    if ($readers.Count) {
       $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
-      $drained = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($capture.stdout, $capture.stderr), $remaining)
+      $drained = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]$readers, $remaining)
       if (-not $drained) { throw "stdout=$($capture.stdout.Status) stderr=$($capture.stderr.Status) shared pipe-drain deadline exceeded" }
       foreach ($stream in @("stdout", "stderr")) {
         $task = $capture[$stream]
+        if ($null -eq $task) { continue }
         if ($task.Status -ne [Threading.Tasks.TaskStatus]::RanToCompletion) { throw "$stream reader did not successfully complete" }
         try {
-          $task.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $logDirectory ($capture.stem + "-$stream.log"))
+          if (-not $capture.streamingLogs) {
+            $task.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $logDirectory ($capture.stem + "-$stream.log"))
+          }
         } catch { $errors.Add("$stream capture persistence: $($_.Exception.Message)") }
       }
-    }
+    } else { $drained = $true }
   } catch { $errors.Add("redirected pipe drain: $($_.Exception.Message)") }
-  foreach ($stream in @("StandardOutput", "StandardError")) {
-    try { if ($capture.rootProcess) { $capture.rootProcess.$stream.Dispose() } }
-    catch { $errors.Add("disposing $stream reader: $($_.Exception.Message)") }
+  $release = $exited -and $empty -and $drained
+  if ($release) {
+    foreach ($stream in @("StandardOutput", "StandardError")) {
+      try { if ($capture.rootProcess) { $capture.rootProcess.$stream.Dispose() } }
+      catch { $errors.Add("disposing $stream reader: $($_.Exception.Message)") }
+    }
+    try {
+      if ($capture.job -ne [IntPtr]::Zero) { [GraphCode.Validation.Ownership.StandaloneProcessJob]::Close($capture.job) }
+    } catch { $errors.Add("closing owned job: $($_.Exception.Message)") }
+    try {
+      if ($capture.process -and $capture.process -ne $capture.rootProcess) { $capture.process.Dispose() }
+    } catch { $errors.Add("disposing retained target: $($_.Exception.Message)") }
+    try { if ($capture.rootProcess) { $capture.rootProcess.Dispose() } }
+    catch { $errors.Add("disposing retained root: $($_.Exception.Message)") }
+    $capture.cleaned = $true
   }
-  try {
-    if ($capture.job -ne [IntPtr]::Zero) { [StandaloneProcessJob]::Close($capture.job) }
-  } catch { $errors.Add("closing owned job: $($_.Exception.Message)") }
-  try {
-    if ($capture.process -and $capture.process -ne $capture.rootProcess) { $capture.process.Dispose() }
-  } catch { $errors.Add("disposing retained target: $($_.Exception.Message)") }
-  try { if ($capture.rootProcess) { $capture.rootProcess.Dispose() } }
-  catch { $errors.Add("disposing retained root: $($_.Exception.Message)") }
   $diagnostic = [ordered]@{
     identity = $identity; rootExited = $exited; ownedJobEmpty = $empty
     redirectedReadersDrained = $drained; deadlineMilliseconds = $timeoutMilliseconds
@@ -5514,23 +4619,52 @@ function Complete-MultiProjectCapture($capture, [string] $logDirectory, [int] $t
   Write-Host ("MULTIPROJECT_CAPTURE_TEARDOWN=" + ($diagnostic | ConvertTo-Json -Depth 8 -Compress))
   if ($errors.Count -gt 0) {
     $message = "MULTIPROJECT_TEARDOWN: $identity; $($errors -join '; ')"
+    $failure = if (-not $release) { New-UiaOwnershipFailure $message } else { [InvalidOperationException]::new($message) }
+    $failure.Data["UiaRetainedCapture"] = $capture
     if ($primaryError) {
+      foreach ($key in $failure.Data.Keys) { $primaryError.Exception.Data[$key] = $failure.Data[$key] }
       $primaryError.Exception.Data["MultiProjectTeardown:$($capture.stem)"] = $message
       Write-Warning $message -WarningAction Continue
-    } else { throw $message }
+    } else { throw $failure }
   }
   return $diagnostic
+}
+
+function Initialize-UiaOwnedStreamCapture() {
+  & (Join-Path $PSScriptRoot "Import-CompiledValidationAssembly.ps1") -AssemblyPath $validationAssemblyPath -RequiredType "GraphCode.Validation.Ownership.UiaOwnedStreamCapture" | Out-Null
+}
+
+function Start-UiaOwnedProcess(
+  [string] $file, [string[]] $arguments, [string] $standardOutputPath,
+  [string] $standardErrorPath, [switch] $Hidden
+) {
+  $environment = @{}
+  foreach ($entry in [Environment]::GetEnvironmentVariables("Process").GetEnumerator()) {
+    $environment[$entry.Key] = $entry.Value
+  }
+  $directory = Split-Path -Parent $standardErrorPath
+  $stem = [IO.Path]::GetFileNameWithoutExtension($standardErrorPath) -replace "-stderr$", ""
+  if (-not $standardOutputPath) { $standardOutputPath = Join-Path $directory "$stem-stdout.log" }
+  $capture = Start-MultiProjectOwnedProcess -file $file -arguments $arguments -environment $environment `
+    -stem $stem -Visible:(-not $Hidden) -RegisterForUia -standardOutputPath $standardOutputPath `
+    -standardErrorPath $standardErrorPath -logDirectory $directory -targetWorkingDirectory (Get-Location).ProviderPath
+  return $capture.process
 }
 
 function Start-MultiProjectOwnedProcess(
   [string] $file, [string[]] $arguments, [hashtable] $environment, [string] $stem,
   [string] $jobSourcePath = (Join-Path $PSScriptRoot "Tests\Packaging.Standalone.Tests.ps1"),
-  [switch] $Visible
+  [switch] $Visible, [switch] $RegisterForUia,
+  [string] $standardOutputPath, [string] $standardErrorPath,
+  [string] $logDirectory = $environment.TEMP,
+  [string] $targetWorkingDirectory = $environment.TEMP
 ) {
   Initialize-MultiProjectProcessJob $jobSourcePath
   $gate = Join-Path $environment.TEMP ("mp-start-" + [guid]::NewGuid().ToString("N"))
   $identityPath = $gate + ".identity"
-  $launch = @{ gate = $gate; identity = $identityPath; file = $file; arguments = @($arguments); visible = [bool]$Visible } |
+  $launch = @{ gate = $gate; identity = $identityPath; file = $file; arguments = @($arguments)
+    visible = [bool]$Visible; workingDirectory = $targetWorkingDirectory
+    lifetimeMilliseconds = $(if ($RegisterForUia) { -1 } else { 600000 }) } |
     ConvertTo-Json -Depth 8 -Compress
   $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($launch))
   $command = @'
@@ -5544,15 +4678,18 @@ while (-not [IO.File]::Exists($launch.gate)) {
 $start = [Diagnostics.ProcessStartInfo]::new($launch.file)
 $start.UseShellExecute = $false
 $start.CreateNoWindow = -not $launch.visible
+$start.RedirectStandardInput = $true
+$start.WorkingDirectory = $launch.workingDirectory
 foreach ($argument in $launch.arguments) { $start.ArgumentList.Add([string]$argument) }
 $target = [Diagnostics.Process]::Start($start)
+$target.StandardInput.Close()
 try {
   $null = $target.Handle
   $temporaryIdentity = $launch.identity + ".pending"
   @{ pid = $target.Id; startUtcTicks = $target.StartTime.ToUniversalTime().Ticks } |
     ConvertTo-Json -Compress | Set-Content -LiteralPath $temporaryIdentity
   [IO.File]::Move($temporaryIdentity, $launch.identity)
-  if (-not $target.WaitForExit(600000)) { throw "Owned target exceeded ten-minute launch lifetime" }
+  if (-not $target.WaitForExit($launch.lifetimeMilliseconds)) { throw "Owned target exceeded its launch lifetime" }
   exit $target.ExitCode
 } finally { $target.Dispose() }
 '@
@@ -5572,17 +4709,29 @@ try {
   foreach ($argument in @("-NoProfile", "-NonInteractive", "-EncodedCommand",
       [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command)))) { $start.ArgumentList.Add($argument) }
   $capture = [ordered]@{ process = $null; rootProcess = $null; rootPID = $null; rootStartUtcTicks = $null
-    targetPID = $null; targetStartUtcTicks = $null; job = [StandaloneProcessJob]::Create()
-    assigned = $false; stdout = $null; stderr = $null; stem = $stem }
+    targetPID = $null; targetStartUtcTicks = $null; job = [GraphCode.Validation.Ownership.StandaloneProcessJob]::Create()
+    assigned = $false; stdout = $null; stderr = $null; stem = $stem
+    cleaned = $false; streamingLogs = [bool]$standardOutputPath; logDirectory = $logDirectory }
+  if ($RegisterForUia) {
+    if ($null -eq $script:UiaGateOwnedCaptures) { $script:UiaGateOwnedCaptures = [Collections.Generic.List[object]]::new() }
+    $script:UiaGateOwnedCaptures.Add($capture)
+  }
   try {
     $root = [Diagnostics.Process]::Start($start)
     $capture.rootProcess = $root
     $capture.rootPID = $root.Id
     $capture.rootStartUtcTicks = $root.StartTime.ToUniversalTime().Ticks
     $handle = $root.Handle
-    $capture.stdout = $root.StandardOutput.ReadToEndAsync()
-    $capture.stderr = $root.StandardError.ReadToEndAsync()
-    [StandaloneProcessJob]::Assign($capture.job, $handle)
+    if ($standardOutputPath) {
+      Initialize-UiaOwnedStreamCapture
+      $capture.stdout = [GraphCode.Validation.Ownership.UiaOwnedStreamCapture]::Read($root.StandardOutput, $standardOutputPath)
+      $capture.stderr = [GraphCode.Validation.Ownership.UiaOwnedStreamCapture]::Read($root.StandardError, $standardErrorPath)
+      if ($capture.stdout.IsFaulted -or $capture.stderr.IsFaulted) { throw "UIA owned stream could not open its exact log paths" }
+    } else {
+      $capture.stdout = $root.StandardOutput.ReadToEndAsync()
+      $capture.stderr = $root.StandardError.ReadToEndAsync()
+    }
+    [GraphCode.Validation.Ownership.StandaloneProcessJob]::Assign($capture.job, $handle)
     $capture.assigned = $true
     [IO.File]::WriteAllText($gate, "assigned")
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -5602,10 +4751,13 @@ try {
     $capture.process = $target
     $capture.targetPID = $target.Id
     $capture.targetStartUtcTicks = $identity.startUtcTicks
+    Initialize-UiaOwnedStreamCapture
+    [GraphCode.Validation.Ownership.UiaOwnedStreamCapture]::RequireJobMember($target.Handle, $capture.job)
+    if ("GraphCodeUiaGateState" -as [type]) { [GraphCodeUiaGateState]::RetainProcess($target) }
     return $capture
   } catch {
     $primary = $_
-    $null = Complete-MultiProjectCapture $capture $environment.TEMP 5000 $primary
+    $null = Complete-MultiProjectCapture $capture $logDirectory 5000 $primary
     throw
   }
 }
@@ -6064,7 +5216,7 @@ function Invoke-MultiProjectRenamePhase {
       $rename = @(Get-PopupMenuItems $popup | Where-Object { $_.Text -like "Rename...*" -and $_.Enabled })
     }
     Require ($rename.Count -eq 1) "multi-project node popup lacks one enabled Rename"
-    $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($popup, $multiWindow, [int]$rename[0].Position, $rename[0].Id)
+    $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($popup, $multiWindow, [int]$rename[0].Position, $rename[0].Id, [uint32]$multiProcess.Id)
     Require ($null -ne $click) "multi-project native Rename item was not hit"
     $renameProcess = $multiProcess
     $renameShellWindow = $multiWindow
@@ -6224,7 +5376,7 @@ function Invoke-MultiProjectRenamePhase {
     $primaryError = $_
     throw
   } finally {
-    $cleanupFailures = [Collections.Generic.List[string]]::new()
+    $cleanupFailures = [Collections.Generic.List[Exception]]::new()
     $failureChildren = [Collections.Generic.List[object]]::new()
     foreach ($child in @($peerChild, $shellChild)) {
       if ($null -ne $child) {
@@ -6245,7 +5397,7 @@ function Invoke-MultiProjectRenamePhase {
           $failureChildren.Add($observed)
         }
         try { $null = Complete-MultiProjectCapture $child $logDirectory 5000 $primaryError }
-        catch { $cleanupFailures.Add($_.Exception.Message) }
+        catch { $cleanupFailures.Add($_.Exception) }
       }
     }
     if ($primaryError) {
@@ -6253,13 +5405,31 @@ function Invoke-MultiProjectRenamePhase {
         $failureChildren.ToArray() $phaseStartedUtc $phaseClock.ElapsedMilliseconds
     }
     if ($cleanupFailures.Count -gt 0) {
-      $message = "MULTIPROJECT_PHASE_TEARDOWN: $($cleanupFailures -join '; ')"
-      if ($primaryError) {
-        $primaryError.Exception.Data["MultiProjectPhaseTeardown"] = $message
-        Write-Warning $message -WarningAction Continue
-      } else { throw $message }
+      $message = "MULTIPROJECT_PHASE_TEARDOWN: $($cleanupFailures.Message -join '; ')"
+      $actions = @($cleanupFailures | ForEach-Object {
+        $cleanupFailure = $_
+        { throw $cleanupFailure }.GetNewClosure()
+      })
+      try { Invoke-UiaCleanupActions $actions }
+      catch {
+        if ($primaryError) {
+          $primaryError.Exception.Data["MultiProjectPhaseTeardown"] = $message
+          $primaryError.Exception.Data["MultiProjectCleanupFailure"] = $_.Exception
+          foreach ($key in $_.Exception.Data.Keys) { $primaryError.Exception.Data[$key] = $_.Exception.Data[$key] }
+          Write-Warning $message -WarningAction Continue
+        } else { throw }
+      }
     }
   }
+}
+
+$cardsPilotEnvironment = [Environment]::GetEnvironmentVariables("Process")
+if ($cardsPilotEnvironment.Contains("GRAPHCODE_CARDS_NATIVE_ACCEPTANCE_PLAN")) {
+  Require (-not [string]::IsNullOrWhiteSpace($cardsPilotEnvironment["GRAPHCODE_CARDS_NATIVE_ACCEPTANCE_PLAN"])) `
+    "Cards native acceptance requires the explicit owned plan path"
+  . (Join-Path $PSScriptRoot "CardsAcceptance.Live.ps1")
+  Invoke-CardsNativePilot $cardsPilotEnvironment["GRAPHCODE_CARDS_NATIVE_ACCEPTANCE_PLAN"]
+  return
 }
 
 $oldZmx = [Environment]::GetEnvironmentVariable("GRAPHCODE_ZMX")
@@ -6296,6 +5466,7 @@ $sandboxPath = $null
 $sandboxCreated = $false
 $sandboxCleanupError = $null
 $gateFailure = $null
+$gateDpiScope = $null
 $fixtureProjectPath = $null
 $fixtureSafePath = $null
 $fixtureUnsafePath = $null
@@ -6327,6 +5498,7 @@ if ($providerZmxPath) {
   }
 }
 try {
+  $gateDpiScope = [GraphCodeUiaGateState]::EnterPhysicalDpiCoordinates()
   $tempRoot = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
     [IO.Path]::GetTempPath()
   } else {
@@ -6402,13 +5574,7 @@ try {
     [Text.UTF8Encoding]::new($false)
   )
   Write-Host ("UIA_PRELAUNCH_DIAGNOSTICS=" + $prelaunchJson)
-  if ($ArgumentList.Count -gt 0) {
-    $process = Start-Process -FilePath $Shell -ArgumentList $ArgumentList -PassThru -WindowStyle Normal `
-      -RedirectStandardOutput $shellOutputPath -RedirectStandardError $shellErrorPath
-  } else {
-    $process = Start-Process -FilePath $Shell -PassThru -WindowStyle Normal `
-      -RedirectStandardOutput $shellOutputPath -RedirectStandardError $shellErrorPath
-  }
+  $process = Start-UiaOwnedProcess $Shell $ArgumentList $shellOutputPath $shellErrorPath
 
   $root = $null
   for ($i = 0; $i -lt 160; $i++) {
@@ -6615,6 +5781,7 @@ try {
     }) | Select-Object -First 1
   Require ($null -ne $updateBanner) `
     "sidebar update banner did not expose its published UIA target"
+  Wait-UiaSupervisedForeground $process $shellWindow
   Require (Ensure-ShellForeground $shellWindow "sidebar update banner click") `
     "GraphCode shell did not reacquire foreground before the sidebar update banner click"
   $focusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
@@ -7158,6 +6325,11 @@ try {
     viewportIntersectionRequired = $true
   } | ConvertTo-Json -Compress -Depth 5))
   if ($CycleHierarchyOnly) {
+    $originalGraphSnapshot = @(Get-DirectChildren $graph $rawWalker | ForEach-Object {
+      [ordered]@{automationId=[string]$_.Current.AutomationId;name=[string]$_.Current.Name
+        processId=[int]$_.Current.ProcessId;parentId=[string]$rawWalker.GetParent($_).Current.AutomationId
+        controlType=[string]$_.Current.ControlType.ProgrammaticName}
+    })
     Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 23)) `
       "cycle hierarchy fixture mutation was rejected"
     Start-Sleep -Milliseconds 200
@@ -7225,7 +6397,7 @@ try {
         $mainReason[0].Current.BoundingRectangle.Bottom)
     }
 
-    $selectedCard[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $mainInspect[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
     Start-Sleep -Milliseconds 150
     $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
     $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
@@ -7233,7 +6405,11 @@ try {
       $_.Current.AutomationId -match '^workspace-show-graph-' -and $_.Current.Name -ceq 'Show in Graph'
     })
     Require ($showGraph.Count -eq 1) `
-      "selected Main cycle card activation did not enter its workspace"
+      "Main Inspect action did not enter its workspace"
+    $mainWorkspaceId = Get-MultiProjectAutomationId "workspace-loop-bar" "20000000-0000-4000-8000-000000000001"
+    Require (@(Get-DirectChildren $graph $rawWalker | Where-Object {
+      $_.Current.AutomationId -ceq $mainWorkspaceId -and $_.Current.ProcessId -eq $process.Id
+    }).Count -eq 1) "Main Inspect opened a different loop workspace"
     $showGraph[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
     Start-Sleep -Milliseconds 150
     $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
@@ -7300,11 +6476,128 @@ try {
           $unselectedReason[0].Current.BoundingRectangle.Bottom)
       }
       selectedActivation = [ordered]@{
-        invokedCardAutomationId = [string]$selectedCard[0].Current.AutomationId
+        invokedActionAutomationId = $selectedEvidence.inspectAutomationId
+        targetCardAutomationId = $selectedEvidence.cardAutomationId
+        workspaceLoopBarAutomationId = $mainWorkspaceId
         workspaceShowGraphObserved = $true
         stableIdentityAfterReturn = [string]$unselectedCard[0].Current.AutomationId
       }
     }
+    Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 24)) `
+      "Reply action fixture mutation was rejected"
+    $projectRoot = [Environment]::GetEnvironmentVariable('GRAPHCODE_GATE_CWD')
+    $goalId = '11111111-1111-4111-8111-111111111111'
+    $compositeId = '22222222-2222-4222-8222-222222222222'
+    $replyCardIds = @(
+      (Get-MultiProjectAutomationId "project-card" $projectRoot $goalId),
+      (Get-MultiProjectAutomationId "project-card" $projectRoot $compositeId)
+    )
+    $replyProbe = Wait-ForGraphChildren $root $rawWalker `
+      { $_.Current.AutomationId -match '^(canvas-card-|attention-action-)' } `
+      { param($items)
+        @($items | Where-Object { $_.Current.Name -ceq 'Reply' }).Count -eq 2 -and
+        @($items | Where-Object { $_.Current.AutomationId -cin $replyCardIds }).Count -eq 2 }
+    $goalCard = @($replyProbe.Items | Where-Object { $_.Current.AutomationId -ceq $replyCardIds[0] })
+    Require ($goalCard.Count -eq 1 -and $goalCard[0].Current.Name -ceq 'Reply Goal' -and
+      $goalCard[0].Current.ProcessId -eq $process.Id) "Goal Reply fixture owner was not exact"
+    $goalReply = @($replyProbe.Items | Where-Object {
+      $_.Current.AutomationId -match '^attention-action-' -and $_.Current.Name -ceq 'Reply' -and
+      $_.Current.ProcessId -eq $process.Id -and
+      $goalCard[0].Current.BoundingRectangle.Contains($_.Current.BoundingRectangle)
+    })
+    Require ($goalReply.Count -eq 1) "Goal card did not own exactly one Reply action"
+    $goalReplyId = [string]$goalReply[0].Current.AutomationId
+    $goalReply[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $goalWorkspaceId = Get-MultiProjectAutomationId "workspace-loop-bar" $goalId
+    $goalWorkspace = Wait-ForGraphChildren $root $rawWalker `
+      { $_.Current.AutomationId -match '^workspace-(loop-bar|show-graph)-' } `
+      { param($items)
+        @($items | Where-Object { $_.Current.AutomationId -ceq $goalWorkspaceId }).Count -eq 1 -and
+        @($items | Where-Object { $_.Current.Name -ceq 'Show in Graph' }).Count -eq 1 }
+    $goalShowGraph = @($goalWorkspace.Items | Where-Object { $_.Current.Name -ceq 'Show in Graph' })
+    Require ($goalShowGraph.Count -eq 1 -and @($goalWorkspace.Items | Where-Object {
+      $_.Current.AutomationId -ceq $goalWorkspaceId -and $_.Current.ProcessId -eq $process.Id
+    }).Count -eq 1) "Goal Reply did not publish its exact workspace and return control"
+    $goalShowGraph[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $replyProbe = Wait-ForGraphChildren $root $rawWalker `
+      { $_.Current.AutomationId -match '^(canvas-card-|attention-action-)' } `
+      { param($items)
+        @($items | Where-Object { $_.Current.AutomationId -ceq $goalReplyId }).Count -eq 1 -and
+        @($items | Where-Object { $_.Current.AutomationId -cin $replyCardIds }).Count -eq 2 }
+    $compositeCard = @($replyProbe.Items | Where-Object { $_.Current.AutomationId -ceq $replyCardIds[1] })
+    Require ($compositeCard.Count -eq 1 -and $compositeCard[0].Current.Name -ceq 'Reply Composite' -and
+      $compositeCard[0].Current.ProcessId -eq $process.Id) "Composite Reply fixture owner was not exact"
+    $compositeReply = @($replyProbe.Items | Where-Object {
+      $_.Current.AutomationId -match '^attention-action-' -and $_.Current.Name -ceq 'Reply' -and
+      $_.Current.ProcessId -eq $process.Id -and
+      $compositeCard[0].Current.BoundingRectangle.Contains($_.Current.BoundingRectangle)
+    })
+    Require ($compositeReply.Count -eq 1) "Composite card did not own exactly one Reply action"
+    $compositeReplyId = [string]$compositeReply[0].Current.AutomationId
+    $compositeReply[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $nestedIds = @(
+      (Get-MultiProjectAutomationId "project-card" $projectRoot "55555555-5555-4555-8555-555555555555"),
+      (Get-MultiProjectAutomationId "project-card" $projectRoot "66666666-6666-4666-8666-666666666666")
+    )
+    $expectedBackId = Get-MultiProjectAutomationId "composite-back" $compositeId
+    $nestedProbe = Wait-ForGraphChildren $root $rawWalker `
+      { $_.Current.AutomationId -match '^canvas-card-' } `
+      { param($items)
+        @($items | Where-Object { $_.Current.AutomationId -cin $nestedIds }).Count -eq 2 -and
+        @($items | Where-Object { $_.Current.AutomationId -ceq $expectedBackId }).Count -eq 1 -and
+        @($items | Where-Object { $_.Current.AutomationId -cin $replyCardIds }).Count -eq 0 }
+    $backSnapshot = @($nestedProbe.Items | ForEach-Object {
+      [ordered]@{ automationId=[string]$_.Current.AutomationId; name=[string]$_.Current.Name
+        processId=[int]$_.Current.ProcessId; parentId=[string]$rawWalker.GetParent($_).Current.AutomationId }
+    })
+    $backDecision = Get-CardsCompositeBackDecision $backSnapshot $expectedBackId $process.Id
+    Require ($backDecision.ready -and @($nestedProbe.Items | Where-Object {
+      $_.Current.AutomationId -cin $nestedIds
+    }).Count -eq 2 -and @($nestedProbe.Items | Where-Object {
+      $_.Current.AutomationId -cin $replyCardIds
+    }).Count -eq 0) "Composite Reply did not publish its exact nested canvas and unique owned parent breadcrumb"
+    $back = @($nestedProbe.Items | Where-Object { $_.Current.AutomationId -ceq $expectedBackId })
+    $backId = [string]$back[0].Current.AutomationId
+    $back[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $restoredReply = Wait-ForGraphChildren $root $rawWalker `
+      { $_.Current.AutomationId -match '^(canvas-card-|attention-action-)' } `
+      { param($items)
+        @($items | Where-Object { $_.Current.AutomationId -cin $replyCardIds }).Count -eq 2 -and
+        @($items | Where-Object { $_.Current.AutomationId -cin @($goalReplyId, $compositeReplyId) }).Count -eq 2 }
+    Require (@($restoredReply.Items | Where-Object {
+      $_.Current.AutomationId -cin $replyCardIds
+    }).Count -eq 2 -and @($restoredReply.Items | Where-Object {
+      $_.Current.AutomationId -cin @($goalReplyId, $compositeReplyId)
+    }).Count -eq 2) "Composite Back did not restore exact parent cards and Reply identities"
+    $evidence.replyActions = [ordered]@{
+      goal = [ordered]@{ invokedActionAutomationId = $goalReplyId; workspaceLoopBarAutomationId = $goalWorkspaceId }
+      composite = [ordered]@{ invokedActionAutomationId = $compositeReplyId; nestedCardAutomationIds = $nestedIds; backAutomationId = $backId }
+      restoredParentCardAutomationIds = @($restoredReply.Items | Where-Object {
+        $_.Current.AutomationId -cin $replyCardIds
+      } | ForEach-Object { [string]$_.Current.AutomationId })
+    }
+    Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 20)) `
+      "original graph fixture restoration was rejected"
+    $restoredOriginal = Wait-ForGraphChildren $root $rawWalker `
+      { $_.Current.AutomationId -cin $replyCardIds } `
+      { param($items)
+        $items.Count -eq 2 -and @($items | Where-Object { $_.Current.AutomationId -cin $replyCardIds }).Count -eq 2 -and
+        (@($items | ForEach-Object { $_.Current.Name }) -join '|') -ceq 'UIA loop A|UIA loop B' }
+    Require ($restoredOriginal.Items.Count -eq 2 -and @($restoredOriginal.Items | Where-Object {
+      $_.Current.AutomationId -cin $replyCardIds
+    }).Count -eq 2 -and (@($restoredOriginal.Items | ForEach-Object {
+      $_.Current.Name
+    }) -join '|') -ceq 'UIA loop A|UIA loop B') "Original owned fixture graph was not restored"
+    $restoredGraphSnapshot = @($restoredOriginal.Children | ForEach-Object {
+      [ordered]@{automationId=[string]$_.Current.AutomationId;name=[string]$_.Current.Name
+        processId=[int]$_.Current.ProcessId;parentId=[string]$rawWalker.GetParent($_).Current.AutomationId
+        controlType=[string]$_.Current.ControlType.ProgrammaticName}
+    })
+    $restorationDecision=Get-CardsFixtureRestorationDecision $originalGraphSnapshot $restoredGraphSnapshot $process.Id
+    Require $restorationDecision.ready "Original complete graph-child identities, multiplicities, owners or roles were not restored"
+    $evidence.originalFixtureRestored = @($restoredOriginal.Items | ForEach-Object { [string]$_.Current.AutomationId })
+    $evidence.originalGraphChildren=$originalGraphSnapshot
+    $evidence.restoredGraphChildren=$restoredGraphSnapshot
     $json = $evidence | ConvertTo-Json -Compress -Depth 8
     $hasher = [Security.Cryptography.SHA256]::Create()
     try {
@@ -7703,27 +6996,9 @@ try {
   $edgeDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
     "GraphCodeNativeForm" "Create or edit edge" "connector drag Create or edit edge sheet"
   Require ($null -ne $edgeDialog) "dragging from the connector to the target card did not open the Create or edit edge dialog"
-  # NativeForms.zig's edge dialog renders locked From/To endpoints as ES_READONLY
-  # Edit controls, but this app's custom UIA provider (AccessibilityProvider.cpp)
-  # exposes native dialog fields generically as ControlType.Pane elements carrying
-  # their text in the Name property (automationId 9100/9101 for From/To) rather than
-  # bridging them as ControlType.Edit with a ValuePattern.
-  $edgeFromElement = $edgeDialog.FindFirst(
-    [System.Windows.Automation.TreeScope]::Descendants,
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::AutomationIdProperty, "9100"
-    ))
-  )
-  $edgeToElement = $edgeDialog.FindFirst(
-    [System.Windows.Automation.TreeScope]::Descendants,
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::AutomationIdProperty, "9101"
-    ))
-  )
-  Require (($null -ne $edgeFromElement) -and ($null -ne $edgeToElement)) `
-    "Create or edit edge dialog did not expose its locked From/To fields"
-  $edgeFromValue = $edgeFromElement.Current.Name
-  $edgeToValue = $edgeToElement.Current.Name
+  $edgeEndpoints = Read-UiaReadonlyEdgeEndpoints $edgeDialog $process.Id $shellWindow 'Create or edit edge'
+  $edgeFromValue = $edgeEndpoints.source
+  $edgeToValue = $edgeEndpoints.target
   Require ($edgeFromValue -eq "11111111-1111-4111-8111-111111111111") `
     "connector drag did not lock the From endpoint to the dragged source loop: $edgeFromValue"
   Require ($edgeToValue -eq "22222222-2222-4222-8222-222222222222") `
@@ -8970,6 +8245,7 @@ try {
   Require ($concurrencyStressEvidence.completedReads -eq $concurrencyStressEvidence.requestedReads) `
     "UIA read stress completed $($concurrencyStressEvidence.completedReads) of $($concurrencyStressEvidence.requestedReads) reads during fixture reorder/removal"
   Remove-Job -Job $stressJob -Force
+  $stressJob = $null
   $remainingRows = @(Get-DirectChildren $worktrees $rawWalker)
   $remainingRowIds = @($remainingRows | ForEach-Object { $_.Current.AutomationId })
   Assert-Ids $remainingRowIds @($unsafeRow.Current.AutomationId) "removed Worktrees"
@@ -9062,22 +8338,82 @@ try {
   Write-Host "UIA_RENAME_OUTCOME graph='$renameGraphTitle' sidebar='$renameSidebarTitle' expected='UIA renamed loop' reason=gate-forces-daemon-connection-failure"
 
   $deleteLoopTitle = 'Delete “UIA loop A”?'
+  $fitDeleteCanvas = Find-FragmentByIdWithRetry $root "fit-canvas" $rawWalker
+  Require (($null -ne $fitDeleteCanvas) -and
+           ($fitDeleteCanvas.Current.ProcessId -eq $process.Id) -and
+           ($fitDeleteCanvas.Current.Name -ceq "Fit canvas")) `
+    "Delete Loop visibility normalization omitted the exact owned Fit Canvas action"
+  $fitDeleteCanvas.GetCurrentPattern(
+    [System.Windows.Automation.InvokePattern]::Pattern
+  ).Invoke()
+  $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+  $deleteTargetVisible = $false
+  $deleteTargetBounds = $null
+  $deleteTargetOffscreen = $true
+  for ($deleteVisibilityAttempt = 0; $deleteVisibilityAttempt -lt 40; $deleteVisibilityAttempt++) {
+    $deleteTargetVisible = $false
+    $deleteCandidate = Find-FragmentById $root $renameGraphIdentity $rawWalker
+    $deleteGraph = Find-FragmentById $root "graph" $rawWalker
+    if (($null -ne $deleteCandidate) -and ($null -ne $deleteGraph) -and
+        ($deleteCandidate.Current.ProcessId -eq $process.Id) -and
+        ($deleteCandidate.Current.AutomationId -ceq $renameGraphIdentity) -and
+        ($deleteGraph.Current.ProcessId -eq $process.Id)) {
+      $deleteTargetOffscreen = $deleteCandidate.Current.IsOffscreen
+      if (-not $deleteTargetOffscreen) {
+        $deleteTargetBounds = $deleteCandidate.Current.BoundingRectangle
+        $deleteGraphBounds = $deleteGraph.Current.BoundingRectangle
+        $deleteTargetVisible = -not $deleteTargetOffscreen -and
+          -not $deleteTargetBounds.IsEmpty -and
+          $deleteTargetBounds.Width -gt 0 -and $deleteTargetBounds.Height -gt 0 -and
+          -not $deleteGraphBounds.IsEmpty -and
+          $deleteTargetBounds.Left -ge $deleteGraphBounds.Left -and
+          $deleteTargetBounds.Top -ge $deleteGraphBounds.Top -and
+          $deleteTargetBounds.Right -le $deleteGraphBounds.Right -and
+          $deleteTargetBounds.Bottom -le $deleteGraphBounds.Bottom
+        if ($deleteTargetVisible) { break }
+      }
+    }
+    Start-Sleep -Milliseconds 100
+    $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+  }
+  Require ($deleteTargetVisible) `
+    "Delete Loop same-identity target did not become visible with positive bounds inside the owned graph after 40 bounded Fit Canvas observations"
+  Write-Host ("UIA_DELETE_TARGET_VISIBLE=" + ([ordered]@{
+    attempts = $deleteVisibilityAttempt + 1
+    bounds = @(
+      [double]$deleteTargetBounds.Left,
+      [double]$deleteTargetBounds.Top,
+      [double]$deleteTargetBounds.Right,
+      [double]$deleteTargetBounds.Bottom
+    )
+    offscreen = $deleteTargetOffscreen
+  } | ConvertTo-Json -Compress))
   $deleteTarget = Find-FragmentByIdWithRetry $root $renameGraphIdentity $rawWalker
   Require ($null -ne $deleteTarget) "Delete Loop could not reacquire the renamed fixture loop identity"
   $deleteTargetSelection = $deleteTarget.GetCurrentPattern(
     [System.Windows.Automation.SelectionItemPattern]::Pattern
   )
-  $deleteTargetSelection.Select()
+  try {
+    $deleteTargetSelection.Select()
+  } catch {
+    try {
+      try {
+        Write-DeleteTargetSelectFailure $deleteTarget $deleteTargetSelection $renameGraphIdentity `
+          $process.Id $shellWindow $_ $DeleteSelectFailureReceipt
+      } catch {
+        Write-Host ("UIA_DELETE_TARGET_SELECT_TELEMETRY_FAILURE=hresult:{0}" -f $_.Exception.HResult)
+      }
+    } finally {
+      throw
+    }
+  }
   Require $deleteTargetSelection.Current.IsSelected `
     "Delete Loop could not select the fixture loop before invoking the selection-dependent command"
   Write-Host ("UIA_DELETE_LOOP_TARGET automationId='$($deleteTarget.Current.AutomationId)' " +
     "name='$($deleteTarget.Current.Name)' selected=$($deleteTargetSelection.Current.IsSelected)")
-  Require (Ensure-ShellForeground $shellWindow "Delete Loop context menu") `
-    "GraphCode shell did not reacquire foreground before the Delete Loop context menu"
-  Require ([GraphCodeUiaGateState]::PostContextMenu($shellWindow, 3)) `
-    "Delete Loop context menu request was rejected"
-  $deleteLoopPopup = Wait-ForPopupMenu $process $shellWindow "Delete Loop"
-  Require ($deleteLoopPopup -ne [IntPtr]::Zero) "Delete Loop context menu did not open"
+  $root = Restore-DeleteLoopCanvas $process $root $shellWindow $renameGraphIdentity $rawWalker
+  $deleteLoopPopup = Open-CanvasCardContextMenu $process $root $shellWindow `
+    $renameGraphIdentity $rawWalker "Delete Loop"
   $deleteLoopItems = @(Get-PopupMenuItems $deleteLoopPopup)
   $deleteLoopItem = @($deleteLoopItems | Where-Object {
     $_.Id -eq 5103 -and $_.Enabled
@@ -9085,7 +8421,7 @@ try {
   Require ($null -ne $deleteLoopItem) `
     "Delete Loop context menu omitted its enabled Delete action: $(Format-PopupMenuItems $deleteLoopItems)"
   $deleteLoopClick = [GraphCodeUiaGateState]::ClickPopupMenuItem(
-    $deleteLoopPopup, $shellWindow, [int]$deleteLoopItem.Position, [int]$deleteLoopItem.Id
+    $deleteLoopPopup, $shellWindow, [int]$deleteLoopItem.Position, [int]$deleteLoopItem.Id, [uint32]$process.Id
   )
   Require ($null -ne $deleteLoopClick) "Delete Loop context-menu action could not be clicked"
   Write-Host ("UIA_DELETE_LOOP_MENU command=$($deleteLoopItem.Id) " +
@@ -9756,8 +9092,15 @@ try {
     if ($_.Separator) { "<separator>" } else { [string]$_.Text }
   })
   Require (($plainLoopOrder -join "|") -ceq
-           "Open Terminal|Rename...`tF2|Save as Template...|<separator>|Edit Details...|<separator>|Delete Loop...`tDelete") `
+           "Open Terminal|Change to Timed…|Rename...`tF2|Save as Template...|<separator>|Edit Details...|<separator>|Export Loop...|Import Loops Here...|<separator>|Delete Loop...`tDelete") `
     "plain loop context menu had unexpected ordered items: $plainLoopDescription"
+  Require ((@($plainLoopItems | ForEach-Object { $_.Id }) -join "|") -ceq
+           "5104|5122|5101|5114|0|5100|0|5123|5124|0|5103") `
+    "plain loop context menu had unexpected command identities: $plainLoopDescription"
+  Require (@($plainLoopItems | Where-Object {
+    -not $_.Separator -and (-not $_.Enabled -or $_.Checked)
+  }).Count -eq 0) `
+    "plain loop context menu had an unexpected disabled or checked item: $plainLoopDescription"
   Require (@($plainLoopItems | Where-Object { $_.Id -eq 5102 }).Count -eq 0) `
     "succeeded loop context menu unexpectedly offered Stop: $plainLoopDescription"
   foreach ($absentId in @(5113, 5107, 5108, 5109, 5112, 5115)) {
@@ -9787,8 +9130,15 @@ try {
     if ($_.Separator) { "<separator>" } else { [string]$_.Text }
   })
   Require (($compositeLoopOrder -join "|") -ceq
-           "Open Terminal|New Child Node...|Open Group|Pilot Once…|Arm Schedule|Rename...`tF2|Save as Template...|Stop Loop`tCtrl+S|<separator>|Edit Details...|<separator>|Delete Loop...`tDelete") `
+           "Open Terminal|New Child Node...|Open Group|Pilot Once…|Arm Schedule|Rename...`tF2|Save as Template...|Stop Loop`tCtrl+S|<separator>|Edit Details...|<separator>|Export Loop...|Import Loops Here...|<separator>|Delete Loop...`tDelete") `
     "composite loop context menu had unexpected ordered items: $compositeLoopDescription"
+  Require ((@($compositeLoopItems | ForEach-Object { $_.Id }) -join "|") -ceq
+           "5104|5119|5113|5107|5108|5101|5114|5102|0|5100|0|5123|5124|0|5103") `
+    "composite loop context menu had unexpected command identities: $compositeLoopDescription"
+  Require (@($compositeLoopItems | Where-Object {
+    -not $_.Separator -and (($_.Enabled -ne ($_.Id -ne 5108)) -or $_.Checked)
+  }).Count -eq 0) `
+    "composite loop context menu had unexpected availability or checked state: $compositeLoopDescription"
   $armScheduleItem = @($compositeLoopItems | Where-Object { $_.Id -eq 5108 }) | Select-Object -First 1
   Require ($null -ne $armScheduleItem) "composite loop context menu omitted Arm Schedule (command 5108): $compositeLoopDescription"
   Require (-not $armScheduleItem.Enabled) `
@@ -9821,8 +9171,15 @@ try {
     if ($_.Separator) { "<separator>" } else { [string]$_.Text }
   })
   Require (($unwiredLoopOrder -join "|") -ceq
-           "Open Terminal|New Child Node...|Rename...`tF2|Save as Template...|Stop Loop`tCtrl+S|<separator>|Edit Details...|Wire it up|Mark as entry|<separator>|Delete Loop...`tDelete") `
+           "Open Terminal|New Child Node...|Rename...`tF2|Save as Template...|Stop Loop`tCtrl+S|<separator>|Edit Details...|Wire it up|Mark as entry|<separator>|Export Loop...|Import Loops Here...|<separator>|Delete Loop...`tDelete") `
     "unwired loop context menu had unexpected ordered items: $unwiredLoopDescription"
+  Require ((@($unwiredLoopItems | ForEach-Object { $_.Id }) -join "|") -ceq
+           "5104|5119|5101|5114|5102|0|5100|5109|5112|0|5123|5124|0|5103") `
+    "unwired loop context menu had unexpected command identities: $unwiredLoopDescription"
+  Require (@($unwiredLoopItems | Where-Object {
+    -not $_.Separator -and (-not $_.Enabled -or $_.Checked)
+  }).Count -eq 0) `
+    "unwired loop context menu had an unexpected disabled or checked item: $unwiredLoopDescription"
   foreach ($absentId in @(5113, 5107, 5108)) {
     Require (@($unwiredLoopItems | Where-Object { $_.Id -eq $absentId }).Count -eq 0) `
       "unwired loop context menu unexpectedly offered composite-only command $absentId : $unwiredLoopDescription"
@@ -9840,6 +9197,11 @@ try {
     "unwired canvas card did not expose exactly one stable Wire it up control"
   Require ($markEntryControls.Count -eq 1) `
     "unwired canvas card did not expose exactly one stable Mark as entry control"
+  $recoveryVisibility = Wait-UiaUnwiredRecoveryVisibility $root $rawWalker $process $wireControls[0] $markEntryControls[0]
+  $root = $recoveryVisibility.root
+  $graph = $recoveryVisibility.graph
+  $wireControls = @($recoveryVisibility.wire)
+  $markEntryControls = @($recoveryVisibility.mark)
   foreach ($control in @($wireControls[0], $markEntryControls[0])) {
     Require (($control.Current.BoundingRectangle.Width -gt 0) -and
              ($control.Current.BoundingRectangle.Height -gt 0)) `
@@ -10013,8 +9375,11 @@ try {
     if ($_.Separator) { "<separator>" } else { [string]$_.Text }
   })
   Require (($nodeCanvasMenuOrder -join "|") -ceq
-           "Open Terminal|Rename...`tF2|Save as Template...|<separator>|Edit Details...|<separator>|Delete Loop...`tDelete") `
+           "Open Terminal|Change to Timed…|Rename...`tF2|Save as Template...|<separator>|Edit Details...|<separator>|Export Loop...|Import Loops Here...|<separator>|Delete Loop...`tDelete") `
     "canvas node context menu had unexpected ordered items for UIA loop A at screen ($($nodeCanvasMenu.ScreenX),$($nodeCanvasMenu.ScreenY)) client ($($nodeCanvasMenu.ClientX),$($nodeCanvasMenu.ClientY)) bounds $nodeBounds : $($nodeCanvasMenu.Description)"
+  Require ((@($nodeCanvasMenu.Items | ForEach-Object { $_.Id }) -join "|") -ceq
+           "5104|5122|5101|5114|0|5100|0|5123|5124|0|5103") `
+    "canvas node context menu had unexpected command identities: $($nodeCanvasMenu.Description)"
   Require (@($nodeCanvasMenu.Items | Where-Object {
     -not $_.Separator -and (-not $_.Enabled -or $_.Checked)
   }).Count -eq 0) `
@@ -10057,7 +9422,7 @@ try {
   Require ($null -ne $editEdgeMenuItem) `
     "canvas edge action menu omitted Edit Edge: $(Format-PopupMenuItems $edgeActionItems)"
   $editEdgeClick = [GraphCodeUiaGateState]::ClickPopupMenuItem(
-    $edgeActionPopup, $shellWindow, [int]$editEdgeMenuItem.Position, [int]$editEdgeMenuItem.Id
+    $edgeActionPopup, $shellWindow, [int]$editEdgeMenuItem.Position, [int]$editEdgeMenuItem.Id, [uint32]$process.Id
   )
   Require ($null -ne $editEdgeClick) "canvas edge Edit Edge item could not be clicked"
   $editEdgeClickEvidence = [ordered]@{
@@ -10095,22 +9460,9 @@ try {
   $canvasEdgeEditDialogOpened = $null -ne $canvasEdgeDialog
   Require $canvasEdgeEditDialogOpened `
     "clicking Edit Edge from the canvas did not open the edge editor: $($editEdgeClickEvidence | ConvertTo-Json -Compress)"
-  $canvasEdgeFrom = $canvasEdgeDialog.FindFirst(
-    [System.Windows.Automation.TreeScope]::Descendants,
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::AutomationIdProperty, "9100"
-    ))
-  )
-  $canvasEdgeTo = $canvasEdgeDialog.FindFirst(
-    [System.Windows.Automation.TreeScope]::Descendants,
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::AutomationIdProperty, "9101"
-    ))
-  )
-  Require (($null -ne $canvasEdgeFrom) -and ($null -ne $canvasEdgeTo)) `
-    "canvas edge Edit Edge dialog omitted its locked endpoint identities"
-  $canvasEdgeFromId = [string]$canvasEdgeFrom.Current.Name
-  $canvasEdgeToId = [string]$canvasEdgeTo.Current.Name
+  $canvasEdgeEndpoints = Read-UiaReadonlyEdgeEndpoints $canvasEdgeDialog $process.Id $shellWindow 'Edit edge'
+  $canvasEdgeFromId = $canvasEdgeEndpoints.source
+  $canvasEdgeToId = $canvasEdgeEndpoints.target
   Require ($canvasEdgeFromId -eq "11111111-1111-4111-8111-111111111111") `
     "canvas edge Edit Edge action targeted the wrong source: $canvasEdgeFromId"
   Require ($canvasEdgeToId -eq "22222222-2222-4222-8222-222222222222") `
@@ -10454,13 +9806,7 @@ try {
   }
   Require $retainedProviderSafe "retained status provider was unsafe after teardown"
   $env:GRAPHCODE_UIA_RESET_SIDEBAR = "0"
-  if ($ArgumentList.Count -gt 0) {
-    $settingsProcess = Start-Process -FilePath $Shell -ArgumentList $ArgumentList -PassThru `
-      -WindowStyle Normal -RedirectStandardError $settingsErrorPath
-  } else {
-    $settingsProcess = Start-Process -FilePath $Shell -PassThru -WindowStyle Normal `
-      -RedirectStandardError $settingsErrorPath
-  }
+  $settingsProcess = Start-UiaOwnedProcess -file $Shell -arguments $ArgumentList -standardErrorPath $settingsErrorPath
   for ($index = 0; $index -lt 160 -and $settingsProcess.MainWindowHandle -eq 0; $index++) {
     Start-Sleep -Milliseconds 250
     $settingsProcess.Refresh()
@@ -10574,10 +9920,21 @@ try {
     "Get beta releases",
     "General"
   )
+  $settingsControlIds=@{
+    'General'=6220; 'Claude Code'=6221; 'Codex'=6222; 'Copilot CLI'=6223
+    'OpenCode'=6224; 'Pi'=6225; 'Templates'=6226
+    'New loops use: Claude Code'=6112; 'Default model: Capable'=6144
+    'Pick a model for each loop'=6152; 'Show the activity strip'=6160
+    'Summarise what loops are doing (experimental)'=6200
+    'Let a model write the summaries (experimental)'=6201
+    'Visualise what loops did (experimental)'=6202; 'Daemon heartbeat (experimental)'=6203
+    'Keep this PC awake while loops run (experimental)'=6204; 'Mailroom'=6205
+    "Tell sessions they're part of a graph"=6168
+    "End a finished loop's session: After 1 hour"=6206; 'Get beta releases'=6176
+  }
   foreach ($requiredName in $requiredSettingsNames) {
-    $element = @($settingsElements | Where-Object { $_.Current.Name -eq $requiredName }) |
-      Select-Object -First 1
-    Require ($null -ne $element) "Product Settings omitted '$requiredName'; descendants: $(@($settingsElements | ForEach-Object { ""$($_.Current.ControlType.ProgrammaticName):$($_.Current.Name)"" }) -join ' | ')"
+    $element=Wait-UiaSettingsControlVisible $productSettings $settingsProcess.Id $settingsShellWindow `
+      $settingsControlIds[$requiredName] $requiredName
     Require (($element.Current.BoundingRectangle.Width -gt 0) -and
              ($element.Current.BoundingRectangle.Height -gt 0) -and
              (-not $element.Current.IsOffscreen)) "Product Settings hid '$requiredName'"
@@ -10593,6 +9950,9 @@ try {
     "Lets a loop create more loops when work genuinely splits",
     "Check for Updates offers pre-releases as well as stable releases"
   )) {
+    $copyElement=Wait-UiaSettingsControlVisible $productSettings $settingsProcess.Id $settingsShellWindow `
+      0 $copy 'Static' $true
+    Require ($copyElement.Current.Name.Contains($copy)) "Product Settings changed visible explanatory copy '$copy'"
     Require ($settingsContent -match [regex]::Escape($copy)) `
       "Product Settings omitted explanatory copy '$copy'"
   }
@@ -10610,8 +9970,8 @@ try {
   }
   $productSettingsToggleStates = @()
   foreach ($entry in $expectedToggles.GetEnumerator()) {
-    $toggleElement = @($settingsElements | Where-Object { $_.Current.Name -eq $entry.Key }) |
-      Select-Object -First 1
+    $toggleElement=Wait-UiaSettingsControlVisible $productSettings $settingsProcess.Id $settingsShellWindow `
+      $settingsControlIds[$entry.Key] $entry.Key
     $toggleState = [GraphCodeUiaGateState]::GetCheckState(
       [IntPtr]$toggleElement.Current.NativeWindowHandle
     )
@@ -10619,6 +9979,7 @@ try {
     Require ($toggleState -eq $entry.Value) `
       "Product Settings toggle '$($entry.Key)' did not load the isolated fixture"
   }
+  $null=Wait-UiaSettingsControlVisible $productSettings $settingsProcess.Id $settingsShellWindow 6220 'General'
   $productSettingsEvidence = [ordered]@{
     identity = $productSettingsIdentity
     shownSettings = @($requiredSettingsNames | Where-Object { $settingsNames -contains $_ })
@@ -10747,22 +10108,19 @@ try {
   $renameCommandLogPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "rename-daemon-command.json")
   $renameShellErrorPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "rename-shell-stderr.log")
   $renameShellOutputPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "rename-shell-stdout.log")
-  # Start-Process joins ArgumentList with spaces and quotes nothing, so any value
-  # that contains a space has to carry its own quotes or pwsh binds the remainder
-  # to the next positional parameter.
-  $renameStubProcess = Start-Process -FilePath "pwsh" -WindowStyle Hidden -PassThru `
-    -RedirectStandardError $renameStubErrorPath -ArgumentList @(
+  $renameStubProcess = Start-UiaOwnedProcess -file (Get-Command pwsh).Source -Hidden `
+    -standardErrorPath $renameStubErrorPath -arguments @(
       "-NoProfile",
       "-File",
-      ('"' + (Join-Path $PSScriptRoot "Stub-Daemon.ps1") + '"'),
+      (Join-Path $PSScriptRoot "Stub-Daemon.ps1"),
       "-PipeName",
-      ('"' + $renamePipeName + '"'),
+      $renamePipeName,
       "-ResultPath",
-      ('"' + $renameStubResultPath + '"'),
+      $renameStubResultPath,
       "-NodeAId",
-      ('"' + $renameNodeId + '"'),
+      $renameNodeId,
       "-NodeATitle",
-      ('"' + $renameInitialTitle + '"'),
+      $renameInitialTitle,
       "-ApplyGraphCommands",
       "-SeedSketches"
     )
@@ -10796,14 +10154,7 @@ try {
   Remove-Item Env:GRAPHCODE_UIA_FIXTURE_ROWS -ErrorAction SilentlyContinue
   Remove-Item Env:GRAPHCODE_UIA_UPDATE_AVAILABLE -ErrorAction SilentlyContinue
   Remove-Item Env:GRAPHCODE_UIA_SHOW_UPDATE -ErrorAction SilentlyContinue
-  if ($ArgumentList.Count -gt 0) {
-    $renameProcess = Start-Process -FilePath $Shell -ArgumentList $ArgumentList -PassThru `
-      -WindowStyle Normal -RedirectStandardOutput $renameShellOutputPath `
-      -RedirectStandardError $renameShellErrorPath
-  } else {
-    $renameProcess = Start-Process -FilePath $Shell -PassThru -WindowStyle Normal `
-      -RedirectStandardOutput $renameShellOutputPath -RedirectStandardError $renameShellErrorPath
-  }
+  $renameProcess = Start-UiaOwnedProcess $Shell $ArgumentList $renameShellOutputPath $renameShellErrorPath
   $renameRoot = $null
   for ($index = 0; $index -lt 160 -and $null -eq $renameRoot; $index++) {
     Start-Sleep -Milliseconds 250
@@ -11152,7 +10503,7 @@ try {
       Start-Sleep -Milliseconds 100
     }
     Require ($null -ne $item) "edge workflow menu lacks enabled $command after republish: $lastMenu; stub=$(Read-UiaTextFile $renameStubResultPath)"
-    $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($popup, $renameShellWindow, [int]$item.Position, $command)
+    $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($popup, $renameShellWindow, [int]$item.Position, $command, [uint32]$renameProcess.Id)
     if ($null -ne $click) {
       Write-Host "UIA_EDGE_MENU_CLICK command=$command hilite=$($click.Hilite) selectItemFallback=$($click.UsedSelectItemFallback) enterFallback=$($click.UsedKeyboardFallback) hiliteAtEnterFallback=$($click.HiliteAtEnterFallback) hiliteBeforeEnter=$($click.HiliteBeforeEnter) cursor=$($click.CursorAtX),$($click.CursorAtY) item=$($click.Left),$($click.Top),$($click.Right),$($click.Bottom)"
     }
@@ -11255,6 +10606,7 @@ try {
       $delta = $index - [int]($after.Split("|")[0])
       if ($delta -ne 0) {
         $keys = [GraphCodeUiaGateState]::SendKeyInput(
+          $edgeWorkflowWindow, [uint32]$renameProcess.Id, $control,
           [uint16]$(if ($delta -gt 0) { 0x28 } else { 0x26 }), [Math]::Abs($delta))
         Require ($keys -eq [Math]::Abs($delta)) "edge workflow combo $id keyboard injection failed"
       }
@@ -11405,7 +10757,7 @@ try {
       $edit = [GraphCodeUiaGateState]::ControlById($edgeWorkflowWindow, 9105)
       Require ($edit -ne [IntPtr]::Zero -and
         [GraphCodeUiaGateState]::FocusControl($edgeWorkflowWindow, $edit) -and
-        [GraphCodeUiaGateState]::SendKeyInput(0x0D, 1) -eq 1) `
+        [GraphCodeUiaGateState]::SendKeyInput($edgeWorkflowWindow, [uint32]$renameProcess.Id, $edit, 0x0D, 1) -eq 1) `
         "edge workflow $title measured-occluded keyboard submit failed"
       $method = "keyboardEnter"
     }
@@ -11764,7 +11116,7 @@ try {
       Require ($goalEdit -ne [IntPtr]::Zero -and
         [GraphCodeUiaGateState]::FocusControl($nodeSheetWindow, $goalEdit)) `
         "node creation sheet $label could not focus the Goal field before Enter"
-      Require ([GraphCodeUiaGateState]::SendKeyInput(0x0D, 1) -eq 1) `
+      Require ([GraphCodeUiaGateState]::SendKeyInput($nodeSheetWindow, [uint32]$renameProcess.Id, $goalEdit, 0x0D, 1) -eq 1) `
         "node creation sheet $label could not send a native Enter key"
       $method = "keyboardEnter"
       $mouseSubmitUnavailable = $true
@@ -11989,7 +11341,8 @@ try {
     $delta = $comboCase.Index - $currentIndex
     $keys = 0
     if ($delta -ne 0) {
-      $keys = [GraphCodeUiaGateState]::SendKeyInput([uint16]$(if ($delta -gt 0) { 0x28 } else { 0x26 }), [Math]::Abs($delta))
+      $keys = [GraphCodeUiaGateState]::SendKeyInput($nodeSheetWindow, [uint32]$renameProcess.Id, $combo,
+        [uint16]$(if ($delta -gt 0) { 0x28 } else { 0x26 }), [Math]::Abs($delta))
     }
     $after = $before
     for ($attempt = 0; $attempt -lt 40 -and $after -ne "$($comboCase.Index)|$($comboCase.Text)"; $attempt++) {
@@ -12319,7 +11672,7 @@ try {
       $focus = Assert-SketchControl $focusId
       Require ([GraphCodeUiaGateState]::WindowIsVisible($script:edgeWorkflowWindow) -and
         [GraphCodeUiaGateState]::FocusControl($script:edgeWorkflowWindow, $focus) -and
-        [GraphCodeUiaGateState]::SendKeyInput(0x0D, 1) -eq 1) `
+        [GraphCodeUiaGateState]::SendKeyInput($script:edgeWorkflowWindow, [uint32]$renameProcess.Id, $focus, 0x0D, 1) -eq 1) `
         "sketch/custody submit '$label' measured-occluded Enter injection failed"
       $method = "keyboardEnter"
     }
@@ -12347,7 +11700,7 @@ try {
   function Sketch-Cancel([string] $label) {
     Require (Ensure-ShellForeground $script:edgeWorkflowWindow "$label cancel") `
       "sketch/custody '$label' lost foreground before cancel"
-    Require ([GraphCodeUiaGateState]::SendKeyInput(0x1B, 1) -eq 1) `
+    Require ([GraphCodeUiaGateState]::SendKeyInput($script:edgeWorkflowWindow, [uint32]$renameProcess.Id, [IntPtr]::Zero, 0x1B, 1) -eq 1) `
       "sketch/custody '$label' native Escape injection failed"
     Start-Sleep -Milliseconds 200
     $keyboardFallback = $false
@@ -12602,7 +11955,7 @@ try {
     $item = @($menu.items | Where-Object { $_.Id -eq $id -and $_.Enabled })
     Require ($item.Count -eq 1) "sketch/custody popup missing enabled ${id}: $(Format-PopupMenuItems $menu.items)"
     $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($menu.popup, $renameShellWindow,
-      [int]$item[0].Position, $id)
+      [int]$item[0].Position, $id, [uint32]$renameProcess.Id)
     if ($null -ne $click) {
       Write-Host "UIA_SKETCH_MENU_CLICK command=$id hilite=$($click.Hilite) selectItemFallback=$($click.UsedSelectItemFallback) enterFallback=$($click.UsedKeyboardFallback) hiliteAtEnterFallback=$($click.HiliteAtEnterFallback) hiliteBeforeEnter=$($click.HiliteBeforeEnter)"
     }
@@ -13253,29 +12606,30 @@ try {
   throw
 } finally {
   try {
-  if ($stressJob) {
-    Remove-Job -Job $stressJob -Force -ErrorAction SilentlyContinue
-  }
-  if ($propertyEventRegistered) {
-    [System.Windows.Automation.Automation]::RemoveAutomationPropertyChangedEventHandler(
-      $status, $propertyHandler
-    )
-  }
-  if ($liveEventRegistered) {
-    [System.Windows.Automation.Automation]::RemoveAutomationEventHandler(
-      $liveRegionEvent, $status, $eventHandler
-    )
-  }
-  if ($focusEventRegistered) {
-    [System.Windows.Automation.Automation]::RemoveAutomationFocusChangedEventHandler($focusHandler)
-  }
-  Stop-UiaOwnedProcessTrees @($process, $settingsProcess, $renameProcess, $renameStubProcess)
-  Stop-UiaOwnedProviderProcesses $providerZmxPath $providerZmxBaseline
+  Invoke-UiaCleanupActions @(
+    { if ($stressJob) { Remove-Job -Job $stressJob -Force -ErrorAction Stop } },
+    { if ($propertyEventRegistered) {
+      [System.Windows.Automation.Automation]::RemoveAutomationPropertyChangedEventHandler($status, $propertyHandler)
+    } },
+    { if ($liveEventRegistered) {
+      [System.Windows.Automation.Automation]::RemoveAutomationEventHandler($liveRegionEvent, $status, $eventHandler)
+    } },
+    { if ($focusEventRegistered) {
+      [System.Windows.Automation.Automation]::RemoveAutomationFocusChangedEventHandler($focusHandler)
+    } },
+    { Stop-UiaOwnedProcessTrees @($process, $settingsProcess, $renameProcess, $renameStubProcess) },
+    { Stop-UiaOwnedProviderProcesses $providerZmxPath $providerZmxBaseline }
+  )
   } catch {
     $sandboxCleanupError = $_
+    if ($gateFailure) {
+      $gateFailure.Exception.Data["UiaCleanupFailure"] = $_.Exception
+      foreach ($key in $_.Exception.Data.Keys) { $gateFailure.Exception.Data[$key] = $_.Exception.Data[$key] }
+    }
     if ($sandboxCreated) { Write-Host "UIA_FAILED_SANDBOX_RETAINED=$sandboxPath" }
     Write-Host "UIA_CLEANUP_ERROR=$($_.Exception.Message)"
   } finally {
+  try {
   if ($null -eq $oldZmx) { Remove-Item Env:GRAPHCODE_ZMX -ErrorAction SilentlyContinue }
   else { $env:GRAPHCODE_ZMX = $oldZmx }
   if ($null -eq $oldCwd) { Remove-Item Env:GRAPHCODE_GATE_CWD -ErrorAction SilentlyContinue }
@@ -13323,6 +12677,28 @@ try {
       Write-Host "UIA_PROCESS_TREE_CLEANUP=not_needed no UIA shell was launched"
     }
   }
+  } finally {
+    if ($null -ne $gateDpiScope) {
+      try {
+        [GraphCodeUiaGateState]::RestorePhysicalDpiCoordinates($gateDpiScope)
+      } catch {
+        if ($gateFailure) { $gateFailure.Exception.Data["UiaDpiRestoreFailure"] = $_.Exception }
+        elseif ($sandboxCleanupError) { $sandboxCleanupError.Exception.Data["UiaDpiRestoreFailure"] = $_.Exception }
+        else { $sandboxCleanupError = $_ }
+        Write-Host "UIA_DPI_RESTORE_ERROR=$($_.Exception.Message)"
+      }
+    }
+  }
+  }
+  $ownershipUnknown = ($gateFailure -and (ShellProcessOwnership\Test-ShellOwnershipUnproven $gateFailure)) -or
+    ($sandboxCleanupError -and (ShellProcessOwnership\Test-ShellOwnershipUnproven $sandboxCleanupError))
+  if ($ownershipUnknown) {
+    try {
+      [Console]::Out.WriteLine("GRAPHCODE_VALIDATION_ROOT_RETENTION_REQUIRED=ownership_unproven")
+      [Console]::Out.Flush()
+    } finally {
+      [Threading.Thread]::Sleep([Threading.Timeout]::Infinite)
+    }
   }
   if ($sandboxCleanupError -and $null -eq $gateFailure) { throw $sandboxCleanupError }
 }

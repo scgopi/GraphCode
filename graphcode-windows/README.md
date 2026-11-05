@@ -886,6 +886,16 @@ this checkout by default.
 - PowerShell 7 (`pwsh`), Git, and `winget`.
 - A short checkout path when possible, such as `C:\src\GraphCode`.
 
+The compiled Windows validator requires **.NET SDK 10.0.403**, pinned by
+`Tools\windows\ValidationRunner\global.json` with SDK roll-forward disabled.
+Bootstrap first reuses a verified installed exact SDK (global or private).
+It checks the .NETCore and WindowsDesktop 10.0 runtimes and the SDK-declared
+reference packs, including UI Automation references. If none is usable, it
+downloads that exact Windows SDK ZIP from official Microsoft release metadata,
+verifies its SHA-512 checksum before extraction, and installs it privately under
+`ToolRoot\dotnet\10.0.403`. It does not install a global SDK or change user/machine
+environment variables.
+
 The bootstrap installs Swift 6.3.3 through `winget` when it is absent. The
 current `Swift.Toolchain` 6.3.3 package declares Python 3.10 and the x64 Visual
 C++ redistributable as dependencies. It also downloads Zig 0.15.2 for the
@@ -904,6 +914,13 @@ pwsh -NoProfile -File Tools\windows\bootstrap.ps1 `
 Load `environment.ps1` again in each new shell. The explicit roots keep every
 download and provider checkout owned by this worktree and are the locations
 `Tools\windows\dev.ps1` expects.
+The generated environment exports `GRAPHCODE_DOTNET10403` as the verified full
+`dotnet.exe` path and process-only `DOTNET_ROOT`, so the compiled validator's
+apphost also works with a private-only runtime installation. Build the validator
+with `pwsh -NoProfile -File Tools\windows\Build-CompiledValidationRunner.ps1`;
+that wrapper honors the exported SDK, resolves the pin from the validator
+directory, and restores its temporary process environment. A build never
+downloads an SDK implicitly; rerun bootstrap for a missing prerequisite.
 
 Reference timings from one Windows x64 worktree on 2026-10-01 are not
 performance guarantees: the initial bootstrap took **34 minutes 24 seconds**
@@ -969,6 +986,11 @@ mismatch rather than terminating a reused PID or an unrelated process. Running
   different Zig from `PATH` is not a supported workaround.
 - **Missing or invalid pinned environment:** rerun bootstrap and reload
   `.graphcode-tools\environment.ps1`; do not hand-build an environment.
+- **SDK or WindowsDesktop/reference-pack prerequisite refused:** rerun bootstrap
+  and reload its environment; do not substitute another SDK or weaken
+  `global.json`. An explicitly invalid `GRAPHCODE_DOTNET10403` is rejected, not
+  silently replaced. An invalid existing private SDK directory is preserved;
+  select a fresh owned `-ToolRoot` rather than overwriting unknown contents.
 - **An existing `run.json` blocks build or launch:** run
   `pwsh -NoProfile -File Tools\windows\dev.ps1 -Stop`. If stop reports an
   identity mismatch, preserve the message and inspect the record instead of
@@ -1048,6 +1070,32 @@ radius mapped to sigma, truncated at three sigma). Attention halo orange uses
 the explicit attention-border RGB as a Windows mapping, not a verified
 resolution of SwiftUI `.orange`. Blur/compositing equivalence and the static
 attention endpoints still require separate visual/temporal evidence.
+
+Windows card ZIP export commits the completed archive with a handle-relative
+native rename (`NtSetInformationFile`, `FileRenameInformation`). The original
+parent and archive handles stay held; there is no absolute-path rename fallback.
+Existing destinations require explicit replacement approval. Pending, failed or
+unobserved native completion retains staging and reports both NTSTATUS values
+rather than claiming publication. Native commit regressions cover absent and
+existing targets, held source/parent/target custody and synchronous completion.
+This headless coverage does not establish native picker destination selection.
+
+The card's attention face follows the same display state as its state pill:
+NEEDS YOU warms the face and amber halo even when the underlying lifecycle is
+not `running`. Selection replaces the hairline with the solid selection ring,
+not the warm face or halo; an unselected unwired card retains its amber dash and
+dimmed type stripe. A closed blocked cycle with no stranded upstream remains
+neutral but still offers Inspect in the leading body row, above its metadata
+reason. Inspect uses a 60-by-20 logical button, 11-point bold text and 9-point
+horizontal padding; titles remain 14.5-point semibold, and Wire it up retains
+11-point semibold text with the same horizontal padding. Recovery control
+bounds, identities and Wire/Mark actions are unchanged.
+
+The `cards paired review` GraphCanvas selector covers these contracts, including
+Goal/Main/Composite, selection and entry/interior/unwired/cycle roles. Set
+`GRAPHCODE_NATIVE_PAINT_TESTS=1` to execute its production GDI+ composition case;
+without it that case is skipped. These are offscreen component checks, not
+live UIA, paired glyph/blur equivalence or whole-row parity acceptance.
 
 ### Offscreen canvas paint artifact
 

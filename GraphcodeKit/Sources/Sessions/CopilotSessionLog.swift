@@ -226,6 +226,101 @@ public enum CopilotSessionLog {
     }
   }
 
+  /// Whether typing into this session now could answer a question instead of reaching
+  /// the composer: Enter on a permission dialog approves the tool, and an open `ask_user`
+  /// takes the text as its answer. A session still opening counts too: it can sit at a
+  /// prompt for minutes, measured at two under `ask`, before its log says anything. Yes
+  /// when the log can't be read, because a keystroke nobody asked for can wait and a wrong
+  /// answer can't be taken back. A session that isn't live is a no: the send's own gate
+  /// skips it.
+  static func awaitingDecision(of node: LoopNode, projectPath: String?) async -> Bool {
+    if let projectPath, let location = RemoteProjectLocation.parse(projectPath: projectPath) {
+      let (succeeded, output) = await ZmxSessionLauncher.collectRemoteOutput(
+        remoteDecisionInvocation(forNode: node, at: location), location: location)
+      return remoteDecisionPending(
+        succeeded: succeeded, output: output, expectingOpening: node.sessionPrompt != nil)
+    }
+    guard await ZmxSessionLauncher.sendGate(node) else { return false }
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    guard let directory = directory(forSessionNamed: name) else { return true }
+    return holdsADecision(
+      tailLines(ofLogAt: directory.appendingPathComponent("events.jsonl")),
+      expectingOpening: node.sessionPrompt != nil)
+  }
+
+  /// Newest first, stopping where the running session began: an older run's unanswered
+  /// dialog is gone. Lines may be cut short, so ids are read as text rather than as JSON.
+  static func holdsADecision<Line: StringProtocol>(
+    _ lines: [Line], expectingOpening: Bool = false
+  ) -> Bool {
+    var sawUserMessage = false
+    var permissionSettled = false
+    var finishedCalls: Set<String> = []
+    for line in lines.reversed() {
+      if line.contains(#""type":"session.start""#) { return expectingOpening && !sawUserMessage }
+      if line.contains(#""type":"session.resume""#) { return false }
+      if line.contains(#""type":"user.message""#) {
+        sawUserMessage = true
+      } else if line.contains(#""type":"permission.completed""#) {
+        permissionSettled = true
+      } else if line.contains(#""type":"permission.requested""#) {
+        if !permissionSettled { return true }
+      } else if line.contains(#""type":"tool.execution_complete""#) {
+        toolCallID(in: line).map { _ = finishedCalls.insert($0) }
+      } else if line.contains(#""type":"tool.execution_start""#),
+        line.contains(#""toolName":"ask_user""#),
+        let call = toolCallID(in: line), !finishedCalls.contains(call)
+      {
+        return true
+      }
+    }
+    return false
+  }
+
+  private static func toolCallID<Line: StringProtocol>(in line: Line) -> String? {
+    let key = #""toolCallId":""#
+    guard let start = line.range(of: key)?.upperBound,
+      let end = line[start...].firstIndex(of: "\"")
+    else { return nil }
+    return String(line[start..<end])
+  }
+
+  /// The remote half of `awaitingDecision`. The marker line is the proof the walk ran to
+  /// the end; its word says what it found.
+  static func remoteDecisionInvocation(
+    forNode node: LoopNode, at location: RemoteProjectLocation
+  ) -> [String] {
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    let check = ZmxSessionLauncher.quotedCommand(["zmx", "get", name])
+    let marker = ZmxSessionLauncher.remoteProbeMarker
+    let script =
+      "if \(check) >/dev/null 2>&1; then "
+      + "D=''; for d in $(ls -t \"$HOME/.copilot/session-state/\" 2>/dev/null); do "
+      + "if \(CLISessionBackendKind.copilotNameMatcher(for: name)) "
+      + "\"$HOME/.copilot/session-state/$d/workspace.yaml\" 2>/dev/null; then "
+      + "D=\"$HOME/.copilot/session-state/$d\"; break; fi; done; "
+      + "if [ -n \"$D\" ]; then "
+      + "tail -c 65536 \"$D/events.jsonl\" 2>/dev/null | grep -aE "
+      + "'\"type\":\"(session\\.start|session\\.resume|user\\.message|permission\\.requested"
+      + "|permission\\.completed|tool\\.execution_complete)\"|\"toolName\":\"ask_user\"'"
+      + " | cut -c1-300; echo '\(marker) read'; else echo '\(marker) booting'; fi; "
+      + "else echo '\(marker) absent'; fi"
+    return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  static func remoteDecisionPending(
+    succeeded: Bool, output: String, expectingOpening: Bool = false
+  ) -> Bool {
+    let marker = ZmxSessionLauncher.remoteProbeMarker
+    let lines = output.split(whereSeparator: \.isNewline)
+    guard succeeded, let verdict = lines.last(where: { $0.hasPrefix(marker) }) else { return true }
+    switch verdict.dropFirst(marker.count).trimmingCharacters(in: .whitespaces) {
+    case "absent": return false
+    case "read": return holdsADecision(lines, expectingOpening: expectingOpening)
+    default: return true
+    }
+  }
+
   /// What this node's Copilot session is doing, or `nil` when nothing says.
   ///
   /// Local only, deliberately. The remote twin of this would have to carry a JSON record
@@ -312,7 +407,8 @@ public enum CopilotSessionLog {
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     let find =
       "F=''; for d in $(ls -t \"$HOME/.copilot/session-state/\" 2>/dev/null); do "
-      + "if grep -qx 'name: \(name)' \"$HOME/.copilot/session-state/$d/workspace.yaml\" 2>/dev/null; "
+      + "if \(CLISessionBackendKind.copilotNameMatcher(for: name)) "
+      + "\"$HOME/.copilot/session-state/$d/workspace.yaml\" 2>/dev/null; "
       + "then F=\"$HOME/.copilot/session-state/$d/events.jsonl\"; break; fi; done"
     let keep =
       "grep -aE '\"type\":\"(user\\.message|assistant\\.message|tool\\.execution_start"
@@ -433,7 +529,7 @@ public enum CopilotSessionLog {
     let logged = DialLog.fragment(session: name, dial: "bank", event: "copilot-id")
     return "{ [ -s \(idFile) ] || { gc_sid=''; "
       + "for gc_d in $(ls -t \"$HOME/.copilot/session-state/\" 2>/dev/null); do "
-      + "if grep -qx 'name: \(name)' "
+      + "if \(CLISessionBackendKind.copilotNameMatcher(for: name)) "
       + "\"$HOME/.copilot/session-state/$gc_d/workspace.yaml\" 2>/dev/null; then "
       + "gc_sid=\"$gc_d\"; break; fi; done; "
       + "if [ -n \"$gc_sid\" ]; then mkdir -p \(sessions); "
@@ -450,7 +546,8 @@ public enum CopilotSessionLog {
 
     let findDir =
       "D=''; for d in $(ls -t \"$HOME/.copilot/session-state/\" 2>/dev/null); do "
-      + "if grep -qx 'name: \(name)' \"$HOME/.copilot/session-state/$d/workspace.yaml\" 2>/dev/null; then "
+      + "if \(CLISessionBackendKind.copilotNameMatcher(for: name)) "
+      + "\"$HOME/.copilot/session-state/$d/workspace.yaml\" 2>/dev/null; then "
       + "D=\"$HOME/.copilot/session-state/$d\"; break; fi; done"
 
     // The keep-list carries `lifecycleBoundaries` as well as the mapped events, so

@@ -6,6 +6,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "..\OwnedLiveProcess.ps1")
+. (Join-Path $PSScriptRoot "ValidationFixtureDirectory.ps1")
+Import-Module (Join-Path $PSScriptRoot "..\ShellProcessOwnership.psm1") -Force
 
 if (-not ("GraphCodeGdiplusStartupNative" -as [type])) {
   Add-Type @'
@@ -45,24 +48,29 @@ $profile = Join-Path $scratch "profile"
 $temp = Join-Path $scratch "temp"
 $executable = Join-Path $bin "gdiplus-startup-live.exe"
 if (Test-Path -LiteralPath $scratch) {
-  Remove-Item -LiteralPath $scratch -Recurse -Force
+  throw (New-OwnedLiveProcessCleanupError `
+    -Message "GDI+ scratch already exists; ownership is unproven: $scratch" `
+    -Errors @([InvalidOperationException]::new("Existing scratch was not removed.")) `
+    -RetainedRoots @($scratch))
+}
+try {
+  $scratchParent = [IO.Path]::GetDirectoryName($scratch)
+  if (-not [IO.Directory]::Exists($scratchParent)) {
+    [void][IO.Directory]::CreateDirectory($scratchParent)
+  }
+  $null = New-ValidationFixtureDirectory -Path $scratch
+} catch {
+  $creationError = $_.Exception
+  if (Test-Path -LiteralPath $scratch) {
+    throw (New-OwnedLiveProcessCleanupError `
+      -Message "GDI+ scratch appeared during admission; ownership is unproven: $scratch" `
+      -Errors @($creationError) -RetainedRoots @($scratch))
+  }
+  throw
 }
 New-Item -ItemType Directory -Force -Path `
   $bin,$profile,(Join-Path $profile "AppData\Local"),(Join-Path $profile "AppData\Roaming"),$temp |
   Out-Null
-
-$include = Join-Path $WinghosttyRoot "include"
-Push-Location $shellRoot
-try {
-  & $ZigExecutable build-exe src\GdiplusStartupLiveRunner.zig `
-    -target x86_64-windows-msvc -OReleaseSafe -lc `
-    -luser32 -lgdi32 -lgdiplus "-I$include" "-femit-bin=$executable"
-  if ($LASTEXITCODE -ne 0) {
-    throw "GDI+ startup live runner build failed with exit code $LASTEXITCODE"
-  }
-} finally {
-  Pop-Location
-}
 
 $system32 = Join-Path $env:SystemRoot "System32"
 $powerShell = Join-Path $system32 "WindowsPowerShell\v1.0"
@@ -86,13 +94,37 @@ $values = [ordered]@{
 }
 foreach ($name in $values.Keys) { $start.Environment[$name] = [string]$values[$name] }
 
-$process = [Diagnostics.Process]::new()
-$process.StartInfo = $start
+$process = $null
+$processScope = $null
 $observations = 0
 $window = [IntPtr]::Zero
+$started = $false
+$handleHeld = $false
+$caseError = $null
 try {
-  if (-not $process.Start()) { throw "GDI+ startup live runner did not start" }
+  $processScope = New-ShellProcessScope
+  $buildInfo = [Diagnostics.ProcessStartInfo]::new()
+  $buildInfo.FileName = $ZigExecutable
+  $buildInfo.WorkingDirectory = $shellRoot.Path
+  $buildInfo.UseShellExecute = $false
+  $include = Join-Path $WinghosttyRoot "include"
+  foreach ($argument in @(
+      "build-exe", "src\GdiplusStartupLiveRunner.zig",
+      "-target", "x86_64-windows-msvc", "-OReleaseSafe", "-lc",
+      "-luser32", "-lgdi32", "-lgdiplus", "-I$include", "-femit-bin=$executable",
+      "--cache-dir", (Join-Path $scratch "zig-cache"),
+      "--global-cache-dir", (Join-Path $scratch "zig-global-cache"))) {
+    [void]$buildInfo.ArgumentList.Add($argument)
+  }
+  $build = Invoke-OwnedLiveCommand -Scope $processScope -StartInfo $buildInfo -StreamOutput
+  if ($build.ExitCode -ne 0) {
+    throw "GDI+ startup live runner build failed with exit code $($build.ExitCode)"
+  }
+
+  $process = Start-ShellOwnedProcess $processScope $start
+  $started = $true
   [void]$process.Handle
+  $handleHeld = $true
   $deadline = [DateTime]::UtcNow.AddSeconds(5)
   do {
     $observations++
@@ -115,14 +147,49 @@ try {
       "observations=$observations; environmentKeys=$(
         @($start.Environment.Keys | Sort-Object) -join ',')")
   }
-  Write-Output ("GDIPLUS_STARTUP_LIVE: PASS; executed=1; observations=$observations; " +
-    "window=$($window.ToInt64()); environmentKeys=$(
-      @($start.Environment.Keys | Sort-Object) -join ',')")
+} catch {
+  $caseError = $_.Exception
+  throw
 } finally {
-  if ($process -and -not $process.HasExited) {
-    Stop-Process -Id $process.Id -Force
-    [void]$process.WaitForExit(10000)
+  $cleanupErrors = [Collections.Generic.List[Exception]]::new()
+  try {
+    if ($started) {
+      if (-not $handleHeld) {
+        throw "The started GDI+ runner's original process handle was not acquired; no termination attempted."
+      }
+      Stop-OwnedLiveProcess -Process $process -Name "GDI+ startup runner"
+    }
+  } catch {
+    $cleanupErrors.Add($_.Exception)
+  } finally {
+    if ($process) {
+      try { $process.Dispose() } catch { $cleanupErrors.Add($_.Exception) }
+    }
   }
-  if ($process) { $process.Dispose() }
-  Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+  if ($processScope) {
+    try { Close-ShellProcessScope $processScope } catch { $cleanupErrors.Add($_.Exception) }
+  }
+  if ($cleanupErrors.Count -gt 0) {
+    if ($caseError) { $cleanupErrors.Insert(0, $caseError) }
+    throw (New-OwnedLiveProcessCleanupError `
+      -Message "GDI+ runner cleanup could not be verified; fixture root: $scratch" `
+      -Errors ([Exception[]]$cleanupErrors.ToArray()) -RetainedRoots @($scratch))
+  }
+  if ($caseError -and (Test-OwnedLiveProcessRetentionRequired $caseError)) {
+    Write-Output "GDIPLUS_FIXTURE_RETENTION_REQUESTED=$scratch"
+  } else {
+    try {
+      Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction Stop
+    } catch {
+      if ($caseError) {
+        throw [AggregateException]::new(
+          "GDI+ fixture cleanup failed.", [Exception[]]@($caseError, $_.Exception))
+      }
+      throw
+    }
+  }
 }
+$global:LASTEXITCODE = 0
+Write-Output ("GDIPLUS_STARTUP_LIVE: PASS; executed=1; observations=$observations; " +
+  "window=$($window.ToInt64()); environmentKeys=$(
+    @($start.Environment.Keys | Sort-Object) -join ',')")

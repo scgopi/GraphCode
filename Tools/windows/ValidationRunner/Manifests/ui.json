@@ -1,0 +1,1976 @@
+{
+  "units": [
+    { "id": "ui.cards-pilot.target-valid", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.foreign-project", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.missing-target", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.duplicate-target", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.cancel-unchanged", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.cancel-mutation-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.empty-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.missing-graph-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.timed-effect", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.goal-effect", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.custody-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.topology-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.pointer-valid", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.pointer-foreign-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.pointer-missed-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.completion-positive", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.completion-empty-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.cleanup-primary-preserved", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.default-source-boundary", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.production-environment-isolated", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.persisted-root-and-child-schema", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.private-job-and-overlapping-members", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.protected-console-companion", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.precompleted-onboarding-readiness", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.production-card-identity-binding", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.strict-native-field-transaction", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.original-cli-exit-budget", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.completed-cli-ownership-not-identity", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.popup-pointer-preparation", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-source-boundary", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-filename-identity", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-fixture-valid", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-bare-goal-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-import-valid", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-flat-import-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-stale-identity-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-custody-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-spawn-scope-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-higher-total", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-unknown-active", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-gui-exited", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-wrong-birth", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-lost-job", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-unfinished-status", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-missing-effect", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-nonempty-unclassified", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-pilot.zip-quiescence-drain-error", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.pointer-delivered", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.keyboard-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.selection-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.invalid-menu-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.synthetic-hover-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.foreign-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.null-popup-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.wrong-command-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.cards-controls.default-fallback-preserved", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.native.dpi.physical-coordinates", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.native.dpi.exact-restore", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.native.dpi.invalid-restore", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.native.dpi.failed-set", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.native.dpi.foreign-thread", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.native.dpi.source-boundary", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.native.dpi.primary-error-preserved", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.control-click.flat-root", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.control-click.nested-root", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.control-click.same-pid-unrelated-root", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.control-click.mismatched-parent", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.control-click.foreign-root", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.restore.source-order", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.restore.owned-navigation", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.restore.foreground-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.restore.missing-route", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.restore.foreign-route", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.restore.offscreen-route", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.restore.missing-card", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.restore.wrong-card-id", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.restore.foreign-card", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.restore.wrong-fit-id", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.restore.foreign-fit", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.restore.retained-workspace", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.restore.wrong-final-id", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.restore.foreign-final-card", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.restore.offscreen-final-card", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.restore.foreign-final-graph", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.restore.lost-selection", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.cleanup.source-order", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.cleanup.success-clears", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.delete.cleanup.failed-removal-retains", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    {
+      "id": "ui.activation.foreground-refused",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.foreground-acquired",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.ownership-refused",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.invalid-window-refused",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.owned-key",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.foreign-foreground",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.foreign-focus",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.sibling-focus",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.missing-focus",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.dead-retained-process",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.hidden-window",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.disabled-window",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.owned-unicode",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.unicode-foreign-focus",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.owned-mouse",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.mouse-hit-loss",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.mouse-cursor-loss",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.mouse-foreign-foreground",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.owned-edit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.edit-focus-loss-after-select",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.edit-focus-loss-after-read",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.owned-submenu-hover",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.submenu-foreign-foreground",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.submenu-unretained-process",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.input.submenu-covered-point",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.owned-shell",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.owned-popup",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.foreign-foreground",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.foreign-foreground-root",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.foreign-hit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.underlying-shell-hit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.hidden-popup",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.unknown-owner",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.foreign-popup",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.predicate.absent-popup",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.owned",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.owned-enter",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.foreign-foreground",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.foreign-after-hover",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.foreign-before-enter",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.foreign-owner-all",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.foreign-hit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.underlying-shell-hit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.hidden-popup",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.cursor-changed",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.effect.cursor-unreadable",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.geometry.seven-pixel-band",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.geometry.multiple-covers",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.gate-state.activation-reference",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.gate-state.input-reference",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.named-direct-viewport",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.hidden-write-read",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.missing-id",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.missing-write-read",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.direct-precedence",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.wrong-root",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.wrong-viewport",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.other-sibling",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.no-deeper-fallback",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.direct-viewport-required",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.native-form",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.workspace-manager",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.unknown-content",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.lookup.null-parent",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.hit.nested-edit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.hit.content-background",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.hit.wrong-root",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.hit.wrong-container",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.hit.no-recursion",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.native.hit.direct-child",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.host-info.current-session",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.source.actual",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.source.unshared",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.source.missing-initial-owner",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.source.missing-fresh-owner",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.source.missing-restore",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.activation.source.missing-native-error",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.actual",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.bypass-guard",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.stale-foreground",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.stale-cursor",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.missing-held-owner-check",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.missing-pre-cursor-guard",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.missing-pre-enter-guard",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.wrong-hit-root",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.popup.source.extra-input",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.mock.isolation.absent",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.mock.isolation.empty",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.mock.isolation.valued",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.mock.isolation.failure-identity",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.mock.isolation.ordinary-diagnostic",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.absent",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.admitted",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.delayed-admitted",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.expired-admission",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.wrong-hwnd",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.foreign-pid",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.null-foreground",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.timeout",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.hidden",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.disabled",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.hung",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.held-identity",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.invalid-mode",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.empty-mode",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.foreground.supervised.guard-cleanup-order",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.initially-empty",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.initially-offscreen",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.already-visible",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.mark-only-empty",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.delayed-visible",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.outside-before-fit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.wrong-source-owner",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.wrong-fit-owner",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.fit-offscreen",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.fit-disabled",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.remains-empty",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.remains-offscreen",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.wrong-id-after-fit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.wrong-owner-after-fit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.outside-after-fit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.missing-after-fit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.mutant-skip-fit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.mutant-unsafe-offscreen-bounds",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.mutant-wrong-identity-accepted",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.recovery.visibility.mutant-outside-bounds-accepted",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.actual",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.missing-fit",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.wrong-identity",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.missing-offscreen",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.ungated-bounds",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.escaped-bounds",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.stale-visibility",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.missing-containment",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.visibility.missing-require",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.rejection",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.success",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.unavailable",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.foreign-pid",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.identity-drift",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.zero-bounds",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.offscreen",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.disabled",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.selected",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.runtime-unavailable",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.parent-unavailable",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.telemetry-write-failure",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.receipt-exists",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.receipt-unconfigured",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.deadline",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.long-identity",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.long-runtime",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.invalid-boolean",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.nonfinite-bounds",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.exception-chain",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.delete.select.foreign-parent",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.host-info.diagnostics",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.production.consumer-linkage",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5342",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5350",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5369",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5528",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5545",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5572",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5584",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5973",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5979",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5987",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6062",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6097",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6100",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6165",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6171",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6199",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6210",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6215",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6221",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6226",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6231",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6246",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6250",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6257",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6278",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6285",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6339",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6345",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6355",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6417",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6426",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6430",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6436",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6440",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6446",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6454",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6462",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6472",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6514",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6520",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6526",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6542",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6551",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6677",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6680",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6773",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6788",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6801",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6909",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6974",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7042",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7348",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7351",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7355",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7365",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7381",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7387",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7396",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.evaluator.unknown-operator",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.evaluator.unknown-resource",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.evaluator.missing-file",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.evaluator.malformed-tree",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.evaluator.actual-predicate-false",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.evaluator.wrong-production-text",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.evaluator.depth-boundary",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.evaluator.depth-overflow",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5366",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5380",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5392",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5396",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5399",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5407",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5410",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5432",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5449",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5457",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5462",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5470",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5477",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5485",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5501",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5514",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5524",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5537",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5553",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5561",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5569",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5580",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5632",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5659",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5683",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5696",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5713",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5724",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5739",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5752",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5761",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5773",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5783",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5792",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5807",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5812",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5897",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5905",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5914",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-5918",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6057",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6093",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6157",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6182",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6276",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6292",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6298",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6305",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6314",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6326",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6352",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6412",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6467",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6591",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6654",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6754",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6770",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6853",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6864",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6866",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6870",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6877",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6892",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6905",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6921",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6925",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6939",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6958",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-6967",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7027",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7136",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7235",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7326",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7337",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.root.source.line-7344",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.connector.blank-title",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.connector.different-target-title",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.connector.duplicate-source",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.connector.duplicate-target",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.connector.missing-source",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.connector.missing-target",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.connector.owned-pair",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.connector.same-endpoint",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.promotion.disabled-action",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.promotion.enabled-heading",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.promotion.exact",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.promotion.extra-item",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.promotion.reordered",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.promotion.separator-heading",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    },
+    {
+      "id": "ui.promotion.wrong-caption",
+      "owner": "Ui",
+      "minimumCount": 1,
+      "requiredGroups": []
+    }
+  ]
+}

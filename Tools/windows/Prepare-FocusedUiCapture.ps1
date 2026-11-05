@@ -7,7 +7,7 @@ param(
     [Parameter(Mandatory)][string]$BackendFixtureBinary,
     [Parameter(Mandatory)][string]$OfflinePeerSource,
     [Parameter(Mandatory)][string]$PreflightReport,
-    [ValidateSet('TerminalChrome','PostFixCards')][string]$FocusedProfile = 'TerminalChrome',
+    [ValidateSet('TerminalChrome','PostFixCards','PostFixCardsUnselected')][string]$FocusedProfile = 'TerminalChrome',
     [switch]$PlanOnly,
     [ValidateRange(3,30)][long]$AuthorizationMinutes = 20
 )

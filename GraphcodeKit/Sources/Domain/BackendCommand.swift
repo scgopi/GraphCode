@@ -374,6 +374,18 @@ extension CLISessionBackendKind {
     }
   }
 
+  /// What to type into a live session to show a loop's new title, for the backends that
+  /// apply it mid-turn without interrupting. `nil` when the session can't be renamed.
+  public func renameCommand(displayName: String?, sessionName: String) -> String? {
+    guard let name = displayName.flatMap(Self.sessionLabel) else { return nil }
+    switch self {
+    case .claudeCode: return "/rename \(name)"
+    case .copilotCLI:
+      return "/rename \(Self.copilotSessionName(title: name, sessionName: sessionName))"
+    case .codex, .openCode, .pi, .nod: return nil
+    }
+  }
+
   /// OpenCode's TUI has no title flag (`--title` is `opencode run`'s alone), so the title
   /// rides to graphcode's plugin, which sets it when the session is created
   /// (`OpenCodePresencePlugin`). A resumed session keeps the title it already has.
@@ -389,17 +401,24 @@ extension CLISessionBackendKind {
 
   /// A loop's title as one line a session picker can show, or `nil` when nothing is left.
   public static func sessionLabel(_ title: String) -> String? {
-    let line = title.components(separatedBy: .newlines).joined(separator: " ")
+    let line = title.components(separatedBy: CharacterSet.newlines.union(.controlCharacters))
+      .joined(separator: " ")
       .trimmingCharacters(in: .whitespaces)
     return line.isEmpty ? nil : line
   }
 
   /// Copilot's name for a titled session: the title, then enough of the node's id for
   /// `CopilotSessionLog` to find it again. Copilot refuses `--name` beside `--resume`, so
-  /// this is fixed at first launch and outlives any later rename of the loop.
+  /// a later rename of the loop can only reach a live session (`renameCommand`).
   public static func copilotSessionName(title: String, sessionName: String) -> String {
-    guard let label = sessionLabel(title) else { return sessionName }
-    return "\(label) · \(copilotNameSuffix(of: sessionName))"
+    // Copilot 1.0.96 rejects a name with a double quote or over 100 characters and keeps
+    // the old one.
+    let usable = title.filter { $0 != "\"" }
+    guard let label = sessionLabel(usable) else { return sessionName }
+    let suffix = " · \(copilotNameSuffix(of: sessionName))"
+    let fitted = label.prefix(copilotNameLimit - suffix.count)
+      .trimmingCharacters(in: .whitespaces)
+    return fitted + suffix
   }
 
   /// Whether `recorded`, a `name:` read back out of Copilot's `workspace.yaml`, belongs to
@@ -412,6 +431,15 @@ extension CLISessionBackendKind {
       ? String(recorded.dropFirst().dropLast()) : recorded
     return unquoted.hasSuffix(" · \(copilotNameSuffix(of: sessionName))")
   }
+
+  /// `isCopilotSessionName` for a remote host's shell, as a `grep` still to be given its
+  /// file. The closing bracket's class is YAML's closing quote, whichever one the writer
+  /// picked.
+  public static func copilotNameMatcher(for sessionName: String) -> String {
+    "grep -qE '^name: (\(sessionName)|.* · \(copilotNameSuffix(of: sessionName))[\"'\\'']?)$'"
+  }
+
+  private static let copilotNameLimit = 100
 
   private static func copilotNameSuffix(of sessionName: String) -> String {
     let id =

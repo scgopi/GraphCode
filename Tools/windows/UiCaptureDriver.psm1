@@ -4033,9 +4033,12 @@ function Get-CapMatchedSceneNames {
 
 function Get-CapMatchedFocusedSceneNames {
     param(
-        [ValidateSet('TerminalChrome','PostFixCards')]
+        [ValidateSet('TerminalChrome','PostFixCards','PostFixCardsUnselected')]
         [string]$Profile = 'TerminalChrome'
     )
+    if ($Profile -ceq 'PostFixCardsUnselected') {
+        return @('s-goal-unwired-unselected','s-main-cycle-unselected')
+    }
     if ($Profile -ceq 'PostFixCards') {
         return @('s-goal-unwired-unselected','s-goal-unwired-selected',
             's-main-cycle-unselected','s-main-cycle-selected')
@@ -4047,9 +4050,10 @@ function Get-CapMatchedFocusedSceneNames {
 
 function Get-CapMatchedFocusedClassification {
     param(
-        [ValidateSet('TerminalChrome','PostFixCards')]
+        [ValidateSet('TerminalChrome','PostFixCards','PostFixCardsUnselected')]
         [string]$Profile = 'TerminalChrome'
     )
+    if ($Profile -ceq 'PostFixCardsUnselected') { return 'POSTFIX_CARD_UNSELECTED_FOCUSED_VALIDATION_V1' }
     if ($Profile -ceq 'PostFixCards') { return 'POSTFIX_CARD_PARITY_FOCUSED_VALIDATION_V1' }
     return 'F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2'
 }
@@ -4073,7 +4077,7 @@ function Get-CapMatchedCapturePlan {
         evidenceClassification=[string];officialParityEvidence=[bool]} 'Focused matched capture'
     $profileProperty=$focused.PSObject.Properties['profile']
     $profile=if ($profileProperty) {[string]$profileProperty.Value} else {'TerminalChrome'}
-    if ($profile -cnotin @('TerminalChrome','PostFixCards')) {
+    if ($profile -cnotin @('TerminalChrome','PostFixCards','PostFixCardsUnselected')) {
         throw 'Focused matched capture profile differs.'
     }
     $expected=Get-CapMatchedFocusedSceneNames -Profile $profile
