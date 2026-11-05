@@ -2,6 +2,19 @@ const std = @import("std");
 
 pub const prefix = "graphcode-";
 
+// The pinned Windows provider's runSession HostSpec (main_windows.zig) uses
+// this shell for attach without a command. COMSPEC and SHELL do not override it.
+pub const default_shell = "cmd.exe";
+
+pub fn defaultShellDetail() []const u8 {
+    return std.fs.path.stem(default_shell);
+}
+
+test "plain shell detail is derived from the pinned provider executable" {
+    try std.testing.expectEqualStrings("cmd.exe", default_shell);
+    try std.testing.expectEqualStrings(std.fs.path.stem(default_shell), defaultShellDetail());
+}
+
 pub fn nameBuffer(session: []const u8, buffer: []u8) ![]const u8 {
     if (std.mem.startsWith(u8, session, prefix)) return session;
     return std.fmt.bufPrint(buffer, prefix ++ "{s}", .{session});

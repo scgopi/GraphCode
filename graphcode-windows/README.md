@@ -38,9 +38,23 @@ minimum where space permits and a selected-tab window when they overflow.
 The native strip follows the macOS logical chrome measurements at every monitor
 DPI: 25-point tab pills inside a 37-point strip, 22-point pane headers,
 24-by-22-point split/New Tab controls, and a 24-point close target. A
-1440-logical client keeps the normal overflow window; expanding to the
-Mac-observed 1508-logical width admits all twelve minimum-width tabs without
-rescaling or cropping the terminal surface.
+visible workspace propagates the strip's intrinsic minimum to the native
+window, expanding it when tabs or the detail panel need more room. Twelve tabs
+require 1254 logical pixels of terminal width at base DPI, plus the visible
+sidebar and detail panel. At other DPIs the minimum sums each rounded physical
+component, including the separately scaled visible panels, before adding native
+window borders; scaling the combined logical width can hide a tab. Expansion
+never activates the window or exceeds its monitor's work area. Maximized or
+monitor-constrained windows retain the selected-tab overflow window rather than
+shrinking pills, rescaling the terminal, or moving tabs between sessions.
+On Windows, if requested side panels would leave less than one full 92-logical
+tab plus its existing controls and insets, the last-opened panel takes priority.
+The other panel is temporarily hidden and returns when space permits; an
+explicitly hidden panel stays hidden. Reopening an auto-hidden panel through the
+existing sidebar menu or loop-panel header/overflow control swaps priority.
+If even one panel cannot fit alongside that terminal minimum, the panels remain
+temporarily hidden and the status asks for a wider window. This responsive policy
+is user-approved Windows behavior, not a claim about macOS's implicit layout.
 Agent names follow the primary pane: **Goal**, **Loop**, or the recorded backend's
 display name; plain-shell tabs are **Shell**. Missing backend metadata is labeled
 **Agent**, never assumed to be Claude Code. `Ctrl+1` through `Ctrl+9` select those
@@ -50,6 +64,18 @@ use the same visible bounds; the existing final-tab and session-ownership close
 guards remain in force. Component and hidden-window tests cover this routing and
 geometry, not actual daemon restart continuity, native keyboard input, glyph
 pixels, or paired macOS visual parity.
+
+Focused plain-shell pane headers identify **cmd**, derived from the pinned
+Windows zmx provider's `cmd.exe` default for command-free attaches. This is the
+provider's configured shell, not a claim about a command subsequently launched
+inside it; that provider does not use `COMSPEC` or `SHELL` to choose its default.
+The shell gate checks that presentation contract against the actual pinned
+provider source. Agent headers continue to name their recorded backend.
+Pane labels retain macOS's 10.5-logical semibold role, with 9.5-logical monospaced
+focus/detail text; measured native text advances replace fixed title slots and
+keep detail at the trailing eight-point inset. Tab titles remain 12-logical
+regular/selected semibold. These native font requests and offscreen GDI metrics
+do not establish matching macOS glyph weight, antialiasing, or live DPI192 pixels.
 
 By default, the pinned Winghostty child HWND already owns the terminal's UI Automation
 Text/Text2 provider. GraphCode supplies an owned UTF-8 snapshot of its existing
