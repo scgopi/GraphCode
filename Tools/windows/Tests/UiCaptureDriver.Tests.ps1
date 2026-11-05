@@ -747,16 +747,16 @@ function Assert-CapRejects {
         }
         Invoke-CapTest 'journal native bindings match the exact job-ownership declaration contract' {
             $expected = @(
-                'GraphCodeUiaGateState|PostMessage|user32.dll|PostMessageA',
-                'GraphCodeUiaGateState|ScreenToClient|user32.dll|ScreenToClient',
-                'GraphCodeUiaGateState|SetCursorPos|user32.dll|SetCursorPos',
-                'GraphCodeUiaGateState|GetCursorPos|user32.dll|GetCursorPos',
-                'GraphCodeUiaGateState|WindowFromPoint|user32.dll|WindowFromPoint',
-                'GraphCodeUiaGateState|SendKeyInputs|user32.dll|SendInput',
-                'GraphCodeUiaGateState|EnumWindows|user32.dll|EnumWindows',
-                'GraphCodeUiaGateState|GetWindowThreadProcessId|user32.dll|GetWindowThreadProcessId',
-                'GraphCodeUiaGateState|GetForegroundWindow|user32.dll|GetForegroundWindow',
-                'GraphCodeUiaGateState|GetClassName|user32.dll|GetClassNameW',
+                'CapUiaGateState|PostMessage|user32.dll|PostMessageA',
+                'CapUiaGateState|ScreenToClient|user32.dll|ScreenToClient',
+                'CapUiaGateState|SetCursorPos|user32.dll|SetCursorPos',
+                'CapUiaGateState|GetCursorPos|user32.dll|GetCursorPos',
+                'CapUiaGateState|WindowFromPoint|user32.dll|WindowFromPoint',
+                'CapUiaGateState|SendKeyInputs|user32.dll|SendInput',
+                'CapUiaGateState|EnumWindows|user32.dll|EnumWindows',
+                'CapUiaGateState|GetWindowThreadProcessId|user32.dll|GetWindowThreadProcessId',
+                'CapUiaGateState|GetForegroundWindow|user32.dll|GetForegroundWindow',
+                'CapUiaGateState|GetClassName|user32.dll|GetClassNameW',
                 'CapNative|NtQueryInformationProcess|ntdll.dll|NtQueryInformationProcess',
                 'CapNative|NtQueryInformationProcess|ntdll.dll|NtQueryInformationProcess',
                 'CapNative|CommandLineToArgvW|shell32.dll|CommandLineToArgvW',
@@ -3095,7 +3095,7 @@ function Invoke-CapMatchedContracts {
             $workerSource.Contains('function Get-CapWorkerExpectedImageCount') -and
             $workerSource.Contains('$images.Count -eq (Get-CapWorkerExpectedImageCount)') -and
             $workerSource.Contains('function Wait-CapMatchedWireMode') -and
-            $workerSource.Contains('[GraphCodeUiaGateState]::PostKeyboard') -and
+            $workerSource.Contains('[CapUiaGateState]::PostKeyboard') -and
             $workerSource.Contains('function Invoke-CapMatchedTerminalSceneSupplement') -and
             $workerSource.Contains('function Invoke-CapWireCompletionSupplement') -and
             $workerSource.Contains('NATIVE_SENDINPUT_TO_FOCUSED_LOCAL_CONSOLE_WITH_SHELL_COMPUTED_NONCE_PID_ARITHMETIC') -and

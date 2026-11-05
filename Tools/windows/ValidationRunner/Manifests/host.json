@@ -53,7 +53,7 @@
     { "id": "ps.action-worker", "owner": "Host", "minimumCount": 18, "exactCount": 18 },
     { "id": "ps.action-identity", "owner": "Host", "minimumCount": 62, "exactCount": 62 },
     { "id": "ps.action-topology", "owner": "Host", "minimumCount": 16, "exactCount": 16 },
-    { "id": "ps.wire-targeting", "owner": "Host", "minimumCount": 72, "exactCount": 72 },
+    { "id": "ps.wire-targeting", "owner": "Host", "minimumCount": 75, "exactCount": 75 },
     { "id": "ps.agent-command", "owner": "Host", "minimumCount": 6, "exactCount": 6 }
   ]
 }

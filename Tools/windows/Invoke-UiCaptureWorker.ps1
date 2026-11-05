@@ -1030,7 +1030,7 @@ function Send-CapMatchedEscape {
     $foreground=if ($ForegroundProbe) {
         [bool](& $ForegroundProbe $AppRun.Window)
     } else {
-        [GraphCodeUiaGateState]::IsForegroundWindow($AppRun.Window)
+        [CapUiaGateState]::IsForegroundWindow($AppRun.Window)
     }
     if (-not $foreground) {
         throw 'Wire cancellation requires the owned GraphCode shell foreground.'
@@ -1038,7 +1038,7 @@ function Send-CapMatchedEscape {
     $dialog=if ($DialogProbe) {
         [IntPtr](& $DialogProbe $AppRun.Run.Identity.Pid)
     } else {
-        [GraphCodeUiaGateState]::FindTopLevel('GraphCodeNativeForm',[uint32]$AppRun.Run.Identity.Pid)
+        [CapUiaGateState]::FindTopLevel('GraphCodeNativeForm',[uint32]$AppRun.Run.Identity.Pid)
     }
     if ($dialog -ne [IntPtr]::Zero) {
         throw 'Wire cancellation refuses to inject Escape while an owned native dialog is present.'
@@ -1046,7 +1046,7 @@ function Send-CapMatchedEscape {
     $sent=if ($KeyboardSender) {
         [bool](& $KeyboardSender $AppRun.Window 0x1B)
     } else {
-        [GraphCodeUiaGateState]::PostKeyboard($AppRun.Window,0x1B)
+        [CapUiaGateState]::PostKeyboard($AppRun.Window,0x1B)
     }
     if (-not $sent) {
         throw 'Wire cancellation Escape injection was rejected.'
@@ -2274,7 +2274,7 @@ function Invoke-CapMatchedTerminalInputChallenge {
     $pane=$panes[$FocusedIndex]
     $pane.SetFocus()
     Start-Sleep -Milliseconds 100
-    if (-not [GraphCodeUiaGateState]::IsForegroundWindow($AppRun.Window) -or
+    if (-not [CapUiaGateState]::IsForegroundWindow($AppRun.Window) -or
         -not $pane.Current.HasKeyboardFocus) {
         throw 'Terminal input challenge requires the owned shell and pane focus.'
     }
@@ -2285,8 +2285,8 @@ function Invoke-CapMatchedTerminalInputChallenge {
     $prefix="GC_${nonce}_"
     $expectedArithmetic=323L
     $command="powershell.exe -NoProfile -NonInteractive -Command `"`$v=17*19;Write-Output ('$prefix'+`$PID+'_'+`$v)`""
-    $characters=[GraphCodeUiaGateState]::SendUnicodeText($command)
-    $enter=[GraphCodeUiaGateState]::SendKeyInput(0x0D,1)
+    $characters=[CapUiaGateState]::SendUnicodeText($command)
+    $enter=[CapUiaGateState]::SendKeyInput(0x0D,1)
     if ($characters -ne $command.Length -or $enter -ne 1) {
         throw 'Terminal input challenge native SendInput count differs.'
     }
@@ -2393,7 +2393,7 @@ function Invoke-CapMatchedTerminalSceneSupplement {
             $bounds=@($alternate[0].closeBounds)
             $x=[int](($bounds[0]+$bounds[2])/2)
             $y=[int](($bounds[1]+$bounds[3])/2)
-            $pointer=@([GraphCodeUiaGateState]::MovePointerScreen($x,$y))
+            $pointer=@([CapUiaGateState]::MovePointerScreen($x,$y))
             Start-Sleep -Milliseconds 250
             if ($pointer.Count -ne 4 -or $pointer[0] -ne $x -or $pointer[1] -ne $y -or
                 $pointer[3] -ne $AppRun.Run.Identity.Pid) {
@@ -2422,7 +2422,7 @@ function Invoke-CapMatchedTerminalSceneSupplement {
             $before=& $observeTabs 1 0
             $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-close-tab' -SubjectId '0'
             Start-Sleep -Milliseconds 250
-            $form=[GraphCodeUiaGateState]::FindTopLevel('GraphCodeNativeForm',[uint32]$AppRun.Run.Identity.Pid)
+            $form=[CapUiaGateState]::FindTopLevel('GraphCodeNativeForm',[uint32]$AppRun.Run.Identity.Pid)
             $result='REFUSED_TAB_RETAINED'
             $confirmation=$null
             if ($form -ne [IntPtr]::Zero) {
@@ -2605,6 +2605,11 @@ function Invoke-CapWireCompletionSupplement {
             (@([Windows.Automation.AutomationElement]::FromHandle([IntPtr]$latest.host.Handle).GetRuntimeId()) -join ',')) {
             throw 'Owned wire sheet was replaced before Create.'
         }
+        $endpoints=Read-UiaReadonlyEdgeEndpoints -Dialog $formElement -ProcessId $app.Run.Identity.Pid `
+            -Owner $app.Window -Title 'Create or edit edge' -ExpectedSource $sourceId -ExpectedTarget $targetId
+        if ($endpoints.source -cne $sourceId -or $endpoints.target -cne $targetId) {
+            throw 'Owned wire endpoint values differ from the bound source and target before Create.'
+        }
         $creates[0].GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
         $stubResult=$null
         $deadline=[DateTime]::UtcNow.AddSeconds(5)
@@ -2658,6 +2663,7 @@ function Invoke-CapWireCompletionSupplement {
             windowHierarchyBefore=$beforeHierarchy
             windowHierarchyAfter=$hierarchy
             modalControls=$modalControls
+            readonlyEndpoints=$endpoints.snapshot
             edgeId=$edge.id
             edgeSpec=[pscustomobject]@{
                 kind=$edge.kind;condition=$edge.condition
@@ -3251,7 +3257,7 @@ function Set-CapMatchedTabHover {
     $x=[int](($Bounds[0]+$Bounds[2])/2-$metrics.OuterBounds[0]-$border)
     $y=[int](($Bounds[1]+$Bounds[3])/2-$metrics.OuterBounds[1]-$topFrame)
     if ($x -lt 0 -or $y -lt 0 -or $x -ge $metrics.ClientBounds[2] -or $y -ge $metrics.ClientBounds[3]) {throw 'Matched hover escaped the owned client area.'}
-    if (-not [GraphCodeUiaGateState]::PostHover($AppRun.Window,$x,$y)) {throw 'Posting owned tab hover failed.'}
+    if (-not [CapUiaGateState]::PostHover($AppRun.Window,$x,$y)) {throw 'Posting owned tab hover failed.'}
     Start-Sleep -Milliseconds 150
 }
 

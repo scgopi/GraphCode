@@ -29,7 +29,7 @@ public static class StandaloneSuites
         new ScriptSuite("ps.action-topology", "ActionTopologyImport.Tests.ps1",
             output => EvidenceParser.Structured("ps.action-topology", "ActionTopologyImport", output, 16, 16)),
         new ScriptSuite("ps.wire-targeting", "WireTargeting.Tests.ps1",
-            output => EvidenceParser.Structured("ps.wire-targeting", "WireTargeting", output, 72, 72)),
+            output => EvidenceParser.Structured("ps.wire-targeting", "WireTargeting", output, 75, 75)),
         new ScriptSuite("ps.agent-command", "Invoke-AgentCommand.Tests.ps1", EvidenceParser.AgentCommand),
         new HostTaskSuite("host.task-inventory", "inventory", 17),
         new HostTaskSuite("host.task-dry-run", "dry-run", 7),

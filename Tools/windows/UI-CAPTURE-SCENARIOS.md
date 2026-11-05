@@ -179,14 +179,22 @@ Native modal observation now enumerates the held process's window hierarchy.
 It requires exactly one visible GraphCodeSheetHost owned by the app root and
 one visible GraphCodeNativeForm descendant through the viewport. The Create
 button belongs to the sheet footer, so UIA observation/invocation uses that
-owned host rather than the child content. The trace retains pre/post hierarchy
+owned host rather than the child content. Immediately before Create, the worker
+uses the same readonly-endpoint reader as the ordinary UIA edge routes, with
+Wire's exact bound source and target UUIDs instead of the ordinary fixture
+defaults. The reader requires the owned host/viewport/native-form lineage,
+unique direct Edit controls 9100/9101, stable runtime identities, native
+`ES_READONLY` and semantic `ValuePattern.IsReadOnly`, and matching native-buffer
+and semantic values. A missing, mutable, stale, swapped or foreign endpoint
+refuses before Create. The Wire receipt retains the validated endpoint snapshot
+alongside the correlated applied-edge request IDs. The trace retains pre/post hierarchy
 censuses and observed modal controls, including on timeout. Missing hosts or
 not-yet-created content are polled within the clipped action deadline;
 ambiguity, foreign identity, replacement, or native query errors refuse.
 The original action exception is retained if cleanup also fails; launcher EOF
 is never relabeled target-private pipe EOF.
 
-`Tests\WireTargeting.Tests.ps1` defines **72 separately counted contracts**, required
+`Tests\WireTargeting.Tests.ps1` defines **75 separately counted contracts**, required
 by ValidationRunner with zero skips. They exercise the actual shared production
 target/oracle/stability/dispatch helpers with modeled negative cases and a
 harmless native owned popup/child fixture. The native fixture checks actual
@@ -197,7 +205,8 @@ The default suite also records the actual worker's CapNative dispatch boundary
 and runs its selected shared message dispatcher without native input. Run just
 that headless regression with
 `pwsh -NoProfile -File Tools\windows\Tests\WireTargeting.Tests.ps1 -DispatchOnly`;
-its one executed case is selected evidence, not a default-suite or live W1 pass.
+its three executed cases are selected headless dispatch/endpoint contracts, not
+a default-suite or live W1 pass.
 The preserved legacy behavioral run demonstrates the top-level-only child miss
 and midpoint/Mark collision separately from passing results; it is not the
 target-click connector-gesture regression.

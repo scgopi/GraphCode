@@ -19,7 +19,7 @@ $helperSource = @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
-public static class GraphCodeUiaGateState {
+public static class CapUiaGateState {
   [StructLayout(LayoutKind.Sequential)]
   private struct Point { public int X, Y; }
   [StructLayout(LayoutKind.Sequential)]
@@ -2059,6 +2059,124 @@ function Get-CapWireTargetObservation {
         mode=$status[0].Name;safeBounds=$safe;screenPoint=$point;sourceScreenPoint=$start;dpi=$Dpi}
 }
 
+function Get-UiaReadonlyEndpointsDecision($snapshot, [int] $processId, [long] $owner,
+    [string] $title, [string] $from, [string] $to) {
+    if ($null -eq $snapshot -or $processId -le 0 -or $owner -le 0 -or
+        $snapshot.handle -le 0 -or $snapshot.processId -ne $processId -or $snapshot.owner -ne $owner -or
+        $snapshot.class -cne 'GraphCodeSheetHost' -or $snapshot.title -cne $title -or
+        $snapshot.captionless -ne $true -or [string]::IsNullOrWhiteSpace($from) -or
+        [string]::IsNullOrWhiteSpace($to) -or $from -ieq $to) {return @{ready=$false}}
+    foreach ($child in @(
+        @{row=$snapshot.viewport;parent=$snapshot.handle;class='GraphCodeSheetViewport'},
+        @{row=$snapshot.content;parent=$snapshot.viewport.handle;class='GraphCodeNativeForm'})) {
+        $row=$child.row
+        if ($null -eq $row -or $row.handle -le 0 -or $row.parent -ne $child.parent -or
+            $row.processId -ne $processId -or $row.class -cne $child.class -or $row.matches -ne 1 -or
+            $row.stable -ne $true -or $row.owned -ne $true -or
+            [string]::IsNullOrWhiteSpace($row.runtime)) {return @{ready=$false}}
+    }
+    $fields=@($snapshot.fields)
+    if ($fields.Count -ne 2) {return @{ready=$false}}
+    for ($index=0;$index -lt 2;$index++) {
+        $row=$fields[$index]
+        $expected=@($from,$to)[$index]
+        if ($null -eq $row -or $row.handle -le 0 -or $row.parent -ne $snapshot.content.handle -or
+            $row.processId -ne $processId -or $row.semanticProcessId -ne $processId -or
+            $row.controlId -ne (9100+$index) -or $row.class -cne 'Edit' -or $row.matches -ne 1 -or
+            $row.stable -ne $true -or $row.owned -ne $true -or $row.readonly -ne $true -or
+            -not $row.Contains('nativeReadonly') -or $row.nativeReadonly -ne $true -or
+            [string]::IsNullOrWhiteSpace($row.runtime) -or $row.value -ine $expected -or
+            $row.semanticValue -cne $row.value) {return @{ready=$false}}
+    }
+    if ($fields[0].handle -eq $fields[1].handle) {return @{ready=$false}}
+    return @{ready=$true;source=$fields[0].value;target=$fields[1].value}
+}
+
+function Read-UiaReadonlyEdgeEndpoints {
+    param(
+        [Parameter(Mandatory)]$Dialog,
+        [Parameter(Mandatory)][int]$ProcessId,
+        [Parameter(Mandatory)][IntPtr]$Owner,
+        [Parameter(Mandatory)][string]$Title,
+        [string]$ExpectedSource='11111111-1111-4111-8111-111111111111',
+        [string]$ExpectedTarget='22222222-2222-4222-8222-222222222222',
+        [string]$AssemblyPath=$env:GRAPHCODE_VALIDATION_ASSEMBLY
+    )
+    if ([string]::IsNullOrWhiteSpace($AssemblyPath)) {
+        $AssemblyPath=& (Join-Path $PSScriptRoot 'Build-CompiledValidationRunner.ps1')
+    }
+    foreach ($requiredType in @('GraphCodeUiaGateState','GraphCodeMultiProjectEditNative')) {
+        & (Join-Path $PSScriptRoot 'Import-CompiledValidationAssembly.ps1') `
+            -AssemblyPath $AssemblyPath -RequiredType $requiredType | Out-Null
+    }
+    $sheet=[IntPtr]::new([long]$Dialog.Current.NativeWindowHandle)
+    $snapshot=@{
+        handle=$sheet.ToInt64();processId=[GraphCodeUiaGateState]::WindowProcessId($sheet)
+        owner=[GraphCodeUiaGateState]::WindowOwner($sheet).ToInt64()
+        class=[GraphCodeUiaGateState]::WindowClass($sheet);title=[GraphCodeUiaGateState]::WindowTitle($sheet)
+        captionless=[GraphCodeUiaGateState]::IsCaptionlessSheet($sheet)
+    }
+    if ($snapshot.processId -ne $ProcessId -or $snapshot.owner -ne $Owner.ToInt64() -or
+        $snapshot.class -cne 'GraphCodeSheetHost' -or $snapshot.title -cne $Title -or -not $snapshot.captionless) {
+        throw 'Readonly endpoint sheet identity changed before reads'
+    }
+    $raw=[Windows.Automation.TreeWalker]::RawViewWalker
+    function Read-EndpointChild([IntPtr]$parent,[string]$class,[int]$id) {
+        $handle=if ($id -eq 0) {[GraphCodeUiaGateState]::FindChild($parent,$class)}
+            else {[GraphCodeUiaGateState]::ControlById($parent,$id)}
+        if ($handle -eq [IntPtr]::Zero -or
+            [GraphCodeUiaGateState]::WindowProcessId($handle) -ne $ProcessId -or
+            [GraphCodeUiaGateState]::WindowClass($handle) -cne $class -or
+            -not [GraphCodeUiaGateState]::IsControlOwnedBy($sheet,$handle,$id)) {
+            throw 'Exact owned readonly endpoint child missing'
+        }
+        $element=[Windows.Automation.AutomationElement]::FromHandle($handle)
+        $runtime=$element.GetRuntimeId() -join ','
+        $sibling=$raw.GetFirstChild([Windows.Automation.AutomationElement]::FromHandle($parent))
+        $visited=0;$matches=0
+        while ($null -ne $sibling) {
+            if ($visited -ge 256 -or $sibling.Current.ProcessId -ne $ProcessId) {
+                throw 'Readonly endpoint children exceeded their owned bounded census'
+            }
+            $candidate=[IntPtr]::new([long]$sibling.Current.NativeWindowHandle)
+            if ($candidate -ne [IntPtr]::Zero -and
+                [GraphCodeUiaGateState]::WindowClass($candidate) -ceq $class -and
+                [GraphCodeUiaGateState]::ControlIdOf($candidate) -eq $id) {$matches++}
+            $visited++;$sibling=$raw.GetNextSibling($sibling)
+        }
+        $again=if ($id -eq 0) {[GraphCodeUiaGateState]::FindChild($parent,$class)}
+            else {[GraphCodeUiaGateState]::ControlById($parent,$id)}
+        $row=@{
+            handle=$handle.ToInt64();parent=[long]$raw.GetParent($element).Current.NativeWindowHandle
+            processId=[GraphCodeUiaGateState]::WindowProcessId($handle);semanticProcessId=$element.Current.ProcessId
+            class=[GraphCodeUiaGateState]::WindowClass($handle);controlId=[GraphCodeUiaGateState]::ControlIdOf($handle)
+            owned=[GraphCodeUiaGateState]::IsControlOwnedBy($sheet,$handle,$id)
+            runtime=$runtime;matches=$matches;stable=($again -eq $handle -and ($element.GetRuntimeId() -join ',') -ceq $runtime)
+        }
+        if ($row.parent -ne $parent.ToInt64() -or $row.matches -ne 1 -or -not $row.stable) {
+            throw 'Readonly endpoint child is duplicate, stale or not a direct owned descendant'
+        }
+        if ($id -ne 0) {
+            $pattern=$element.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
+            $row.readonly=$pattern.Current.IsReadOnly
+            $row.nativeReadonly=[GraphCodeUiaGateState]::IsReadonlyEdit($handle)
+            $row.semanticValue=$pattern.Current.Value
+            $row.value=[GraphCodeMultiProjectEditNative]::Buffer($handle,100)
+            $row.stable=$row.stable -and [GraphCodeUiaGateState]::ControlById($parent,$id) -eq $handle -and
+                ($element.GetRuntimeId() -join ',') -ceq $runtime
+        }
+        return $row
+    }
+    $snapshot.viewport=Read-EndpointChild $sheet 'GraphCodeSheetViewport' 0
+    $snapshot.content=Read-EndpointChild ([IntPtr]::new($snapshot.viewport.handle)) 'GraphCodeNativeForm' 0
+    $content=[IntPtr]::new($snapshot.content.handle)
+    $snapshot.fields=@((Read-EndpointChild $content 'Edit' 9100),(Read-EndpointChild $content 'Edit' 9101))
+    $decision=Get-UiaReadonlyEndpointsDecision $snapshot $ProcessId $Owner.ToInt64() $Title $ExpectedSource $ExpectedTarget
+    if (-not $decision.ready) {throw 'Readonly native/semantic endpoint identity or value changed'}
+    Write-Host ('UIA_READONLY_ENDPOINT_EVIDENCE=' + ($snapshot|ConvertTo-Json -Depth 6 -Compress))
+    return @{source=$decision.source;target=$decision.target;snapshot=$snapshot}
+}
+
 function Resolve-CapOwnedSheet {
     param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rows,
         [Parameter(Mandatory)][long]$RootHandle,[Parameter(Mandatory)][int]$ExpectedProcessId,
@@ -2279,7 +2397,7 @@ function Invoke-CapAction {
     if ($Action -eq 'file-exit') {
         if ($Invoker) { return & $Invoker $spec }
         $null = Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity -WindowProcessResolver $WindowProcessResolver
-        if (-not [GraphCodeUiaGateState]::PostCommand($RootHandle, [uint32]$spec.CommandId)) {
+        if (-not [CapUiaGateState]::PostCommand($RootHandle, [uint32]$spec.CommandId)) {
             throw 'Posting the native File > Exit command failed.'
         }
         return [pscustomobject]@{ Action = $Action; CommandId = $spec.CommandId; Invoked = $true }
@@ -2725,7 +2843,7 @@ function Find-CapTopLevelWindow {
     while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds -and [DateTime]::UtcNow -lt $DeadlineUtc) {
         $verified = Assert-CapProcessIdentity -Identity $ProcessIdentity
         if ($verified.State -ne 'Live') { throw "Owned app PID $($ProcessIdentity.Pid) exited before its window appeared." }
-        $window = [GraphCodeUiaGateState]::FindTopLevel($ClassName, [uint32]$ProcessIdentity.Pid)
+        $window = [CapUiaGateState]::FindTopLevel($ClassName, [uint32]$ProcessIdentity.Pid)
         if ($window -ne [IntPtr]::Zero) {
             $null = Assert-CapRootProcess -RootHandle $window -ProcessIdentity $ProcessIdentity
             return $window
@@ -3962,7 +4080,7 @@ function Test-CapPipeUnserved {
 }
 
 function Get-CapNativeBindingDeclarations {
-    $types = @([CapNative], [GraphCodeUiaGateState], [CapProcessJob])
+    $types = @([CapNative], [CapUiaGateState], [CapProcessJob])
     $declarations = [Collections.Generic.List[object]]::new()
     foreach ($type in $types) {
         foreach ($method in $type.GetMethods([Reflection.BindingFlags]'Static,Public,NonPublic')) {
@@ -6544,6 +6662,7 @@ function Assert-CapNoWorkerTransientArtifacts {
 }
 
 Export-ModuleMember -Function @(
+    'Get-UiaReadonlyEndpointsDecision','Read-UiaReadonlyEdgeEndpoints',
     'Get-CapWireTargetBinding','Assert-CapWireTargetBinding','Get-CapWireTargetObservation',
     'Resolve-CapOwnedSheet','Get-CapOwnedWindowHierarchy','Assert-CapWireTargetStable','Get-CapWireAlgorithmPreflight',
     'Get-CapMatchedSceneNames','Get-CapMatchedFocusedSceneNames','Get-CapMatchedFocusedClassification',

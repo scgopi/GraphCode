@@ -23,6 +23,7 @@ foreach ($requiredType in @(
   & (Join-Path $PSScriptRoot "Import-CompiledValidationAssembly.ps1") `
     -AssemblyPath $validationAssemblyPath -RequiredType $requiredType | Out-Null
 }
+Import-Module -Name (Join-Path $PSScriptRoot 'UiCaptureDriver.psm1') -ErrorAction Stop -WarningAction SilentlyContinue
 
 $script:uiaAttributionDirectory = $null
 $script:uiaAttributionSequence = 0
@@ -3118,104 +3119,6 @@ function Wait-UiaSettingsControlVisible($dialog, [int] $processId, [IntPtr] $own
     Start-Sleep -Milliseconds 50
   }
   throw "Settings visible viewport wait failed for '$name' within original 5000ms budget"
-}
-
-function Get-UiaReadonlyEndpointsDecision($snapshot, [int] $processId, [long] $owner,
-    [string] $title, [string] $from, [string] $to) {
-  if ($null -eq $snapshot -or $processId -le 0 -or $owner -le 0 -or
-      $snapshot.handle -le 0 -or $snapshot.processId -ne $processId -or $snapshot.owner -ne $owner -or
-      $snapshot.class -cne 'GraphCodeSheetHost' -or $snapshot.title -cne $title -or
-      $snapshot.captionless -ne $true -or [string]::IsNullOrWhiteSpace($from) -or
-      [string]::IsNullOrWhiteSpace($to) -or $from -ieq $to) { return @{ready=$false} }
-  foreach ($child in @(
-      @{row=$snapshot.viewport;parent=$snapshot.handle;class='GraphCodeSheetViewport'},
-      @{row=$snapshot.content;parent=$snapshot.viewport.handle;class='GraphCodeNativeForm'})) {
-    $row = $child.row
-    if ($null -eq $row -or $row.handle -le 0 -or $row.parent -ne $child.parent -or
-        $row.processId -ne $processId -or $row.class -cne $child.class -or $row.matches -ne 1 -or
-        $row.stable -ne $true -or $row.owned -ne $true -or
-        [string]::IsNullOrWhiteSpace($row.runtime)) { return @{ready=$false} }
-  }
-  $fields = @($snapshot.fields)
-  if ($fields.Count -ne 2) { return @{ready=$false} }
-  for ($index = 0; $index -lt 2; $index++) {
-    $row = $fields[$index]
-    $expected = @($from,$to)[$index]
-    if ($null -eq $row -or $row.handle -le 0 -or $row.parent -ne $snapshot.content.handle -or
-        $row.processId -ne $processId -or $row.semanticProcessId -ne $processId -or
-        $row.controlId -ne (9100+$index) -or $row.class -cne 'Edit' -or $row.matches -ne 1 -or
-        $row.stable -ne $true -or $row.owned -ne $true -or $row.readonly -ne $true -or
-        [string]::IsNullOrWhiteSpace($row.runtime) -or $row.value -ine $expected -or
-        $row.semanticValue -cne $row.value) { return @{ready=$false} }
-  }
-  if ($fields[0].handle -eq $fields[1].handle) { return @{ready=$false} }
-  return @{ready=$true;source=$fields[0].value;target=$fields[1].value}
-}
-
-function Read-UiaReadonlyEdgeEndpoints($dialog, [int] $processId, [IntPtr] $owner, [string] $title) {
-  & (Join-Path $PSScriptRoot 'Import-CompiledValidationAssembly.ps1') `
-    -AssemblyPath $validationAssemblyPath -RequiredType 'GraphCodeMultiProjectEditNative' | Out-Null
-  $sheet = [IntPtr]::new([long]$dialog.Current.NativeWindowHandle)
-  $snapshot = @{
-    handle=$sheet.ToInt64();processId=[GraphCodeUiaGateState]::WindowProcessId($sheet)
-    owner=[GraphCodeUiaGateState]::WindowOwner($sheet).ToInt64()
-    class=[GraphCodeUiaGateState]::WindowClass($sheet);title=[GraphCodeUiaGateState]::WindowTitle($sheet)
-    captionless=[GraphCodeUiaGateState]::IsCaptionlessSheet($sheet)
-  }
-  Require ($snapshot.processId -eq $processId -and $snapshot.owner -eq $owner.ToInt64() -and
-    $snapshot.class -ceq 'GraphCodeSheetHost' -and $snapshot.title -ceq $title -and
-    $snapshot.captionless) 'Readonly endpoint sheet identity changed before reads'
-  $raw = [System.Windows.Automation.TreeWalker]::RawViewWalker
-  function Read-EndpointChild([IntPtr] $parent, [string] $class, [int] $id) {
-    $handle = if ($id -eq 0) { [GraphCodeUiaGateState]::FindChild($parent,$class) }
-      else { [GraphCodeUiaGateState]::ControlById($parent,$id) }
-    Require ($handle -ne [IntPtr]::Zero -and
-      [GraphCodeUiaGateState]::WindowProcessId($handle) -eq $processId -and
-      [GraphCodeUiaGateState]::WindowClass($handle) -ceq $class -and
-      [GraphCodeUiaGateState]::IsControlOwnedBy($sheet,$handle,$id)) 'Exact owned readonly endpoint child missing'
-    $element = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
-    $runtime = $element.GetRuntimeId() -join ','
-    $sibling = $raw.GetFirstChild([System.Windows.Automation.AutomationElement]::FromHandle($parent))
-    $visited = 0; $matches = 0
-    while ($null -ne $sibling) {
-      Require ($visited -lt 256 -and $sibling.Current.ProcessId -eq $processId) `
-        'Readonly endpoint children exceeded their owned bounded census'
-      $candidate = [IntPtr]::new([long]$sibling.Current.NativeWindowHandle)
-      if ($candidate -ne [IntPtr]::Zero -and
-          [GraphCodeUiaGateState]::WindowClass($candidate) -ceq $class -and
-          [GraphCodeUiaGateState]::ControlIdOf($candidate) -eq $id) { $matches++ }
-      $visited++; $sibling = $raw.GetNextSibling($sibling)
-    }
-    $again = if ($id -eq 0) { [GraphCodeUiaGateState]::FindChild($parent,$class) }
-      else { [GraphCodeUiaGateState]::ControlById($parent,$id) }
-    $row = @{
-      handle=$handle.ToInt64();parent=[long]$raw.GetParent($element).Current.NativeWindowHandle
-      processId=[GraphCodeUiaGateState]::WindowProcessId($handle);semanticProcessId=$element.Current.ProcessId
-      class=[GraphCodeUiaGateState]::WindowClass($handle);controlId=[GraphCodeUiaGateState]::ControlIdOf($handle)
-      owned=[GraphCodeUiaGateState]::IsControlOwnedBy($sheet,$handle,$id)
-      runtime=$runtime;matches=$matches;stable=($again -eq $handle -and ($element.GetRuntimeId() -join ',') -ceq $runtime)
-    }
-    Require ($row.parent -eq $parent.ToInt64() -and $row.matches -eq 1 -and $row.stable) `
-      'Readonly endpoint child is duplicate, stale or not a direct owned descendant'
-    if ($id -ne 0) {
-      $pattern = $element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-      $row.readonly = $pattern.Current.IsReadOnly
-      $row.semanticValue = $pattern.Current.Value
-      $row.value = [GraphCodeMultiProjectEditNative]::Buffer($handle,100)
-      $row.stable = $row.stable -and [GraphCodeUiaGateState]::ControlById($parent,$id) -eq $handle -and
-        ($element.GetRuntimeId() -join ',') -ceq $runtime
-    }
-    return $row
-  }
-  $snapshot.viewport = Read-EndpointChild $sheet 'GraphCodeSheetViewport' 0
-  $snapshot.content = Read-EndpointChild ([IntPtr]::new($snapshot.viewport.handle)) 'GraphCodeNativeForm' 0
-  $content = [IntPtr]::new($snapshot.content.handle)
-  $snapshot.fields = @((Read-EndpointChild $content 'Edit' 9100),(Read-EndpointChild $content 'Edit' 9101))
-  $decision = Get-UiaReadonlyEndpointsDecision $snapshot $processId $owner.ToInt64() $title `
-    '11111111-1111-4111-8111-111111111111' '22222222-2222-4222-8222-222222222222'
-  Require $decision.ready 'Readonly native/semantic endpoint identity or value changed'
-  Write-Host ('UIA_READONLY_ENDPOINT_EVIDENCE=' + ($snapshot | ConvertTo-Json -Depth 6 -Compress))
-  return $decision
 }
 
 function Get-CardsFixtureRestorationDecision([object[]] $before, [object[]] $after, [int] $processId) {
@@ -6996,7 +6899,8 @@ try {
   $edgeDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
     "GraphCodeNativeForm" "Create or edit edge" "connector drag Create or edit edge sheet"
   Require ($null -ne $edgeDialog) "dragging from the connector to the target card did not open the Create or edit edge dialog"
-  $edgeEndpoints = Read-UiaReadonlyEdgeEndpoints $edgeDialog $process.Id $shellWindow 'Create or edit edge'
+  $edgeEndpoints = Read-UiaReadonlyEdgeEndpoints $edgeDialog $process.Id $shellWindow 'Create or edit edge' `
+    -AssemblyPath $validationAssemblyPath
   $edgeFromValue = $edgeEndpoints.source
   $edgeToValue = $edgeEndpoints.target
   Require ($edgeFromValue -eq "11111111-1111-4111-8111-111111111111") `
@@ -9460,7 +9364,8 @@ try {
   $canvasEdgeEditDialogOpened = $null -ne $canvasEdgeDialog
   Require $canvasEdgeEditDialogOpened `
     "clicking Edit Edge from the canvas did not open the edge editor: $($editEdgeClickEvidence | ConvertTo-Json -Compress)"
-  $canvasEdgeEndpoints = Read-UiaReadonlyEdgeEndpoints $canvasEdgeDialog $process.Id $shellWindow 'Edit edge'
+  $canvasEdgeEndpoints = Read-UiaReadonlyEdgeEndpoints $canvasEdgeDialog $process.Id $shellWindow 'Edit edge' `
+    -AssemblyPath $validationAssemblyPath
   $canvasEdgeFromId = $canvasEdgeEndpoints.source
   $canvasEdgeToId = $canvasEdgeEndpoints.target
   Require ($canvasEdgeFromId -eq "11111111-1111-4111-8111-111111111111") `
