@@ -1117,7 +1117,11 @@ fn minimumWindowWidth(hwnd: c.HWND, dpi: u32) i32 {
 }
 
 fn windowWidthForClient(hwnd: c.HWND, dpi: u32, client_width: i32) i32 {
-    var frame = c.RECT{ .left = 0, .top = 0, .right = physicalCoordinate(client_width, dpi), .bottom = 0 };
+    return windowWidthForPhysicalClient(hwnd, dpi, physicalCoordinate(client_width, dpi));
+}
+
+fn windowWidthForPhysicalClient(hwnd: c.HWND, dpi: u32, client_width: i32) i32 {
+    var frame = c.RECT{ .left = 0, .top = 0, .right = client_width, .bottom = 0 };
     const style: c.DWORD = @truncate(@as(usize, @bitCast(c.GetWindowLongPtrW(hwnd, c.GWL_STYLE))));
     const ex_style: c.DWORD = @truncate(@as(usize, @bitCast(c.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE))));
     const has_menu: c.BOOL = if (c.GetMenu(hwnd) != null) 1 else 0;
@@ -8297,13 +8301,13 @@ pub const App = struct {
             return minimumWindowWidth(self.window.hwnd, self.dpi);
         }
         const work_width = info.rcWork.right - info.rcWork.left;
-        var client_width = min_client_width;
+        var client_width = physicalCoordinate(min_client_width, self.dpi);
         if (self.workspace) |workspace| {
             client_width = @max(client_width, workspace.minimumChromeWidth() +|
-                (if (self.workspace_controls.rail_visible) Tokens.sidebar_width else @as(i32, 0)) +|
-                (if (self.workspace_controls.panel_visible) Tokens.loop_detail_width else @as(i32, 0)));
+                (if (self.workspace_controls.rail_visible) physicalCoordinate(Tokens.sidebar_width, self.dpi) else @as(i32, 0)) +|
+                (if (self.workspace_controls.panel_visible) physicalCoordinate(Tokens.loop_detail_width, self.dpi) else @as(i32, 0)));
         }
-        const desired = windowWidthForClient(self.window.hwnd, self.dpi, @min(client_width, Dpi.unscale(work_width, self.dpi)));
+        const desired = windowWidthForPhysicalClient(self.window.hwnd, self.dpi, @min(client_width, work_width));
         return @min(desired, work_width);
     }
 

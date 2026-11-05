@@ -40,8 +40,10 @@ DPI: 25-point tab pills inside a 37-point strip, 22-point pane headers,
 24-by-22-point split/New Tab controls, and a 24-point close target. A
 visible workspace propagates the strip's intrinsic minimum to the native
 window, expanding it when tabs or the detail panel need more room. Twelve tabs
-require 1254 logical pixels of terminal width, plus the visible sidebar and
-detail panel; the exact outer width includes native window borders. Expansion
+require 1254 logical pixels of terminal width at base DPI, plus the visible
+sidebar and detail panel. At other DPIs the minimum sums each rounded physical
+component, including the separately scaled visible panels, before adding native
+window borders; scaling the combined logical width can hide a tab. Expansion
 never activates the window or exceeds its monitor's work area. Maximized or
 monitor-constrained windows retain the selected-tab overflow window rather than
 shrinking pills, rescaling the terminal, or moving tabs between sessions.

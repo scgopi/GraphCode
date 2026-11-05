@@ -2166,11 +2166,15 @@ pub const Workspace = struct {
         return tabLabel(tab);
     }
 
+    /// Physical pixels, using the same per-component rounding as the tab geometry.
     pub fn minimumChromeWidth(self: *const Workspace) i32 {
         const count = std.math.cast(i32, self.tabCount()) orelse return std.math.maxInt(i32);
-        const controls = 3 * Tokens.tab_control_width + 2 * Tokens.tab_control_gap;
-        return count *| Tokens.tab_min_width +| @max(0, count - 1) *| Tokens.tab_gap +|
-            (2 * Tokens.tab_bar_inset + Tokens.tab_controls_gap + controls);
+        const controls = 3 *| Dpi.scale(Tokens.tab_control_width, self.dpi) +|
+            2 *| Dpi.scale(Tokens.tab_control_gap, self.dpi);
+        return count *| Dpi.scale(Tokens.tab_min_width, self.dpi) +|
+            @max(0, count - 1) *| Dpi.scale(Tokens.tab_gap, self.dpi) +|
+            2 *| Dpi.scale(Tokens.tab_bar_inset, self.dpi) +|
+            Dpi.scale(Tokens.tab_controls_gap, self.dpi) +| controls;
     }
 
     pub fn resize(self: *Workspace, origin_x: i32, origin_y: i32, width: i32, height: i32) void {
@@ -8268,8 +8272,8 @@ test "terminal parity intrinsic width displays all twelve tabs without changing 
             var id: [32]u8 = undefined;
             try workspace.layout.addTab(try std.fmt.bufPrint(&id, "shell-{d}", .{index}), false);
         }
-        try std.testing.expectEqual(@as(i32, 1254), workspace.minimumChromeWidth());
-        workspace.layout_width = Dpi.scale(workspace.minimumChromeWidth(), dpi);
+        try std.testing.expectEqual(Dpi.scale(1254, dpi), workspace.minimumChromeWidth());
+        workspace.layout_width = workspace.minimumChromeWidth();
         for ([_]usize{ 0, 11 }) |selected| {
             try workspace.layout.selectTab(selected);
             for (0..12) |index| {
@@ -8306,7 +8310,7 @@ fn expectTwelveTabsAtFractionalDpiMinimum(dpi: u32) !void {
         var id: [32]u8 = undefined;
         try workspace.layout.addTab(try std.fmt.bufPrint(&id, "shell-{d}", .{index}), false);
     }
-    workspace.layout_width = Dpi.scale(workspace.minimumChromeWidth(), dpi);
+    workspace.layout_width = workspace.minimumChromeWidth();
     const controls = chromeControlBounds(0, 0, workspace.layout_width, dpi, 0);
     const available = controls.left - Dpi.scale(Tokens.tab_controls_gap, dpi) -
         Dpi.scale(Tokens.tab_bar_inset, dpi);
