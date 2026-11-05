@@ -178,6 +178,13 @@ public sealed class CapPointerReceipt {
   public string Delivery = "POSTED_WINDOW_MESSAGES_NOT_PHYSICAL_POINTER";
 }
 
+public sealed class CapPointerDragReceipt {
+  public CapPointerReceipt Start, End;
+  public bool HeldMovePosted;
+  public string Gesture = "SOURCE_CONNECTOR_DRAG_DROP";
+  public string Delivery = "POSTED_WINDOW_MESSAGES_NOT_PHYSICAL_POINTER";
+}
+
 public static class CapNative {
   private const uint WAIT_OBJECT_0 = 0;
   private const uint WAIT_TIMEOUT = 0x102;
@@ -352,6 +359,16 @@ public static class CapNative {
     IntPtr previous = EnterPerMonitorV2();
     Exception primary=null;
     try {
+      var result=ObservePointer(window, screenX, screenY, requireRecipient);
+      DispatchPointerMessages(result, delegate(uint message, uint keys, long position) {
+        return PostMessage(window, message, (UIntPtr)keys, new IntPtr(position));
+      });
+      return result;
+    } catch (Exception error) { primary=error; throw; }
+    finally { RestoreDpiAwareness(previous, primary); }
+  }
+
+  private static CapPointerReceipt ObservePointer(IntPtr window, int screenX, int screenY, bool requireRecipient) {
       NativePoint cursor;
       if (!GetCursorPos(out cursor))
         throw new InvalidOperationException("Pointer cursor observation failed: " + Marshal.GetLastWin32Error());
@@ -369,17 +386,45 @@ public static class CapNative {
       var client=ConvertPointerScreen(window, screenX, screenY);
       point.X=client[0]; point.Y=client[1];
       long packed = (point.Y & 0xffff) << 16 | (point.X & 0xffff);
-      var result = new CapPointerReceipt { Window=window.ToInt64(), Recipient=recipient.ToInt64(),
+      return new CapPointerReceipt { Window=window.ToInt64(), Recipient=recipient.ToInt64(),
         Foreground=GetForegroundWindow().ToInt64(), ProcessId=(int)pid, RecipientProcessId=(int)recipientPid,
         ScreenX=screenX, ScreenY=screenY, ClientX=point.X, ClientY=point.Y, PackedLParam=packed,
         DpiContext=GetThreadDpiAwarenessContext().ToInt64(), CursorX=cursor.X, CursorY=cursor.Y,
         CursorWindow=WindowFromPoint(cursor).ToInt64() };
-      DispatchPointerMessages(result, delegate(uint message, uint keys, long position) {
-        return PostMessage(window, message, (UIntPtr)keys, new IntPtr(position));
+  }
+
+  public static CapPointerDragReceipt PostPointerDragScreen(IntPtr window, int startX, int startY, int endX, int endY) {
+    IntPtr previous=EnterPerMonitorV2();
+    Exception primary=null;
+    var result=new CapPointerDragReceipt();
+    try {
+      // Observe both actual recipients before posting any part of the gesture.
+      result.Start=ObservePointer(window,startX,startY,true);
+      result.End=ObservePointer(window,endX,endY,true);
+      DispatchPointerDragMessages(result, delegate(uint message,uint keys,long position) {
+        return PostMessage(window,message,(UIntPtr)keys,new IntPtr(position));
       });
       return result;
-    } catch (Exception error) { primary=error; throw; }
+    } catch (Exception error) {
+      error.Data["PointerDragReceipt"]=result;
+      primary=error;
+      throw;
+    }
     finally { RestoreDpiAwareness(previous, primary); }
+  }
+
+  public static void DispatchPointerDragMessages(CapPointerDragReceipt result, Func<uint,uint,long,bool> poster) {
+    try {
+      result.Start.MovePosted=poster(0x0200,0,result.Start.PackedLParam);
+      if (result.Start.MovePosted) result.Start.DownPosted=poster(0x0201,1,result.Start.PackedLParam);
+      if (result.Start.DownPosted) result.HeldMovePosted=poster(0x0200,1,result.End.PackedLParam);
+      if (result.HeldMovePosted) result.End.UpPosted=poster(0x0202,0,result.End.PackedLParam);
+      if (!result.Start.MovePosted || !result.Start.DownPosted || !result.HeldMovePosted || !result.End.UpPosted)
+        throw new InvalidOperationException("Native pointer drag dispatch failed; no retry or synthetic release.");
+    } catch (Exception error) {
+      error.Data["PointerDragReceipt"]=result;
+      throw;
+    }
   }
 
   public static void DispatchPointerMessages(CapPointerReceipt result, Func<uint,uint,long,bool> poster) {
@@ -1914,14 +1959,16 @@ function Get-CapWireTargetBinding {
         $sources['NativeForms.zig'] -notmatch 'c\.WS_CHILD \| c\.WS_VISIBLE \| c\.WS_CLIPCHILDREN' -or
         $sources['NativeForms.zig'] -notmatch 'sheet\.viewport,' -or
         $sources['NativeForms.zig'] -notmatch 'const class_name = .*"GraphCodeNativeForm"' -or
-        $sources['SheetFramework.zig'] -notmatch 'const host_class = .*"GraphCodeSheetHost"') {
+        $sources['SheetFramework.zig'] -notmatch 'const host_class = .*"GraphCodeSheetHost"' -or
+        $canvas -notmatch '(?s)fn connectorPositionForIndex\(.*?\.x = if \(outgoing\) bounds\.right else bounds\.left,.*?\.y = @divTrunc\(bounds\.top \+ bounds\.bottom, 2\),') {
         throw 'Wire target source geometry or sheet hierarchy changed; no guessed fallback.'
     }
     $project=Join-Path ([IO.Path]::GetFullPath($OwnedRoot).TrimEnd('\')) 'fixtures\wire-project'
     $source='60000000-0000-4000-8000-000000000001'
     $target='60000000-0000-4000-8000-000000000002'
     return [pscustomobject]@{
-        schemaVersion=1L;scene='s-goal-unwired-unselected';phase='wire-completion'
+        schemaVersion=2L;scene='s-goal-unwired-unselected';phase='wire-completion'
+        gesture='SOURCE_CONNECTOR_DRAG_DROP';sourceConnector='RIGHT_CENTRE'
         projectPath=$project;sourceNodeId=$source;targetNodeId=$target
         sourceCardId=(Get-CapMatchedAutomationId "project-card:$project`:$source")
         targetCardId=(Get-CapMatchedAutomationId "project-card:$project`:$target")
@@ -1985,6 +2032,11 @@ function Get-CapWireTargetObservation {
         ($bounds[0]+$Binding.safeLogicalBounds[2]*$scale),
         ($bounds[1]+$Binding.safeLogicalBounds[3]*$scale))
     $point=@([int][Math]::Floor(($safe[0]+$safe[2])/2),[int][Math]::Floor(($safe[1]+$safe[3])/2))
+    if ($Binding.gesture -cne 'SOURCE_CONNECTOR_DRAG_DROP' -or $Binding.sourceConnector -cne 'RIGHT_CENTRE') {
+        throw 'Unsupported wire gesture or source connector binding.'
+    }
+    $start=@([int][Math]::Floor($source[0].Bounds[2]),
+        [int][Math]::Floor(($source[0].Bounds[1]+$source[0].Bounds[3])/2))
     foreach ($row in $Rows) {
         if ($row.AutomationId -ceq $Binding.targetCardId -or $row.AutomationId -cin @('graph','status')) {continue}
         $b=@($row.Bounds)
@@ -1993,10 +2045,18 @@ function Get-CapWireTargetObservation {
             throw "Unsafe wire target point overlaps another card/control: $($row.AutomationId)"
         }
     }
+    foreach ($row in $Rows) {
+        if ($row.AutomationId -ceq $Binding.sourceCardId -or $row.AutomationId -cin @('graph','status')) {continue}
+        $b=@($row.Bounds)
+        if (-not $row.IsOffscreen -and $b.Count -eq 4 -and $start[0] -ge $b[0] -and
+            $start[0] -lt $b[2] -and $start[1] -ge $b[1] -and $start[1] -lt $b[3]) {
+            throw "Unsafe wire source connector overlaps another card/control: $($row.AutomationId)"
+        }
+    }
     if ($point[0] -le $bounds[0] -or $point[0] -ge $bounds[2] -or
         $point[1] -le $bounds[1] -or $point[1] -ge $bounds[3]) {throw 'Unsafe wire target point outside card.'}
     return [pscustomobject]@{binding=$Binding;source=$source[0];target=$target[0]
-        mode=$status[0].Name;safeBounds=$safe;screenPoint=$point;dpi=$Dpi}
+        mode=$status[0].Name;safeBounds=$safe;screenPoint=$point;sourceScreenPoint=$start;dpi=$Dpi}
 }
 
 function Resolve-CapOwnedSheet {

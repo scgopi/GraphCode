@@ -2555,12 +2555,13 @@ function Invoke-CapWireCompletionSupplement {
             -ObservedProcessIds @($heldRootElement.Current.ProcessId)
         $null=Assert-CapRootProcess -RootHandle $app.Window -ProcessIdentity $app.Run.Identity
         $targetX=$reacquired.screenPoint[0];$targetY=$reacquired.screenPoint[1]
+        $sourceX=$reacquired.sourceScreenPoint[0];$sourceY=$reacquired.sourceScreenPoint[1]
         Write-CapTrace -Command 'WirePointerDispatchIntent' -Parameters @{
             root=[long]$app.Window;process=$app.Run.Identity.Pid;generation=$app.Run.Identity.CreationFileTimeUtc
             target=($reacquired|ConvertTo-Json -Depth 20 -Compress)
             beforeHierarchy=($beforeHierarchy|ConvertTo-Json -Depth 10 -Compress)
             rootRuntimeId=($rootRuntime|ConvertTo-Json -Compress)}
-        $dispatch=[CapNative]::PostPointerClickScreen($app.Window,$targetX,$targetY)
+        $dispatch=[CapNative]::PostPointerDragScreen($app.Window,$sourceX,$sourceY,$targetX,$targetY)
         Write-CapTrace -Command 'WirePointerDispatchResult' -Parameters @{
             receipt=($dispatch|ConvertTo-Json -Depth 10 -Compress)}
         $sheet=$null
@@ -2651,6 +2652,7 @@ function Invoke-CapWireCompletionSupplement {
             wireAutomationId=$wireId
             armedStatus=$reacquired.mode
             targetScreenPoint=@($targetX,$targetY)
+            sourceConnectorScreenPoint=@($sourceX,$sourceY)
             targetObservation=$reacquired
             pointerDispatch=$dispatch
             windowHierarchyBefore=$beforeHierarchy
@@ -2676,7 +2678,10 @@ function Invoke-CapWireCompletionSupplement {
         return $receipt
     } catch {
         $primary=$_
-        Write-CapTrace -Command 'WireSupplementPrimaryFailure' -Parameters @{error=$_.Exception.ToString()}
+        $cause=$_.Exception
+        while ($cause.InnerException) {$cause=$cause.InnerException}
+        Write-CapTrace -Command 'WireSupplementPrimaryFailure' -Parameters @{error=$_.Exception.ToString()
+            pointerDragReceipt=($cause.Data['PointerDragReceipt']|ConvertTo-Json -Depth 10 -Compress)}
         throw
     } finally {
         $wireCleanupErrors=[Collections.Generic.List[object]]::new()
