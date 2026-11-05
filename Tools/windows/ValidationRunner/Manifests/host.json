@@ -31,6 +31,7 @@
     { "id": "ps.pester-version", "owner": "Host", "minimumCount": 14, "exactCount": 14 },
     { "id": "ps.isolated-process-environment", "owner": "Host", "minimumCount": 14, "exactCount": 14 },
     { "id": "ps.fixture-directory", "owner": "Host", "minimumCount": 28, "exactCount": 28 },
+    { "id": "ps.tray-admission", "owner": "Host", "minimumCount": 16, "exactCount": 16 },
     { "id": "ps.ui-scenario", "owner": "Host", "minimumCount": 1 },
     { "id": "ps.ui-capture", "owner": "Host", "minimumCount": 182, "exactCount": 182,
       "requiredGroups": [

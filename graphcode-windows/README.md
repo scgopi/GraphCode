@@ -1055,6 +1055,32 @@ the explicit attention-border RGB as a Windows mapping, not a verified
 resolution of SwiftUI `.orange`. Blur/compositing equivalence and the static
 attention endpoints still require separate visual/temporal evidence.
 
+Windows card ZIP export commits the completed archive with a handle-relative
+native rename (`NtSetInformationFile`, `FileRenameInformation`). The original
+parent and archive handles stay held; there is no absolute-path rename fallback.
+Existing destinations require explicit replacement approval. Pending, failed or
+unobserved native completion retains staging and reports both NTSTATUS values
+rather than claiming publication. Native commit regressions cover absent and
+existing targets, held source/parent/target custody and synchronous completion.
+This headless coverage does not establish native picker destination selection.
+
+The card's attention face follows the same display state as its state pill:
+NEEDS YOU warms the face and amber halo even when the underlying lifecycle is
+not `running`. Selection replaces the hairline with the solid selection ring,
+not the warm face or halo; an unselected unwired card retains its amber dash and
+dimmed type stripe. A closed blocked cycle with no stranded upstream remains
+neutral but still offers Inspect in the leading body row, above its metadata
+reason. Inspect uses a 60-by-20 logical button, 11-point bold text and 9-point
+horizontal padding; titles remain 14.5-point semibold, and Wire it up retains
+11-point semibold text with the same horizontal padding. Recovery control
+bounds, identities and Wire/Mark actions are unchanged.
+
+The `cards paired review` GraphCanvas selector covers these contracts, including
+Goal/Main/Composite, selection and entry/interior/unwired/cycle roles. Set
+`GRAPHCODE_NATIVE_PAINT_TESTS=1` to execute its production GDI+ composition case;
+without it that case is skipped. These are offscreen component checks, not
+live UIA, paired glyph/blur equivalence or whole-row parity acceptance.
+
 ### Offscreen canvas paint artifact
 
 The opt-in `paint export: <scene-id>` Zig test calls the production

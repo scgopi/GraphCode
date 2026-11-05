@@ -22,8 +22,152 @@ public sealed class NativeUiSuite : IValidationSuite
         "ui.native.hit.nested-edit", "ui.native.hit.content-background",
         "ui.native.hit.wrong-root", "ui.native.hit.wrong-container",
         "ui.native.hit.no-recursion", "ui.native.hit.direct-child",
-        "ui.host-info.current-session"
+        "ui.host-info.current-session",
+        "ui.native.dpi.physical-coordinates", "ui.native.dpi.exact-restore",
+        "ui.native.dpi.invalid-restore", "ui.native.dpi.failed-set",
+        "ui.native.dpi.foreign-thread", "ui.native.dpi.source-boundary",
+        "ui.native.dpi.primary-error-preserved"
     };
+
+    public static int RunPopupEffects()
+    {
+        ControlClickTopologyFixture? fixture = null;
+        GraphCodeUiaGateState.ThreadDpiContext? dpi = null;
+        Exception? primary = null;
+        var cleanup = new List<Exception>();
+        int effects = 0;
+        var json = new System.Text.Json.JsonSerializerOptions { IncludeFields = true };
+        void Write(string label, object value) =>
+            Console.WriteLine(label + "=" + System.Text.Json.JsonSerializer.Serialize(value, json));
+        void Wait(Func<bool> condition, Stopwatch clock, int budget, string label)
+        {
+            while (!condition())
+            {
+                if (clock.ElapsedMilliseconds >= budget) throw new TimeoutException(label);
+                Thread.Sleep(50);
+            }
+        }
+        try
+        {
+            dpi = GraphCodeUiaGateState.EnterPhysicalDpiCoordinates();
+            fixture = new ControlClickTopologyFixture(false, nativePopup: true);
+            var host = fixture.PopupWindow ?? throw new InvalidOperationException("Native popup window missing");
+            IntPtr root = fixture.Root;
+            uint pid = checked((uint)Environment.ProcessId);
+            Write("NATIVE_POPUP_AWAIT", new { pid, root = root.ToInt64(), title = NativePopupEffectWindow.HostTitle,
+                admissionMilliseconds = 60000, sameProcessFixture = true });
+            var admission = Stopwatch.StartNew();
+            string? lastAdmissionState = null;
+            Wait(() =>
+            {
+                bool foreground = GraphCodeUiaGateState.IsForegroundWindow(root);
+                uint actualPid = GraphCodeUiaGateState.WindowProcessId(root);
+                bool visible = GraphCodeUiaGateState.WindowIsVisible(root);
+                bool enabled = GraphCodeUiaGateState.WindowIsEnabled(root);
+                string state = System.Text.Json.JsonSerializer.Serialize(new { foreground, actualPid, visible, enabled });
+                if (state != lastAdmissionState)
+                {
+                    Write("NATIVE_POPUP_ADMISSION_STATE", new { pid, root = root.ToInt64(), foreground,
+                        actualPid, visible, enabled, elapsed = admission.ElapsedMilliseconds });
+                    lastAdmissionState = state;
+                }
+                return foreground && actualPid == pid && visible && enabled;
+            },
+                admission, 60000, "Owned native popup fixture foreground/health was not admitted");
+            Write("NATIVE_POPUP_ADMITTED", new { pid, root = root.ToInt64(), elapsed = admission.ElapsedMilliseconds });
+            fixture.BeginInput();
+            foreach (string name in new[] { "first-open", "repeat-open", "cancel-reopen" })
+            {
+                var clock = Stopwatch.StartNew();
+                IntPtr Open()
+                {
+                    if (host.MenuHandle != IntPtr.Zero || host.Completed != host.Opens)
+                        throw new InvalidOperationException("Previous owned native popup has not completed");
+                    int sequence = host.Opens + 1;
+                    int[] b = fixture.Bounds;
+                    int[] input = GraphCodeUiaGateState.ClickOwnedScreenRectangle(root, b[0], b[1], b[2], b[3], true);
+                    ActivationCases.Require(input.Length == 8 && input[6] == 2 && input[7] == 2,
+                        "Owned native popup opening did not inject exactly two right-button events");
+                    IntPtr popup = IntPtr.Zero;
+                    Wait(() =>
+                    {
+                        if (host.Failure is not null) throw host.Failure;
+                        IntPtr menu = host.MenuHandle;
+                        popup = menu == IntPtr.Zero ? IntPtr.Zero : GraphCodeUiaGateState.FindPopupForMenu(pid, menu);
+                        return popup != IntPtr.Zero && host.Opens == sequence;
+                    }, clock, 5000, "Owned native popup did not appear within original case budget");
+                    Write("NATIVE_POPUP_ENTRY", new { name, sequence, pid, owner = root.ToInt64(),
+                        popup = popup.ToInt64(), menu = host.MenuHandle.ToInt64(), popupBounds = GraphCodeUiaGateState.WindowBounds(popup),
+                        rawState = GraphCodeUiaGateState.PopupMenuItemState(host.MenuHandle, 2),
+                        callerThread = PromptLookupFixture.GetCurrentThreadId(),
+                        menuDpi = PromptLookupFixture.GetDpiForWindow(popup), elapsed = clock.ElapsedMilliseconds });
+                    return popup;
+                }
+                void Complete(int sequence)
+                {
+                    Wait(() => host.Completed == sequence,
+                        clock, 5000, "Native TrackPopupMenu return/effect did not complete within original case budget");
+                    if (host.Failure is not null) throw host.Failure;
+                }
+                int callbacks = host.Callbacks;
+                if (name == "cancel-reopen")
+                {
+                    _ = Open();
+                    int sequence = host.Opens;
+                    GraphCodeUiaGateState.CancelPopupMenu(root);
+                    Complete(sequence);
+                    ActivationCases.Require(host.SelectedCommand == 0 && host.Callbacks == callbacks,
+                        "Explicit native cancellation selected a command or emitted a callback");
+                    Write("NATIVE_POPUP_CANCEL", new { name, sequence, selectedCommand = host.SelectedCommand,
+                        callbacks = host.Callbacks, elapsed = clock.ElapsedMilliseconds });
+                }
+                IntPtr targetPopup = Open();
+                int targetSequence = host.Opens;
+                Write("NATIVE_POPUP_STRICT_BEGIN", new { name, targetSequence, elapsed = clock.ElapsedMilliseconds });
+                var hit = GraphCodeUiaGateState.ClickPopupMenuItemStrict(targetPopup, root, 2,
+                    checked((int)NativePopupEffectWindow.ExpectedCommand), pid);
+                Write("NATIVE_POPUP_STRICT_RETURN", new { name, hit, elapsed = clock.ElapsedMilliseconds });
+                Complete(targetSequence);
+                ActivationCases.Require(host.SelectedCommand == NativePopupEffectWindow.ExpectedCommand &&
+                    host.Callbacks == callbacks + 1 && hit.ItemId == NativePopupEffectWindow.ExpectedCommand &&
+                    !hit.UsedKeyboardFallback && !hit.UsedSelectItemFallback,
+                    "Strict popup receipt did not produce the actual TrackPopupMenu command/callback");
+                effects++;
+                Write("NATIVE_POPUP_EFFECT", new { name, selectedCommand = host.SelectedCommand,
+                    callbacks = host.Callbacks, effects, elapsed = clock.ElapsedMilliseconds, sameProcessFixture = true });
+            }
+        }
+        catch (Exception failure)
+        {
+            primary = failure;
+            var data = new Dictionary<string, object?>();
+            foreach (System.Collections.DictionaryEntry entry in failure.Data)
+                data.Add((string)entry.Key, entry.Value);
+            Write("NATIVE_POPUP_FIRST_FAILURE", new { error = failure.ToString(), data, effects });
+        }
+        finally
+        {
+            if (fixture is not null)
+            {
+                try
+                {
+                    if (fixture.PopupWindow is { MenuHandle: var menu } && menu != IntPtr.Zero)
+                        GraphCodeUiaGateState.CancelPopupMenu(fixture.Root);
+                    fixture.Dispose();
+                }
+                catch (Exception failure) { cleanup.Add(failure); }
+            }
+            if (dpi is not null)
+            {
+                try { GraphCodeUiaGateState.RestorePhysicalDpiCoordinates(dpi.Value); }
+                catch (Exception failure) { cleanup.Add(failure); }
+            }
+        }
+        Write("NATIVE_POPUP_TERMINAL", new { effects, requestedCases = 3, failed = primary is not null,
+            cleanupFailures = cleanup.ConvertAll(error => error.ToString()), sameProcessFixture = true,
+            crossProcessAppCallbackProven = false });
+        return primary is null && cleanup.Count == 0 && effects == 3 ? 0 : 1;
+    }
 
     public Task<IReadOnlyList<UnitResult>> RunAsync(ValidationContext context, CancellationToken cancellationToken)
     {
@@ -43,14 +187,15 @@ public sealed class NativeUiSuite : IValidationSuite
                 roots.Add(window);
                 return window;
             }
-            void Check(string id, Action assertion)
+            void Check(string id, Action assertion, string evidence =
+                "Actual compiled helper and hidden owned Win32 fixture")
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
                     assertion();
                     results.Add(new UnitResult(id, UnitStatus.Passed, 1,
-                        "Actual compiled helper and hidden owned Win32 fixture; ValidationRunner.Tests.ps1:7431-7624"));
+                        evidence));
                 }
                 catch (InvalidOperationException failure)
                 {
@@ -172,6 +317,127 @@ public sealed class NativeUiSuite : IValidationSuite
             Check("ui.host-info.current-session", () => ActivationCases.Require(
                 GraphCodeUiaHostInfo.CurrentSessionId() == checked((uint)Process.GetCurrentProcess().SessionId),
                 "RED: UIA host context did not resolve the current Windows session"));
+            Check("ui.native.dpi.physical-coordinates", () =>
+            {
+                IntPtr initial = PromptLookupFixture.GetThreadDpiAwarenessContext();
+                ActivationCases.Require(PromptLookupFixture.SetThreadDpiAwarenessContext(new IntPtr(-1)) != IntPtr.Zero,
+                    "Cannot establish unaware native coordinate control");
+                try
+                {
+                    IntPtr unaware = PromptLookupFixture.GetThreadDpiAwarenessContext();
+                    var scope = GraphCodeUiaGateState.EnterPhysicalDpiCoordinates();
+                    IntPtr window;
+                    int[] physical;
+                    try
+                    {
+                        window = NewRoot("STATIC");
+                        PromptLookupFixture.Place(window, 400, 300, 400, 300);
+                        physical = GraphCodeUiaGateState.ClientScreenBounds(window);
+                    }
+                    finally { GraphCodeUiaGateState.RestorePhysicalDpiCoordinates(scope); }
+                    ActivationCases.Require(PromptLookupFixture.AreDpiAwarenessContextsEqual(
+                        PromptLookupFixture.GetThreadDpiAwarenessContext(), unaware),
+                        "Creating the fixture did not restore the unaware caller");
+                    int screenX = physical[0] + 50, screenY = physical[1] + 50;
+                    ActivationCases.Require(GraphCodeUiaGateState.ScreenToClientPoint(
+                        window, screenX, screenY, out int ux, out int uy),
+                        "Unaware native screen-to-client control failed");
+                    scope = GraphCodeUiaGateState.EnterPhysicalDpiCoordinates();
+                    try
+                    {
+                        var uia = System.Windows.Automation.AutomationElement.FromHandle(window).Current.BoundingRectangle;
+                        var native = GraphCodeUiaAttribution.Bounds(window);
+                        ActivationCases.Require(
+                            !PromptLookupFixture.IsWindowVisible(window) &&
+                            GraphCodeUiaGateState.WindowProcessId(window) == (uint)Environment.ProcessId &&
+                            uia.Left == native.Left && uia.Top == native.Top &&
+                            uia.Right == native.Right && uia.Bottom == native.Bottom &&
+                            GraphCodeUiaGateState.ClientScreenBounds(window).AsSpan().SequenceEqual(physical) &&
+                            GraphCodeUiaGateState.ScreenToClientPoint(window, screenX, screenY, out int x, out int y) &&
+                            x == 50 && y == 50 &&
+                            (PromptLookupFixture.GetDpiForWindow(window) <= 96 || ux != 50 || uy != 50),
+                            "Physical UIA/native coordinate scope did not preserve the fixed owned physical point");
+                    }
+                    finally { GraphCodeUiaGateState.RestorePhysicalDpiCoordinates(scope); }
+                }
+                finally
+                {
+                    ActivationCases.Require(PromptLookupFixture.SetThreadDpiAwarenessContext(initial) != IntPtr.Zero &&
+                        PromptLookupFixture.AreDpiAwarenessContextsEqual(
+                            PromptLookupFixture.GetThreadDpiAwarenessContext(), initial),
+                        "Native coordinate control did not restore its initial exact context");
+                }
+            });
+            Check("ui.native.dpi.exact-restore", () =>
+            {
+                IntPtr before = PromptLookupFixture.GetThreadDpiAwarenessContext();
+                var scope = GraphCodeUiaGateState.EnterPhysicalDpiCoordinates();
+                try
+                {
+                    ActivationCases.Require(scope.Context == before &&
+                        scope.ThreadId == PromptLookupFixture.GetCurrentThreadId() &&
+                        PromptLookupFixture.AreDpiAwarenessContextsEqual(
+                            PromptLookupFixture.GetThreadDpiAwarenessContext(), new IntPtr(-4)),
+                        "UIA scope did not retain the stable pre-entry token and capture thread");
+                }
+                finally { GraphCodeUiaGateState.RestorePhysicalDpiCoordinates(scope); }
+                ActivationCases.Require(PromptLookupFixture.AreDpiAwarenessContextsEqual(
+                    PromptLookupFixture.GetThreadDpiAwarenessContext(), before),
+                    "UIA scope did not restore the exact pre-entry context");
+            });
+            void RejectRestore(GraphCodeUiaGateState.ThreadDpiContext scope, string reason)
+            {
+                IntPtr before = PromptLookupFixture.GetThreadDpiAwarenessContext();
+                bool refused = false;
+                try { GraphCodeUiaGateState.RestorePhysicalDpiCoordinates(scope); }
+                catch (InvalidOperationException failure) { refused = failure.Message.Contains(reason, StringComparison.Ordinal); }
+                ActivationCases.Require(refused && PromptLookupFixture.AreDpiAwarenessContextsEqual(
+                    PromptLookupFixture.GetThreadDpiAwarenessContext(), before),
+                    "Invalid UIA scope restoration was not refused without changing awareness: " + reason);
+            }
+            Check("ui.native.dpi.invalid-restore", () => RejectRestore(default, "invalid"));
+            Check("ui.native.dpi.failed-set", () => RejectRestore(
+                new GraphCodeUiaGateState.ThreadDpiContext(new IntPtr(-123456), PromptLookupFixture.GetCurrentThreadId()),
+                "native set failed"));
+            Check("ui.native.dpi.foreign-thread", () =>
+            {
+                var scope = GraphCodeUiaGateState.EnterPhysicalDpiCoordinates();
+                Exception? failure = null;
+                try
+                {
+                    var worker = new Thread(() =>
+                    {
+                        try { RejectRestore(scope, "capture thread"); }
+                        catch (Exception error) { failure = error; }
+                    }) { IsBackground = true };
+                    worker.Start();
+                    ActivationCases.Require(worker.Join(TimeSpan.FromSeconds(5)), "UIA foreign-thread refusal control timed out");
+                    if (failure is not null) throw new InvalidOperationException("UIA foreign-thread refusal failed", failure);
+                }
+                finally { GraphCodeUiaGateState.RestorePhysicalDpiCoordinates(scope); }
+            });
+            string gate = System.IO.File.ReadAllText(System.IO.Path.Combine(context.RepositoryRoot,
+                "Tools", "windows", "uia-live-gate.ps1")).Replace("\r\n", "\n");
+            Check("ui.native.dpi.source-boundary", () =>
+            {
+                int enter = gate.IndexOf("$gateDpiScope = [GraphCodeUiaGateState]::EnterPhysicalDpiCoordinates()", StringComparison.Ordinal);
+                int launch = gate.IndexOf("$tempRoot = if", StringComparison.Ordinal);
+                int failureCapture = gate.IndexOf("Write-UiaWaitAttribution \"gate failure:", StringComparison.Ordinal);
+                int cleanup = gate.IndexOf("Stop-UiaOwnedProcessTrees @", StringComparison.Ordinal);
+                int restore = gate.LastIndexOf("[GraphCodeUiaGateState]::RestorePhysicalDpiCoordinates($gateDpiScope)", StringComparison.Ordinal);
+                ActivationCases.Require(enter > 0 && enter < launch && failureCapture > enter &&
+                    cleanup > failureCapture && restore > cleanup &&
+                    gate.Contains("$gateDpiScope = $null", StringComparison.Ordinal) &&
+                    gate.Contains("if ($null -ne $gateDpiScope)", StringComparison.Ordinal),
+                    "UIA physical-coordinate scope must enclose queries, failure captures, owned cleanup and early returns");
+            }, "UIA script source-boundary contract; nativeCalls=0");
+            Check("ui.native.dpi.primary-error-preserved", () => ActivationCases.Require(
+                gate.Contains("$gateFailure.Exception.Data[\"UiaDpiRestoreFailure\"] = $_.Exception", StringComparison.Ordinal) &&
+                gate.Contains("$sandboxCleanupError.Exception.Data[\"UiaDpiRestoreFailure\"] = $_.Exception", StringComparison.Ordinal) &&
+                gate.Contains("else { $sandboxCleanupError = $_ }", StringComparison.Ordinal) &&
+                gate.Contains("UIA_DPI_RESTORE_ERROR=", StringComparison.Ordinal),
+                "UIA DPI restoration must report its failure without replacing a primary gate or cleanup failure"),
+                "UIA script primary-error propagation contract; nativeCalls=0");
         }
         catch (Exception failure)
         {

@@ -3,6 +3,24 @@ const Wire = @import("Wire.zig");
 const SketchPromotion = @import("SketchPromotion.zig");
 const NativeDialogs = @import("WindowsNativeDialogs.zig");
 
+pub const NodeMenuOrigin = enum { canvas, sidebar };
+pub const TransferMenuState = enum { hidden, ready, local_only, busy, context_changed };
+
+pub const RetypeMenuState = struct {
+    origin: NodeMenuOrigin = .canvas,
+    stopped: bool = false,
+    target: ?SketchPromotion.Target = null,
+
+    pub fn fromNode(origin: NodeMenuOrigin, loop_type: []const u8, state: []const u8) RetypeMenuState {
+        const source = SketchPromotion.Source.fromLoopType(loop_type);
+        return .{
+            .origin = origin,
+            .stopped = std.mem.eql(u8, state, "stopped"),
+            .target = if (source) |value| value.retypeTarget() else null,
+        };
+    }
+};
+
 pub const NodeTarget = struct {
     project_path: []const u8,
     id: []const u8,
@@ -13,7 +31,9 @@ pub const NodeTarget = struct {
     resolved: bool = false,
     can_create_child: bool = true,
     sketch: bool = false,
+    retype: RetypeMenuState = .{},
     promotion_context: ?*const SketchPromotion.Context = null,
+    transfer: TransferMenuState = .hidden,
 };
 
 pub const BackgroundTarget = struct {
@@ -54,6 +74,8 @@ pub const Action = enum {
     promote_goal,
     promote_turn,
     promote_timed,
+    change_to_goal,
+    change_to_timed,
     rename_node,
     stop_node,
     delete_node,
@@ -85,6 +107,8 @@ pub const Action = enum {
     trash_project,
     delete_project_loops,
     new_quick_chat,
+    export_node,
+    import_loops_here,
 };
 
 pub const Callback = *const fn (?*anyopaque, Action, Target) void;
@@ -119,6 +143,10 @@ const ids = struct {
     const promote_goal = 5116;
     const promote_turn = 5117;
     const promote_timed = 5118;
+    const change_to_goal = 5121;
+    const change_to_timed = 5122;
+    const export_node = 5123;
+    const import_loops_here = 5124;
     const wire_node = 5109;
     const mark_entry = 5112;
     const edit_edge = 5110;
@@ -174,20 +202,23 @@ pub fn newChildNodeMenuItem(node: NodeTarget) ?NodeMenuCommand {
 }
 
 pub const NodeMenuPlan = struct {
-    items: [15]NodeMenuItem = undefined,
+    items: [18]NodeMenuItem = undefined,
     len: usize = 0,
 
     fn addCommand(self: *NodeMenuPlan, item: NodeMenuCommand) void {
+        std.debug.assert(self.len < self.items.len);
         self.items[self.len] = .{ .command = item };
         self.len += 1;
     }
 
     fn addSeparator(self: *NodeMenuPlan) void {
+        std.debug.assert(self.len < self.items.len);
         self.items[self.len] = .separator;
         self.len += 1;
     }
 
     fn addPromotionSubmenu(self: *NodeMenuPlan) void {
+        std.debug.assert(self.len < self.items.len);
         self.items[self.len] = .promotion_submenu;
         self.len += 1;
     }
@@ -204,6 +235,7 @@ pub fn nodeMenuPlan(node: NodeTarget) NodeMenuPlan {
     } else if (node.sketch) {
         plan.addPromotionSubmenu();
     }
+    if (retypeMenuItem(node)) |item| plan.addCommand(item);
     plan.addCommand(.{ .id = ids.rename_node, .text = "Rename...\tF2" });
     plan.addCommand(.{ .id = ids.save_node_template, .text = "Save as Template..." });
     if (node.follows_template) plan.addCommand(.{ .id = ids.detach_template, .text = "Detach from Template" });
@@ -214,9 +246,23 @@ pub fn nodeMenuPlan(node: NodeTarget) NodeMenuPlan {
         plan.addCommand(.{ .id = ids.wire_node, .text = "Wire it up" });
         plan.addCommand(.{ .id = ids.mark_entry, .text = "Mark as entry" });
     }
+    if (node.transfer != .hidden) {
+        plan.addSeparator();
+        plan.addCommand(.{ .id = ids.export_node, .text = transferMenuText(node.transfer, true), .enabled = node.transfer == .ready });
+        plan.addCommand(.{ .id = ids.import_loops_here, .text = transferMenuText(node.transfer, false), .enabled = node.transfer == .ready });
+    }
     plan.addSeparator();
     plan.addCommand(.{ .id = ids.delete_node, .text = "Delete Loop...\tDelete" });
     return plan;
+}
+
+fn transferMenuText(state: TransferMenuState, exporting: bool) []const u8 {
+    return switch (state) {
+        .hidden, .ready => if (exporting) "Export Loop..." else "Import Loops Here...",
+        .local_only => if (exporting) "Export Loop... (unavailable: local projects only)" else "Import Loops Here... (unavailable: local projects only)",
+        .busy => if (exporting) "Export Loop... (unavailable: transfer in progress)" else "Import Loops Here... (unavailable: transfer in progress)",
+        .context_changed => if (exporting) "Export Loop... (unavailable: graph context changed)" else "Import Loops Here... (unavailable: graph context changed)",
+    };
 }
 
 pub const PromotionItem = struct { id: usize, text: []const u8, action: Action };
@@ -241,6 +287,29 @@ pub fn promotionTarget(action: Action) ?SketchPromotion.Target {
 
 pub fn promotionEnabled(node: NodeTarget) bool {
     return node.sketch and node.promotion_context != null;
+}
+
+fn retypeMenuItem(node: NodeTarget) ?NodeMenuCommand {
+    if (node.retype.origin != .canvas or node.retype.stopped or node.sketch or node.composite) return null;
+    const context_target: ?SketchPromotion.Target = if (node.promotion_context) |context| blk: {
+        const source = SketchPromotion.Source.fromLoopType(context.loop_type) orelse break :blk null;
+        break :blk source.retypeTarget();
+    } else null;
+    const target = node.retype.target orelse (context_target orelse return null);
+    const enabled = context_target != null and context_target.? == target;
+    return switch (target) {
+        .goal => .{ .id = ids.change_to_goal, .text = "Change to Goal…", .enabled = enabled },
+        .timed => .{ .id = ids.change_to_timed, .text = "Change to Timed…", .enabled = enabled },
+        .turn => null,
+    };
+}
+
+pub fn retypeTarget(action: Action) ?SketchPromotion.Target {
+    return switch (action) {
+        .change_to_goal => .goal,
+        .change_to_timed => .timed,
+        else => null,
+    };
 }
 
 pub fn show(
@@ -379,6 +448,10 @@ fn actionForCommand(command: c_int) Action {
         ids.promote_goal => .promote_goal,
         ids.promote_turn => .promote_turn,
         ids.promote_timed => .promote_timed,
+        ids.change_to_goal => .change_to_goal,
+        ids.change_to_timed => .change_to_timed,
+        ids.export_node => .export_node,
+        ids.import_loops_here => .import_loops_here,
         ids.open_composite => .open_composite,
         ids.pilot_composite => .pilot_composite,
         ids.arm_composite => .arm_composite,
@@ -455,6 +528,85 @@ fn toWide(text: []const u8) ?[]u16 {
 }
 
 const std = @import("std");
+
+test "card transfer menu has executable stable actions on canvas and sidebar root rows" {
+    for ([_]NodeMenuOrigin{ .canvas, .sidebar }) |origin| {
+        const plan = nodeMenuPlan(.{
+            .project_path = "C:\\A",
+            .id = "node",
+            .retype = .{ .origin = origin },
+            .transfer = .ready,
+        });
+        var found: usize = 0;
+        for (plan.items[0..plan.len], 0..) |item, index| switch (item) {
+            .command => |command| {
+                if (command.id == 5123 or command.id == 5124) {
+                    try std.testing.expect(command.enabled);
+                    try std.testing.expectEqualStrings(if (command.id == 5123) "Export Loop..." else "Import Loops Here...", command.text);
+                    if (command.id == 5123) try std.testing.expect(std.meta.activeTag(plan.items[index - 1]) == .separator);
+                    found += 1;
+                }
+            },
+            else => {},
+        };
+        try std.testing.expectEqual(@as(usize, 2), found);
+    }
+    try std.testing.expectEqual(Action.export_node, actionForCommand(5123));
+    try std.testing.expectEqual(Action.import_loops_here, actionForCommand(5124));
+    try std.testing.expectEqual(Action.wire_node, actionForCommand(5109));
+    try std.testing.expectEqual(Action.mark_entry, actionForCommand(5112));
+    try std.testing.expectEqual(Action.change_to_goal, actionForCommand(5121));
+    try std.testing.expectEqual(Action.change_to_timed, actionForCommand(5122));
+}
+
+test "card transfer menu explicitly disables remote busy and stale targets" {
+    for ([_]TransferMenuState{ .local_only, .busy, .context_changed }, [_][]const u8{ "local", "progress", "context" }) |state, reason| {
+        const plan = nodeMenuPlan(.{ .project_path = "ssh://host/project", .id = "node", .transfer = state });
+        var found: usize = 0;
+        for (plan.items[0..plan.len]) |item| switch (item) {
+            .command => |command| if (command.id == 5123 or command.id == 5124) {
+                try std.testing.expect(!command.enabled);
+                try std.testing.expect(std.mem.indexOf(u8, command.text, reason) != null);
+                found += 1;
+            },
+            else => {},
+        };
+        try std.testing.expectEqual(@as(usize, 2), found);
+    }
+}
+
+test "card transfer menu capacity covers every flag combination without losing recovery or delete" {
+    var maximum: usize = 0;
+    for (0..512) |bits| {
+        const plan = nodeMenuPlan(.{
+            .project_path = "C:\\A", .id = "node",
+            .composite = bits & 1 != 0,
+            .can_arm = bits & 2 != 0,
+            .unwired = bits & 4 != 0,
+            .follows_template = bits & 8 != 0,
+            .resolved = bits & 16 != 0,
+            .sketch = bits & 32 != 0,
+            .retype = .{
+                .origin = if (bits & 64 != 0) .canvas else .sidebar,
+                .target = if (bits & 128 != 0) .goal else null,
+            },
+            .can_create_child = bits & 256 != 0,
+            .transfer = .ready,
+        });
+        maximum = @max(maximum, plan.len);
+        try std.testing.expect(plan.len <= plan.items.len);
+        try std.testing.expectEqual(@as(usize, 5103), plan.items[plan.len - 1].command.id);
+        var recovery: usize = 0;
+        for (plan.items[0..plan.len]) |item| switch (item) {
+            .command => |command| if (command.id == 5109 or command.id == 5112) {
+                recovery += 1;
+            },
+            else => {},
+        };
+        try std.testing.expectEqual(@as(usize, if (bits & 4 != 0) 2 else 0), recovery);
+    }
+    try std.testing.expectEqual(@as(usize, 18), maximum);
+}
 
 test "dialog framework: generic confirmation preserves caller copy and No default" {
     const spec = confirmationSpec("Delete Edge", "Remove this edge?");
@@ -717,6 +869,119 @@ test "custody child node menu plan preserves existing items when creation is una
         }
         try std.testing.expectEqualStrings("Open Terminal", plan.items[0].command.text);
         try std.testing.expectEqualStrings("Delete Loop...\tDelete", plan.items[plan.len - 1].command.text);
+    }
+}
+
+test "canvas retype menu places the opposing action before Rename" {
+    const cases = [_]struct { source: []const u8, text: []const u8, id: usize }{
+        .{ .source = "goalBased", .text = "Change to Timed…", .id = 5122 },
+        .{ .source = "timeBased", .text = "Change to Goal…", .id = 5121 },
+    };
+    for (cases) |case| {
+        const context = SketchPromotion.Context{ .loop_type = case.source };
+        const plan = nodeMenuPlan(.{
+            .project_path = "A",
+            .id = "target",
+            .promotion_context = &context,
+        });
+        var found = false;
+        for (plan.items[0..plan.len], 0..) |item, index| switch (item) {
+            .command => |command| if (command.id == case.id) {
+                try std.testing.expectEqual(@as(usize, 2), index);
+                try std.testing.expectEqualStrings(case.text, command.text);
+                try std.testing.expect(command.enabled);
+                try std.testing.expect(actionForCommand(@intCast(command.id)) != .none);
+                found = true;
+            },
+            else => {},
+        };
+        try std.testing.expect(found);
+    }
+}
+
+test "canvas retype menu preserves existing maximal and sketch variants" {
+    const composite = nodeMenuPlan(.{
+        .project_path = "A",
+        .id = "group",
+        .composite = true,
+        .unwired = true,
+        .follows_template = true,
+    });
+    try std.testing.expectEqual(@as(usize, 15), composite.len);
+    try std.testing.expect(composite.len <= composite.items.len);
+    for (composite.items[0..composite.len]) |item| switch (item) {
+        .command => |command| try std.testing.expect(command.id != 5121 and command.id != 5122),
+        else => {},
+    };
+    const sketch = nodeMenuPlan(.{ .project_path = "A", .id = "sketch", .sketch = true });
+    switch (sketch.items[2]) {
+        .promotion_submenu => {},
+        else => return error.UnexpectedPromotionMenu,
+    }
+    const plain = nodeMenuPlan(.{ .project_path = "A", .id = "sidebar" });
+    for (plain.items[0..plain.len]) |item| switch (item) {
+        .command => |command| try std.testing.expect(command.id != 5121 and command.id != 5122),
+        else => {},
+    };
+}
+
+test "canvas retype menu uses actual origin type and stopped inputs" {
+    const sources = [_]struct { loop_type: []const u8, target: SketchPromotion.Target, id: usize }{
+        .{ .loop_type = "goalBased", .target = .timed, .id = ids.change_to_timed },
+        .{ .loop_type = "timeBased", .target = .goal, .id = ids.change_to_goal },
+    };
+    const states = [_][]const u8{ "idle", "running", "awaitingInput", "blocked", "succeeded", "failed", "stalled", "waiting", "stopped" };
+    for (sources) |source| {
+        const context = SketchPromotion.Context{ .loop_type = source.loop_type };
+        for (states) |state| {
+            for ([_]NodeMenuOrigin{ .canvas, .sidebar }) |origin| {
+                const resolved = std.mem.eql(u8, state, "succeeded") or
+                    std.mem.eql(u8, state, "failed") or
+                    std.mem.eql(u8, state, "stalled") or
+                    std.mem.eql(u8, state, "stopped");
+                const plan = nodeMenuPlan(.{
+                    .project_path = "A",
+                    .id = "target",
+                    .resolved = resolved,
+                    .retype = RetypeMenuState.fromNode(origin, source.loop_type, state),
+                    .promotion_context = &context,
+                });
+                var count: usize = 0;
+                for (plan.items[0..plan.len]) |item| switch (item) {
+                    .command => |command| if (command.id == ids.change_to_goal or command.id == ids.change_to_timed) {
+                        count += 1;
+                        try std.testing.expectEqual(source.id, command.id);
+                        try std.testing.expect(command.enabled);
+                        const action = actionForCommand(@intCast(command.id));
+                        try std.testing.expectEqual(source.target, retypeTarget(action).?);
+                        try std.testing.expect(promotionTarget(action) == null);
+                    },
+                    else => {},
+                };
+                const eligible = origin == .canvas and !std.mem.eql(u8, state, "stopped");
+                try std.testing.expectEqual(@as(usize, if (eligible) 1 else 0), count);
+            }
+        }
+    }
+
+    const unavailable = nodeMenuPlan(.{
+        .project_path = "A",
+        .id = "target",
+        .retype = RetypeMenuState.fromNode(.canvas, "goalBased", "running"),
+    });
+    var found = false;
+    for (unavailable.items[0..unavailable.len]) |item| switch (item) {
+        .command => |command| if (command.id == ids.change_to_timed) {
+            found = true;
+            try std.testing.expect(!command.enabled);
+        },
+        else => {},
+    };
+    try std.testing.expect(found);
+
+    for ([_][]const u8{ "sketch", "turnBased", "proactive", "composite", "unknown" }) |loop_type| {
+        const candidate = RetypeMenuState.fromNode(.canvas, loop_type, "running");
+        try std.testing.expect(candidate.target == null);
     }
 }
 

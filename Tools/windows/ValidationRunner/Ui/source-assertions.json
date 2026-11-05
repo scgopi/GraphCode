@@ -3406,7 +3406,7 @@
           "left": {
             "right": {
               "kind": "literal",
-              "value": "(?s)for \\(int attempt = 0; attempt < 20 && operations\\.IsWindowVisible\\(popup\\); attempt\\+\\+\\) operations\\.Sleep\\(10\\);.*?hiliteAtEnterFallback = \\(operations\\.GetMenuState\\(menu, \\(uint\\)position, 0x0400\\) & 0x0080\\) != 0;\\s*operations\\.SendMessage\\(popup, 0x01E5, \\(UIntPtr\\)position, IntPtr\\.Zero\\);\\s*hiliteBeforeEnter = \\(operations\\.GetMenuState\\(menu, \\(uint\\)position, 0x0400\\) & 0x0080\\) != 0;.*?if \\(!hiliteBeforeEnter\\)\\s*throw new InvalidOperationException.*?PostMessage\\(popup, 0x0100, \\(UIntPtr\\)0x0D, IntPtr\\.Zero\\)"
+              "value": "(?s)private PopupItemHit ClickPopupMenuItemCore\\([^)]*bool allowFallback\\)\\s*\\{(?:(?!operations\\.PostMessage\\(popup, 0x0100).)*?bool ReadMenuHilite\\(\\)\\s*\\{\\s*rawMenuState = operations\\.GetMenuState\\(menu, \\(uint\\)position, 0x0400\\);\\s*menuStateObserved = true;\\s*if \\(rawMenuState == UInt32\\.MaxValue\\)\\s*throw PopupStateFailure\\(\"Popup menu state unavailable; no further input was injected\"\\);\\s*return \\(rawMenuState & 0x0080\\) != 0;\\s*\\}(?:(?!operations\\.PostMessage\\(popup, 0x0100).)*?for \\(int attempt = 0; attempt < 20 && operations\\.IsWindowVisible\\(popup\\); attempt\\+\\+\\) operations\\.Sleep\\(10\\);\\s*bool keyboardFallback = false;\\s*bool hiliteAtEnterFallback = false;\\s*bool hiliteBeforeEnter = false;\\s*if \\(operations\\.IsWindowVisible\\(popup\\)\\)\\s*\\{\\s*if \\(!allowFallback\\)\\s*throw new InvalidOperationException\\(\"Strict popup remained open after pointer input; no selection or keyboard fallback was emitted\"\\);(?:(?!operations\\.PostMessage\\(popup, 0x0100).)*?hiliteAtEnterFallback = ReadMenuHilite\\(\\);\\s*operations\\.SendMessage\\(popup, 0x01E5, \\(UIntPtr\\)position, IntPtr\\.Zero\\);\\s*hiliteBeforeEnter = ReadMenuHilite\\(\\);\\s*\\}\\s*if \\(operations\\.IsWindowVisible\\(popup\\)\\)\\s*\\{\\s*if \\(!hiliteBeforeEnter\\)\\s*throw new InvalidOperationException\\(String\\.Format\\(\"Popup item \\{0\\} was not hilited before the Enter fallback \\(hilite at fallback=\\{1\\}\\)\", commandId, hiliteAtEnterFallback\\)\\);\\s*RequireOwnedPopupForeground\\(popup, owner, expectedProcessId\\);\\s*keyboardFallback =\\s*operations\\.PostMessage\\(popup, 0x0100, \\(UIntPtr\\)0x0D, IntPtr\\.Zero\\)"
             },
             "left": {
               "kind": "resource",
@@ -3417,7 +3417,7 @@
             "migration": {
               "legacyResource": "gate",
               "legacyPattern": "(?s)for \\(int attempt = 0; attempt < 20 && IsWindowVisible\\(popup\\); attempt\\+\\+\\) Sleep\\(10\\);.*?hiliteAtEnterFallback = \\(GetMenuState\\(menu, \\(uint\\)position, 0x0400\\) & 0x0080\\) != 0;\\s*SendMessage\\(popup, 0x01E5, \\(UIntPtr\\)position, IntPtr\\.Zero\\);\\s*hiliteBeforeEnter = \\(GetMenuState\\(menu, \\(uint\\)position, 0x0400\\) & 0x0080\\) != 0;.*?if \\(!hiliteBeforeEnter\\)\\s*throw new InvalidOperationException.*?PostMessage\\(popup, 0x0100, \\(UIntPtr\\)0x0D, IntPtr\\.Zero\\)",
-              "reason": "Ordinary shared production source; native dependency receiver/static-to-instance seam only"
+              "reason": "Shared popup core calls its checked hilite reader; sentinel refusal precedes bit interpretation, and qualified hilite plus fresh ownership precede Enter"
             }
           },
           "kind": "binary",

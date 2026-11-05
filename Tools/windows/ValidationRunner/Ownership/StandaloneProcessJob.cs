@@ -150,7 +150,7 @@ public static class StandaloneProcessJob
                     identities.Add($"pid={pid}; identity-unavailable-win32={Marshal.GetLastWin32Error()}");
                     continue;
                 }
-                identities.Add($"pid={pid}; creationUtcTicks={DateTime.FromFileTimeUtc(creation).Ticks}; name={System.IO.Path.GetFileNameWithoutExtension(name.ToString())}");
+                identities.Add($"pid={pid}; creationUtcTicks={DateTime.FromFileTimeUtc(creation).Ticks}; name={System.IO.Path.GetFileNameWithoutExtension(name.ToString())}; imagePath={name}");
             }
             finally { if (!CloseHandle(process)) throw new Win32Exception(); }
         }

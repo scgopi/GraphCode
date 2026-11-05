@@ -25,6 +25,7 @@ internal sealed class ControlClickTopologyFixture : IDisposable
     internal IntPtr Unrelated { get; private set; }
     internal int[] Bounds { get; private set; } = Array.Empty<int>();
     internal int ClickCount;
+    internal NativePopupEffectWindow? PopupWindow => window as NativePopupEffectWindow;
 
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] internal static extern IntPtr GetDesktopWindow();
@@ -34,43 +35,69 @@ internal sealed class ControlClickTopologyFixture : IDisposable
     private NativePoint initialCursor;
     private bool cursorSaved;
 
-    internal ControlClickTopologyFixture(bool nested)
+    internal ControlClickTopologyFixture(bool nested, bool nativePopup = false)
     {
         thread = new Thread(() =>
         {
+            GraphCodeUiaGateState.ThreadDpiContext? dpi = null;
             try
             {
-                window = new Form { Text = HostTitle, StartPosition = FormStartPosition.Manual,
-                    Left = 120, Top = 120, Width = 480, Height = 360, ShowInTaskbar = false };
-                unrelated = new Form { Text = "Unrelated owned root fixture", StartPosition = FormStartPosition.Manual,
-                    Left = 650, Top = 120, Width = 160, Height = 120, ShowInTaskbar = false };
-                content = new Panel { Left = 20, Top = 25, Width = 400, Height = 250 };
-                sibling = new Panel { Left = 350, Top = 280, Width = 30, Height = 20 };
-                target = new Button { Left = 40, Top = 45, Width = 160, Height = 60, Text = "Owned target" };
-                if (nested)
+                if (nativePopup) dpi = GraphCodeUiaGateState.EnterPhysicalDpiCoordinates();
+                window = nativePopup ? new NativePopupEffectWindow() : new Form { Text = HostTitle };
+                window.StartPosition = FormStartPosition.Manual;
+                window.SetBounds(120, 120, 480, 360);
+                window.ShowInTaskbar = false;
+                if (!nativePopup)
                 {
-                    var viewport = new Panel { Dock = DockStyle.Fill };
-                    window.Controls.Add(viewport);
-                    viewport.Controls.Add(content);
-                    content.Controls.Add(target);
+                    unrelated = new Form { Text = "Unrelated owned root fixture", StartPosition = FormStartPosition.Manual,
+                        Left = 650, Top = 120, Width = 160, Height = 120, ShowInTaskbar = false };
+                    content = new Panel { Left = 20, Top = 25, Width = 400, Height = 250 };
+                    sibling = new Panel { Left = 350, Top = 280, Width = 30, Height = 20 };
+                    target = new Button { Left = 40, Top = 45, Width = 160, Height = 60, Text = "Owned target" };
+                    if (nested)
+                    {
+                        var viewport = new Panel { Dock = DockStyle.Fill };
+                        window.Controls.Add(viewport);
+                        viewport.Controls.Add(content);
+                        content.Controls.Add(target);
+                    }
+                    else window.Controls.Add(target);
+                    window.Controls.Add(sibling);
+                    target.MouseDown += (_, _) => { Interlocked.Increment(ref ClickCount); clicked.Set(); };
                 }
-                else window.Controls.Add(target);
-                window.Controls.Add(sibling);
-                target.MouseDown += (_, _) => { Interlocked.Increment(ref ClickCount); clicked.Set(); };
                 window.Shown += (_, _) =>
                 {
                     Root = window.Handle;
-                    Parent = target.Parent!.Handle;
+                    if (nativePopup)
+                    {
+                        var rectangle = window.RectangleToScreen(window.ClientRectangle);
+                        Bounds = new[] { rectangle.Left, rectangle.Top, rectangle.Right, rectangle.Bottom };
+                        ready.Set();
+                        return;
+                    }
+                    Parent = target!.Parent!.Handle;
                     Target = target.Handle;
-                    Sibling = sibling.Handle;
-                    Unrelated = unrelated.Handle;
-                    var rectangle = target.RectangleToScreen(target.ClientRectangle);
-                    Bounds = new[] { rectangle.Left, rectangle.Top, rectangle.Right, rectangle.Bottom };
+                    Sibling = sibling!.Handle;
+                    Unrelated = unrelated!.Handle;
+                    var targetRectangle = target.RectangleToScreen(target.ClientRectangle);
+                    Bounds = new[] { targetRectangle.Left, targetRectangle.Top, targetRectangle.Right, targetRectangle.Bottom };
                     ready.Set();
                 };
                 Application.Run(window);
             }
             catch (Exception failure) { startupFailure = failure; ready.Set(); }
+            finally
+            {
+                if (dpi is not null)
+                {
+                    try { GraphCodeUiaGateState.RestorePhysicalDpiCoordinates(dpi.Value); }
+                    catch (Exception failure)
+                    {
+                        startupFailure = startupFailure is null ? failure :
+                            new AggregateException("Fixture UI thread failed and could not restore DPI", startupFailure, failure);
+                    }
+                }
+            }
         });
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
@@ -109,5 +136,6 @@ internal sealed class ControlClickTopologyFixture : IDisposable
             throw new InvalidOperationException("Could not restore the fixture's original cursor position");
         clicked.Dispose();
         ready.Dispose();
+        if (startupFailure is not null) throw new InvalidOperationException("Owned fixture UI thread failed", startupFailure);
     }
 }

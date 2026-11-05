@@ -128,6 +128,166 @@ test "sketch promotion test client has a fixed synthetic endpoint and inactive t
     try std.testing.expectEqual(@as(usize, 0), client.inbound_count);
 }
 
+const retype_sender_goal_frame =
+    \\{"graphChanged":{"project":{"path":"P","name":"Project"},"nodes":[{"id":"node","title":"Goal","loopType":"goalBased","state":"running"}],"edges":[]}}
+;
+const retype_sender_timed_frame =
+    \\{"graphChanged":{"project":{"path":"P","name":"Project"},"nodes":[{"id":"node","title":"Timed","loopType":"timeBased","state":"running"}],"edges":[]}}
+;
+const retype_sender_sketch_frame =
+    \\{"graphChanged":{"project":{"path":"P","name":"Project"},"nodes":[{"id":"node","title":"Sketch","loopType":"sketch","state":"running"}],"edges":[]}}
+;
+const retype_sender_goal_command =
+    \\{"graphCommand":{"projectPath":"P","command":{"promoteNode":{"_0":"node","promotion":{"goal":{"_0":{"summary":"done","pollIntervalSeconds":60,"metricDirection":"maximize","skipsUnchangedWorkspace":false}}},"promotedBy":null}}}}
+;
+const retype_sender_timed_command =
+    \\{"graphCommand":{"projectPath":"P","command":{"promoteNode":{"_0":"node","promotion":{"timed":{"triggerPrompt":"/loop 1h inspect"}},"promotedBy":null}}}}
+;
+const retype_sender_turn_command =
+    \\{"graphCommand":{"projectPath":"P","command":{"promoteNode":{"_0":"node","promotion":{"turn":{"pausesBeforeWritesOnly":false}},"promotedBy":null}}}}
+;
+
+fn retypeSenderModel(frame: []const u8) !@import("GraphModel.zig").Model {
+    var model = @import("GraphModel.zig").Model.init(std.testing.allocator);
+    errdefer model.deinit();
+    _ = try model.updateFromFrame(frame);
+    if (!model.setSelectedID("node")) return error.RetypeSenderFixtureSelectionFailed;
+    return model;
+}
+
+fn expectRetypeSenderRejects(frame: []const u8, draft: SketchPromotion.Draft) !void {
+    const allocator = std.testing.allocator;
+    var client = try DaemonClient.initUnstartedForTest(allocator);
+    defer client.deinit();
+    client.command_recorder = null;
+    try std.testing.expect(client.worker == null);
+    try std.testing.expect(!client.want_connected);
+    var model = try retypeSenderModel(frame);
+    defer model.deinit();
+    var context = try SketchPromotion.Context.capture(allocator, &model, "P", "", model.graph.?.nodes.items[0]);
+    defer context.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), client.outbound_count);
+    try std.testing.expectError(error.InvalidPromotionTarget, client.sendSketchPromotion(&model, context, draft));
+    try std.testing.expectEqual(@as(usize, 0), client.outbound_count);
+}
+
+test "canvas retype sender rejects goal to goal before queueing" {
+    try expectRetypeSenderRejects(retype_sender_goal_frame, .{ .goal = "done" });
+}
+
+test "canvas retype sender rejects goal to turn before queueing" {
+    try expectRetypeSenderRejects(retype_sender_goal_frame, .{ .turn = false });
+}
+
+test "canvas retype sender rejects timed to timed before queueing" {
+    try expectRetypeSenderRejects(retype_sender_timed_frame, .{ .timed = "/loop 1h inspect" });
+}
+
+test "canvas retype sender rejects timed to turn before queueing" {
+    try expectRetypeSenderRejects(retype_sender_timed_frame, .{ .turn = false });
+}
+
+fn expectRetypeSenderQueues(frame: []const u8, draft: SketchPromotion.Draft, expected: []const u8) !void {
+    const allocator = std.testing.allocator;
+    var client = try DaemonClient.initUnstartedForTest(allocator);
+    defer client.deinit();
+    client.command_recorder = null;
+    var model = try retypeSenderModel(frame);
+    defer model.deinit();
+    var context = try SketchPromotion.Context.capture(allocator, &model, "P", "", model.graph.?.nodes.items[0]);
+    defer context.deinit(allocator);
+    try std.testing.expect(try client.sendSketchPromotion(&model, context, draft));
+    try std.testing.expectEqual(@as(usize, 1), client.outbound_count);
+    try std.testing.expectEqualStrings(expected, client.outbound[client.outbound_head]);
+    try std.testing.expect(client.worker == null);
+    try std.testing.expect(!client.want_connected);
+}
+
+test "canvas retype sender queues opposite targets with existing envelopes" {
+    try expectRetypeSenderQueues(retype_sender_goal_frame, .{ .timed = "/loop 1h inspect" }, retype_sender_timed_command);
+    try expectRetypeSenderQueues(retype_sender_timed_frame, .{ .goal = "done" }, retype_sender_goal_command);
+}
+
+test "canvas retype sender keeps all sketch targets and envelopes" {
+    const allocator = std.testing.allocator;
+    var client = try DaemonClient.initUnstartedForTest(allocator);
+    defer client.deinit();
+    client.command_recorder = null;
+    var model = try retypeSenderModel(retype_sender_sketch_frame);
+    defer model.deinit();
+    var context = try SketchPromotion.Context.capture(allocator, &model, "P", "", model.graph.?.nodes.items[0]);
+    defer context.deinit(allocator);
+    const drafts = [_]SketchPromotion.Draft{ .{ .goal = "done" }, .{ .turn = false }, .{ .timed = "/loop 1h inspect" } };
+    const expected = [_][]const u8{ retype_sender_goal_command, retype_sender_turn_command, retype_sender_timed_command };
+    for (drafts, expected, 0..) |draft, envelope, index| {
+        try std.testing.expect(try client.sendSketchPromotion(&model, context, draft));
+        try std.testing.expectEqual(index + 1, client.outbound_count);
+        try std.testing.expectEqualStrings(envelope, client.outbound[index]);
+    }
+    try std.testing.expect(client.worker == null);
+    try std.testing.expect(!client.want_connected);
+}
+
+test "canvas retype sender rejects stale selection stopped and changed source" {
+    const allocator = std.testing.allocator;
+    var client = try DaemonClient.initUnstartedForTest(allocator);
+    defer client.deinit();
+    client.command_recorder = null;
+    var model = try retypeSenderModel(
+        \\{"graphChanged":{"project":{"path":"P","name":"Project"},"nodes":[{"id":"node","title":"Goal","loopType":"goalBased","state":"running"},{"id":"other","title":"Other","loopType":"sketch"}],"edges":[]}}
+    );
+    defer model.deinit();
+    var context = try SketchPromotion.Context.capture(allocator, &model, "P", "", model.graph.?.nodes.items[0]);
+    defer context.deinit(allocator);
+    const draft: SketchPromotion.Draft = .{ .timed = "/loop 1h inspect" };
+    try std.testing.expect(model.setSelectedID("other"));
+    try std.testing.expectError(error.PromotionContextChanged, client.sendSketchPromotion(&model, context, draft));
+    try std.testing.expectEqual(@as(usize, 0), client.outbound_count);
+    try std.testing.expect(model.setSelectedID("node"));
+    const node = &model.graph.?.nodes.items[0];
+    const stopped = try allocator.dupe(u8, "stopped");
+    allocator.free(node.state);
+    node.state = stopped;
+    try std.testing.expectError(error.PromotionStopped, client.sendSketchPromotion(&model, context, draft));
+    try std.testing.expectEqual(@as(usize, 0), client.outbound_count);
+    const running = try allocator.dupe(u8, "running");
+    allocator.free(node.state);
+    node.state = running;
+    const timed = try allocator.dupe(u8, "timeBased");
+    allocator.free(node.loop_type);
+    node.loop_type = timed;
+    try std.testing.expectError(error.PromotionContextChanged, client.sendSketchPromotion(&model, context, draft));
+    try std.testing.expectEqual(@as(usize, 0), client.outbound_count);
+}
+
+test "canvas retype sender preserves and validates the composite address" {
+    const allocator = std.testing.allocator;
+    var client = try DaemonClient.initUnstartedForTest(allocator);
+    defer client.deinit();
+    client.command_recorder = null;
+    var model = @import("GraphModel.zig").Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"group","title":"Group","loopType":"proactive","subGraph":{"project":{"path":"A","name":"A"},"nodes":[{"id":"child","title":"Goal","loopType":"goalBased","state":"running"}],"edges":[]}}],"edges":[]}}
+    );
+    try std.testing.expect(model.openComposite("group"));
+    try std.testing.expect(model.setSelectedID("child"));
+    var context = try SketchPromotion.Context.capture(allocator, &model, "A", "group", model.graph.?.nodes.items[0]);
+    defer context.deinit(allocator);
+    client.subgraph_node_id = try allocator.dupe(u8, "other");
+    try std.testing.expectError(error.PromotionContextChanged, client.sendSketchPromotion(&model, context, .{ .timed = "/loop 1h inspect" }));
+    try std.testing.expectEqual(@as(usize, 0), client.outbound_count);
+    const correct_address = try allocator.dupe(u8, "group");
+    allocator.free(client.subgraph_node_id);
+    client.subgraph_node_id = correct_address;
+    try std.testing.expect(try client.sendSketchPromotion(&model, context, .{ .timed = "/loop 1h inspect" }));
+    try std.testing.expectEqual(@as(usize, 1), client.outbound_count);
+    const expected =
+        \\{"graphCommand":{"projectPath":"A","command":{"subGraphCommand":{"nodeID":"group","command":{"promoteNode":{"_0":"child","promotion":{"timed":{"triggerPrompt":"/loop 1h inspect"}},"promotedBy":null}}}}}}
+    ;
+    try std.testing.expectEqualStrings(expected, client.outbound[client.outbound_head]);
+}
+
 test "client-generated node ids on the create-node wire are random version-4 UUIDs" {
     const allocator = std.testing.allocator;
     var client = try DaemonClient.initUnstartedForTest(allocator);
@@ -751,6 +911,7 @@ pub const DaemonClient = struct {
         try context.validateCurrent(model, self.subgraph_node_id);
         if (!std.mem.eql(u8, model.selectedNodeID() orelse "", context.node_id))
             return error.PromotionContextChanged;
+        try context.validateTarget(std.meta.activeTag(promotion));
         const command = try Wire.commandGraphPromoteNode(self.allocator, context.project_path, context.node_id, promotion);
         const addressed = if (context.composite_id.len != 0) blk: {
             defer self.allocator.free(command);

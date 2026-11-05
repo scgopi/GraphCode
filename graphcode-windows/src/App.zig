@@ -12,6 +12,7 @@ const GdiplusAA = @import("GdiplusAA.zig");
 const CanvasInput = @import("CanvasInput.zig");
 const CanvasLayoutStore = @import("CanvasLayoutStore.zig");
 const GraphContextMenu = @import("GraphContextMenu.zig");
+const CardTransfer = @import("CardTransfer.zig");
 const Forms = @import("Forms.zig");
 const EdgeCreation = @import("EdgeCreation.zig");
 const EdgeEditing = @import("EdgeEditing.zig");
@@ -327,6 +328,7 @@ const TerminalPasteApi = struct {
 };
 
 extern fn graphcode_pick_folder(owner: c.HWND, buffer: [*]u16, capacity: c.DWORD) callconv(.c) c_int;
+extern fn graphcode_pick_zip(owner: c.HWND, saving: c.BOOL, suggested_name: [*:0]const u16, buffer: [*]u16, capacity: c.DWORD, replacement_approved: *c.BOOL, failure: *c.HRESULT) callconv(.c) c_int;
 
 const folder_open_timer_id: usize = 44;
 const folder_open_timer_interval_ms: c.UINT = 1;
@@ -1640,6 +1642,11 @@ pub const App = struct {
     canvas_press_node_id: []u8 = &.{},
     workspace: ?*TerminalWorkspace.Workspace = null,
     pending_session_restart: ?PendingSessionRestart = null,
+    card_transfer_worker: ?*CardTransfer.Task = null,
+    card_transfer_picker_open: bool = false,
+    card_transfer_stopping_reported: bool = false,
+    card_transfer_blocked_reported: bool = false,
+    card_transfer_cleanup_failed: bool = false,
     navigation_cursor: Navigation.Cursor = .{},
     workspace_controls: WorkspaceControls.State = .{ .panel_visible = false },
     dpi: u32 = Dpi.base_dpi,
@@ -1838,6 +1845,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.drainCardTransferForShutdown();
         self.clearSessionRestart();
         self.canvas.deinitLayout();
         self.freeLoopProbes();
@@ -4142,7 +4150,8 @@ pub const App = struct {
     }
 
     fn prepareSketchPromotion(self: *App, context: SketchPromotion.Context, target: ?SketchPromotion.Target) !bool {
-        if (target == null) return false;
+        const selected_target = target orelse return false;
+        try context.validateTarget(selected_target);
         const plan = try context.selectionPlan(&self.model, self.client.subgraph_node_id);
         if (plan == .root_project and !self.selectProject(context.project_path))
             return error.PromotionContextChanged;
@@ -4154,28 +4163,71 @@ pub const App = struct {
     }
 
     fn promoteSketch(self: *App, stable: GraphContextMenu.NodeTarget, target: SketchPromotion.Target) void {
+        self.promoteNode(stable, target, false);
+    }
+
+    fn changeLoopType(self: *App, stable: GraphContextMenu.NodeTarget, target: SketchPromotion.Target) void {
+        self.promoteNode(stable, target, true);
+    }
+
+    fn promoteNode(self: *App, stable: GraphContextMenu.NodeTarget, target: SketchPromotion.Target, retype: bool) void {
         const context = stable.promotion_context orelse {
-            self.setStatus("Unable to retain sketch promotion context. Reopen the loop menu.");
+            self.setStatus(if (retype)
+                "Unable to retain loop type change context. Reopen the loop menu."
+            else
+                "Unable to retain sketch promotion context. Reopen the loop menu.");
             return;
         };
         if (!std.mem.eql(u8, stable.project_path, context.project_path) or !std.mem.eql(u8, stable.id, context.node_id)) {
-            self.setStatus("Sketch promotion context changed. Reopen the loop menu.");
+            self.setStatus(if (retype)
+                "Loop type change context changed. Reopen the loop menu."
+            else
+                "Sketch promotion context changed. Reopen the loop menu.");
+            return;
+        }
+        const source = context.source() catch |err| {
+            self.setPromotionActionError(err, retype);
+            return;
+        };
+        if ((source != .sketch) != retype or (retype and stable.retype.origin != .canvas)) {
+            self.setPromotionActionError(error.InvalidPromotionTarget, retype);
             return;
         }
         _ = self.prepareSketchPromotion(context.*, target) catch |err| {
-            self.setPromotionError(err);
+            self.setPromotionActionError(err, retype);
             return;
         };
         var draft = NativeForms.promotion(self.window.hwnd, self.allocator, target, context.*) catch |err| {
-            self.setPromotionError(err);
+            self.setPromotionActionError(err, retype);
             return;
         } orelse return;
         defer draft.deinit(self.allocator);
         _ = self.client.sendSketchPromotion(&self.model, context.*, draft) catch |err| {
-            self.setPromotionError(err);
+            self.setPromotionActionError(err, retype);
             return;
         };
-        self.setStatus("Sketch promotion queued; waiting for the daemon.");
+        self.setStatus(if (retype)
+            "Loop type change queued; waiting for the daemon."
+        else
+            "Sketch promotion queued; waiting for the daemon.");
+    }
+
+    fn setPromotionActionError(self: *App, err: anyerror, retype: bool) void {
+        if (retype) self.setRetypeError(err) else self.setPromotionError(err);
+    }
+
+    fn setRetypeError(self: *App, err: anyerror) void {
+        self.setStatus(switch (err) {
+            error.PromotionContextChanged => "Loop type change context changed. Nothing was submitted; reopen the loop menu.",
+            error.PromotionNodeMissing => "The loop was removed. Nothing was submitted.",
+            error.PromotionStopped => "Resume this stopped loop before changing its type.",
+            error.NotSketch, error.InvalidPromotionTarget => "This loop can no longer change to that type. Nothing was submitted.",
+            error.MissingGoal => "A goal loop needs what done looks like.",
+            error.MissingTask => "A timed loop needs a task for each pass.",
+            error.PromotionQueueFull => "Unable to queue loop type change: daemon queue is full or closed.",
+            error.OutOfMemory => "Unable to allocate loop type change fields. Nothing was submitted.",
+            else => "Unable to prepare loop type change. Nothing was submitted.",
+        });
     }
 
     fn setPromotionError(self: *App, err: anyerror) void {
@@ -5157,7 +5209,7 @@ pub const App = struct {
     fn showNodeContextMenu(self: *App, index: usize, x: i32, y: i32) void {
         const graph = self.model.graph orelse return;
         if (index >= graph.nodes.items.len) return;
-        self.showOwnedNodeContextMenu(graph.project.path, self.model.open_composite_id, graph.nodes.items[index].id, self.nodeIsUnwired(graph.nodes.items[index].id), x, y);
+        self.showOwnedNodeContextMenu(graph.project.path, self.model.open_composite_id, graph.nodes.items[index].id, self.nodeIsUnwired(graph.nodes.items[index].id), .canvas, x, y);
     }
 
     const NodeMenuContext = struct {
@@ -5166,6 +5218,10 @@ pub const App = struct {
 
         fn apply(raw: ?*anyopaque, action: GraphContextMenu.Action, target: GraphContextMenu.Target) void {
             const self: *@This() = @ptrCast(@alignCast(raw orelse return));
+            if (action == .export_node or action == .import_loops_here) {
+                self.app.beginCardTransfer(self.menu, if (action == .export_node) .export_loop else .import_loops);
+                return;
+            }
             if (action != .new_child_node) return self.app.handleContextAction(action, target);
             const child = self.menu.childForCreation() catch |err| {
                 self.app.setStatus(nodeFormErrorStatus(err));
@@ -5185,11 +5241,14 @@ pub const App = struct {
         child_error: ?anyerror,
         promotion: ?SketchPromotion.Context,
         promotion_error: ?anyerror,
+        transfer: ?CardTransfer.Context,
+        transfer_error: ?anyerror,
         target: GraphContextMenu.NodeTarget,
 
         fn deinit(self: *NodeMenuPreparation) void {
             if (self.child) |*child| child.deinit();
             if (self.promotion) |*promotion| promotion.deinit(self.allocator);
+            if (self.transfer) |*transfer| transfer.deinit(self.allocator);
             self.allocator.free(self.target.project_path);
             self.allocator.free(self.target.id);
         }
@@ -5205,7 +5264,10 @@ pub const App = struct {
 
         fn promotionContextStatus(self: *const NodeMenuPreparation) ?[]const u8 {
             return if (self.promotion != null and self.promotion_error != null)
-                "Sketch promotion is unavailable in this graph context."
+                if (self.target.sketch)
+                    "Sketch promotion is unavailable in this graph context."
+                else
+                    "Loop type change is unavailable in this graph context."
             else
                 null;
         }
@@ -5218,6 +5280,10 @@ pub const App = struct {
     };
 
     fn prepareNodeMenu(self: *const App, path: []const u8, composite_id: ?[]const u8, id: []const u8, unwired: bool) !NodeMenuPreparation {
+        return self.prepareNodeMenuForOrigin(path, composite_id, id, unwired, .sidebar);
+    }
+
+    fn prepareNodeMenuForOrigin(self: *const App, path: []const u8, composite_id: ?[]const u8, id: []const u8, unwired: bool, origin: GraphContextMenu.NodeMenuOrigin) !NodeMenuPreparation {
         const node = try self.childParentNode(path, composite_id, id);
         const project_path = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(project_path);
@@ -5230,8 +5296,10 @@ pub const App = struct {
             break :blk null;
         };
         const sketch = std.mem.eql(u8, node.loop_type, "sketch");
+        const retype = GraphContextMenu.RetypeMenuState.fromNode(origin, node.loop_type, node.state);
         var promotion_error: ?anyerror = null;
-        const promotion: ?SketchPromotion.Context = if (!sketch) null else SketchPromotion.Context.capture(
+        const capture_promotion = sketch or (origin == .canvas and !retype.stopped and retype.target != null);
+        const promotion: ?SketchPromotion.Context = if (!capture_promotion) null else SketchPromotion.Context.capture(
             self.allocator,
             &self.model,
             project_path,
@@ -5246,12 +5314,31 @@ pub const App = struct {
                 promotion_error = err;
             }
         }
+        var transfer_error: ?anyerror = null;
+        const transfer: ?CardTransfer.Context = CardTransfer.Context.capture(
+            self.allocator,
+            &self.model,
+            if (origin == .canvas) .canvas else .sidebar,
+            project_path,
+            composite_id orelse "",
+            node_id,
+        ) catch |err| blk: {
+            transfer_error = err;
+            break :blk null;
+        };
+        if (transfer) |context| {
+            context.validate(&self.model, self.client.subgraph_node_id) catch |err| {
+                transfer_error = err;
+            };
+        }
         return .{
             .allocator = self.allocator,
             .child = child,
             .child_error = child_error,
             .promotion = promotion,
             .promotion_error = promotion_error,
+            .transfer = transfer,
+            .transfer_error = transfer_error,
             .target = .{
                 .project_path = project_path,
                 .id = node_id,
@@ -5262,12 +5349,205 @@ pub const App = struct {
                 .resolved = resolved,
                 .can_create_child = child != null,
                 .sketch = sketch,
+                .retype = retype,
+                .transfer = if (transfer_error) |err|
+                    if (err == error.TransferLocalOnly) .local_only else .context_changed
+                else if (self.card_transfer_worker != null or self.card_transfer_picker_open)
+                    .busy
+                else
+                    .ready,
             },
         };
     }
 
-    fn showOwnedNodeContextMenu(self: *App, path: []const u8, composite_id: ?[]const u8, id: []const u8, unwired: bool, x: i32, y: i32) void {
-        var menu = self.prepareNodeMenu(path, composite_id, id, unwired) catch |err| {
+    fn validateCardTransferMenu(self: *const App, menu: *const NodeMenuPreparation) !*const CardTransfer.Context {
+        if (self.exit_requested) return error.TransferShuttingDown;
+        if (self.card_transfer_worker != null or self.card_transfer_picker_open) return error.TransferBusy;
+        if (menu.transfer_error) |err| return err;
+        const context = if (menu.transfer) |*value| value else return error.TransferContextChanged;
+        try context.validate(&self.model, self.client.subgraph_node_id);
+        return context;
+    }
+
+    fn setCardTransferError(self: *App, err: anyerror) void {
+        self.setStatus(switch (err) {
+            error.TransferLocalOnly => "Loop Export/Import supports local projects only; remote and overview transfers are unavailable.",
+            error.TransferBusy => "A loop transfer or ZIP picker is already active. Wait for its owned processes and output to finish.",
+            error.TransferShuttingDown => "Loop transfer unavailable while the app is exiting; no transfer was started.",
+            error.TransferContextChanged, error.TransferTargetChanged, error.TransferTargetMissing => "The loop transfer target changed or moved. Reopen its menu before transferring.",
+            error.OutOfMemory => "Unable to allocate loop transfer state; no transfer was started.",
+            else => "Unable to prepare the loop transfer; no transfer was started.",
+        });
+    }
+
+    fn beginCardTransfer(self: *App, menu: *const NodeMenuPreparation, operation: CardTransfer.Operation) void {
+        defer {
+            if (self.exit_requested and !self.card_transfer_picker_open and self.card_transfer_worker == null) {
+                if (c.PostMessageW(self.window.hwnd, c.WM_CLOSE, 0, 0) == 0)
+                    self.setStatus("The loop transfer was not started, but closing the app could not be queued. Request Exit again.");
+            }
+        }
+        _ = self.validateCardTransferMenu(menu) catch |err| {
+            self.setCardTransferError(err);
+            return;
+        };
+        const shell_path = std.fs.selfExePathAlloc(self.allocator) catch |err| {
+            self.setCardTransferError(err);
+            return;
+        };
+        defer self.allocator.free(shell_path);
+        const directory = std.fs.path.dirnameWindows(shell_path) orelse {
+            self.setStatus("Loop transfer unavailable: the installed shell directory could not be resolved.");
+            return;
+        };
+        const executable = std.fs.path.join(self.allocator, &.{ directory, "bin", "graphcode.exe" }) catch |err| {
+            self.setCardTransferError(err);
+            return;
+        };
+        defer self.allocator.free(executable);
+        std.fs.accessAbsolute(executable, .{}) catch {
+            self.setStatus("Loop transfer unavailable: packaged bin\\graphcode.exe is missing or inaccessible.");
+            return;
+        };
+        var path: [32768]u16 = undefined;
+        var replacement_approved: c.BOOL = 0;
+        var failure: c.HRESULT = 0;
+        self.card_transfer_picker_open = true;
+        const picked = graphcode_pick_zip(self.window.hwnd, if (operation == .export_loop) 1 else 0, std.unicode.utf8ToUtf16LeStringLiteral("loop.zip"), &path, path.len, &replacement_approved, &failure);
+        self.card_transfer_picker_open = false;
+        if (picked == 0) {
+            self.setStatus("Loop transfer cancelled before dispatch.");
+            return;
+        }
+        if (picked != 1) {
+            const message = std.fmt.allocPrint(self.allocator, "Loop transfer ZIP picker failed (HRESULT {d}); no transfer was started.", .{failure}) catch {
+                self.setCardTransferError(error.OutOfMemory);
+                return;
+            };
+            defer self.allocator.free(message);
+            self.setStatus(message);
+            return;
+        }
+        const length = std.mem.indexOfScalar(u16, &path, 0) orelse {
+            self.setStatus("Loop transfer ZIP path was truncated; no transfer was started.");
+            return;
+        };
+        if (length == 0) {
+            self.setStatus("Loop transfer ZIP picker returned an empty path; no transfer was started.");
+            return;
+        }
+        const zip_path = std.unicode.utf16LeToUtf8Alloc(self.allocator, path[0..length]) catch |err| {
+            self.setCardTransferError(err);
+            return;
+        };
+        defer self.allocator.free(zip_path);
+        const context = self.validateCardTransferMenu(menu) catch |err| {
+            self.setCardTransferError(err);
+            return;
+        };
+        var invocation: [36]u8 = undefined;
+        Forms.generateDraftId(&invocation);
+        self.card_transfer_worker = CardTransfer.Task.create(executable, context, operation, &invocation, zip_path, replacement_approved != 0) catch |err| {
+            self.setCardTransferError(err);
+            return;
+        };
+        self.card_transfer_blocked_reported = false;
+        self.card_transfer_stopping_reported = false;
+        self.card_transfer_cleanup_failed = false;
+        self.setStatus(if (operation == .export_loop) "Exporting loop to ZIP..." else "Importing loops from ZIP; session preparation may restore files before graph mutation is confirmed...");
+    }
+
+    fn pollCardTransfer(self: *App) void {
+        const task = self.card_transfer_worker orelse return;
+        if (self.card_transfer_cleanup_failed) return;
+        switch (task.poll()) {
+            .running => return,
+            .stopping => {
+                if (!self.card_transfer_stopping_reported) {
+                    self.setStatus("Stopping loop transfer; its outcome is not yet confirmed. Waiting for the owned job and both output pipes.");
+                    self.card_transfer_stopping_reported = true;
+                }
+                return;
+            },
+            .blocked => {
+                if (!self.card_transfer_blocked_reported) {
+                    self.setStatus("Loop transfer stop is unproved; still blocked. Its changes or restored files may already exist. Do not retry or assume the child processes stopped.");
+                    self.card_transfer_blocked_reported = true;
+                }
+                return;
+            },
+            .complete => {},
+        }
+        if (task.result()) |value| {
+            var result = value;
+            defer result.deinit(CardTransfer.Task.allocator);
+            const warning = if (result.session_preparation_started and result.status != .succeeded)
+                " Session preparation started; restored files may remain. Do not automatically retry an unconfirmed transfer."
+            else
+                "";
+            const message = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ result.message, warning }) catch null;
+            if (message) |text| {
+                defer self.allocator.free(text);
+                self.setStatus(text);
+            } else self.setStatus("Loop transfer finished, but its result message could not be displayed; inspect the operation before retrying.");
+        } else |err| {
+            const verdict = CardTransfer.fallbackVerdict(task.worker.arguments.operation, task.worker.dispatched);
+            const reason = if (task.worker.launch_error) |failure|
+                @errorName(failure)
+            else if (task.worker.capture_error) |failure|
+                @errorName(failure)
+            else if (task.worker.lifecycle.failure) |failure|
+                @tagName(failure)
+            else
+                @errorName(err);
+            const message = std.fmt.allocPrint(self.allocator, "Loop transfer {s}: {s} (native diagnostic {d}). {s}", .{
+                verdict.summary,
+                reason,
+                task.worker.stop_error orelse task.worker.native_error orelse 0,
+                verdict.warning,
+            }) catch null;
+            if (message) |text| {
+                defer self.allocator.free(text);
+                self.setStatus(text);
+            } else self.setStatus(verdict.fallback_message);
+        }
+        task.deinit() catch {
+            self.card_transfer_cleanup_failed = true;
+            self.setStatus("Loop transfer process drainage was proved, but owned handle cleanup failed; transfer controls remain blocked.");
+            return;
+        };
+        self.card_transfer_worker = null;
+        self.card_transfer_blocked_reported = false;
+        if (self.exit_requested and c.PostMessageW(self.window.hwnd, c.WM_CLOSE, 0, 0) == 0)
+            self.setStatus("The loop transfer drained, but closing the app could not be queued. Request Exit again.");
+    }
+
+    fn drainCardTransferForShutdown(self: *App) void {
+        const task = self.card_transfer_worker orelse return;
+        task.cancel();
+        const start = task.stop_started_ns.?;
+        while (true) {
+            const phase = task.poll();
+            switch (CardTransfer.Timing.shutdownDecision(start, task.clock.read(), phase)) {
+                .drained => break,
+                .wait => |nanoseconds| std.Thread.sleep(nanoseconds),
+                .retain_unknown => {
+                    // Task and all worker buffers are page-allocator-owned, with no App references.
+                    std.log.err("Loop transfer shutdown stop is unproved after its bounded grace; outcome unknown. Retaining the independently owned Task/thread/job handles without claiming stopped or retrying.", .{});
+                    self.card_transfer_worker = null;
+                    return;
+                },
+            }
+        }
+        task.deinit() catch |err| {
+            std.log.err("Loop transfer drained, but shutdown handle cleanup failed: {s}", .{@errorName(err)});
+            return;
+        };
+        self.card_transfer_worker = null;
+    }
+
+    fn showOwnedNodeContextMenu(self: *App, path: []const u8, composite_id: ?[]const u8, id: []const u8, unwired: bool, origin: GraphContextMenu.NodeMenuOrigin, x: i32, y: i32) void {
+        var menu = self.prepareNodeMenuForOrigin(path, composite_id, id, unwired, origin) catch |err| {
             self.setStatus(if (err == error.OutOfMemory) "Unable to remember the node menu target" else nodeFormErrorStatus(err));
             return;
         };
@@ -5276,6 +5556,8 @@ pub const App = struct {
         if (menu.promotion_error) |err| {
             if (menu.promotionContextStatus()) |message|
                 self.setStatus(message)
+            else if (!menu.target.sketch)
+                self.setRetypeError(err)
             else
                 self.setPromotionError(err);
         }
@@ -5572,6 +5854,21 @@ pub const App = struct {
     }
 
     fn handleContextAction(self: *App, action: GraphContextMenu.Action, target: GraphContextMenu.Target) void {
+        if (action == .export_node or action == .import_loops_here) {
+            switch (target) {
+                .node => |stable| {
+                    if (self.model.graphFor(stable.project_path)) |graph| {
+                        if (!graph.project.isLocalFilesystem()) {
+                            self.setCardTransferError(error.TransferLocalOnly);
+                            return;
+                        }
+                    }
+                },
+                else => {},
+            }
+            self.setStatus("Loop transfers require a fresh, stable-owned loop menu. Reopen the target menu; no picker or CLI was started.");
+            return;
+        }
         switch (target) {
             .project => |stable| {
                 const selected = self.selectProject(stable.path);
@@ -5625,6 +5922,10 @@ pub const App = struct {
             .node => |stable| {
                 if (GraphContextMenu.promotionTarget(action)) |target_type| {
                     self.promoteSketch(stable, target_type);
+                    return;
+                }
+                if (GraphContextMenu.retypeTarget(action)) |target_type| {
+                    self.changeLoopType(stable, target_type);
                     return;
                 }
                 const already_active = if (self.model.graph) |active|
@@ -7065,6 +7366,24 @@ pub const App = struct {
                 return;
             };
             _ = self.model.setSelectedID("20000000-0000-4000-8000-000000000001");
+            self.surface = .project;
+            self.workspace_controls.panel_visible = false;
+            self.layoutWorkspace();
+            self.layoutEmptyStateControls();
+            self.syncAccessibility();
+            _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            return;
+        }
+        if (mutation == 24) {
+            self.applyUiaFixtureGraph(.project, "Reply actions", 57,
+                \\[{"id":"11111111-1111-4111-8111-111111111111","title":"Reply Goal","loopType":"goalBased","state":"awaitingInput"},{"id":"22222222-2222-4222-8222-222222222222","title":"Reply Composite","loopType":"proactive","state":"running","presence":{"presence":"awaitingInput","confidence":"reported"},"subGraph":{"nodes":[{"id":"55555555-5555-4555-8555-555555555555","title":"Reply nested Main","loopType":"turnBased","state":"idle"},{"id":"66666666-6666-4666-8666-666666666666","title":"Reply nested Goal","loopType":"goalBased","state":"idle"}]}}]
+            ,
+                \\[{"id":"88888888-8888-4888-8888-888888888888","from":"11111111-1111-4111-8111-111111111111","to":"22222222-2222-4222-8222-222222222222","kind":"handoff"}]
+            ) catch |err| {
+                self.reportWorktreeError("Unable to prepare Reply action UIA fixture", err);
+                return;
+            };
+            _ = self.model.setSelectedID("11111111-1111-4111-8111-111111111111");
             self.surface = .project;
             self.workspace_controls.panel_visible = false;
             self.layoutWorkspace();
@@ -10580,6 +10899,7 @@ fn onWindowMessage(
             app.finishUpdateCheck();
             app.finishWorktreeInspection();
             app.finishWorktreeReclaim();
+            app.pollCardTransfer();
             if (app.clone_operation) |operation| {
                 var progress: [256]u8 = undefined;
                 var recent_stderr: [256]u8 = undefined;
@@ -11264,7 +11584,7 @@ fn onWindowMessage(
                             if (row.index < nodes.len) {
                                 var screen = c.POINT{ .x = physical_point.x, .y = physical_point.y };
                                 _ = c.ClientToScreen(hwnd, &screen);
-                                app.showOwnedNodeContextMenu(path, null, nodes[row.index].id, false, screen.x, screen.y);
+                                app.showOwnedNodeContextMenu(path, null, nodes[row.index].id, false, .sidebar, screen.x, screen.y);
                             }
                         },
                         .quick_chat => if (row.index < app.model.quick_chats.items.len) {
@@ -11690,6 +12010,17 @@ fn onWindowMessage(
         },
         c.WM_CLOSE => {
             if (app.exit_requested) {
+                if (app.card_transfer_picker_open) {
+                    app.setStatus("Close the ZIP picker before the app exits; no new loop transfer will be started.");
+                    result.* = 0;
+                    return true;
+                }
+                if (app.card_transfer_worker) |task| {
+                    task.cancel();
+                    app.setStatus("Stopping the loop transfer before exit; waiting for authoritative owned-job and output drainage.");
+                    result.* = 0;
+                    return true;
+                }
                 _ = c.DestroyWindow(hwnd);
             } else {
                 hideShellWindow(hwnd);
@@ -11699,6 +12030,17 @@ fn onWindowMessage(
         },
         c.WM_SYSCOMMAND => if ((wparam & 0xfff0) == c.SC_CLOSE) {
             if (app.exit_requested) {
+                if (app.card_transfer_picker_open) {
+                    app.setStatus("Close the ZIP picker before the app exits; no new loop transfer will be started.");
+                    result.* = 0;
+                    return true;
+                }
+                if (app.card_transfer_worker) |task| {
+                    task.cancel();
+                    app.setStatus("Stopping the loop transfer before exit; waiting for authoritative owned-job and output drainage.");
+                    result.* = 0;
+                    return true;
+                }
                 _ = c.DestroyWindow(hwnd);
             } else {
                 hideShellWindow(hwnd);
@@ -22655,61 +22997,82 @@ test "loop card parity UIA actions share painted logical bounds and scale once" 
             const graph = app.model.graph.?;
             const attention = GraphCanvas.attentionActionBounds(GraphCanvas.nodeBounds(0, &app.canvas), &app.canvas);
             const reclaim = GraphCanvas.reclaimOfferBounds(GraphCanvas.nodeBounds(1, &app.canvas));
-            const expected = [_]struct { identity: []const u8, bounds: c.RECT, present: bool }{
-                .{ .identity = "attention-action:C:\\notice-a:question", .bounds = attention, .present = true },
+            const expected = [_]struct { identity: []const u8, bounds: ?c.RECT, present: bool, name: ?[]const u8 = null, invokable: ?bool = null }{
+                .{ .identity = "attention-action:C:\\notice-a:question", .bounds = attention, .present = true, .name = "Reply", .invokable = true },
                 .{ .identity = "reclaim:C:\\notice-a:resolved", .bounds = reclaim.reclaim, .present = app.kept_worktree_paths.items.len == 0 },
                 .{ .identity = "keep:C:\\notice-a:resolved", .bounds = reclaim.keep, .present = app.kept_worktree_paths.items.len == 0 },
                 .{ .identity = "attention-action:C:\\notice-a:resolved", .bounds = .{}, .present = false },
                 .{ .identity = "attention-action:C:\\notice-a:ordinary", .bounds = .{}, .present = false },
                 .{ .identity = "reclaim:C:\\notice-a:unsafe", .bounds = .{}, .present = false },
                 .{ .identity = "keep:C:\\notice-a:unsafe", .bounds = .{}, .present = false },
+                .{ .identity = "wire-node:C:\\notice-a:unwired-question", .bounds = null, .present = true, .name = "Wire it up" },
+                .{ .identity = "mark-entry:C:\\notice-a:unwired-question", .bounds = null, .present = true, .name = "Mark as entry" },
+                .{ .identity = "attention-action:C:\\notice-a:unwired-question", .bounds = .{}, .present = false },
             };
-            try std.testing.expect(GraphCanvas.attentionActionVisible(graph.nodes.items[0], graph.nodes.items, graph.edges.items));
             for (expected) |target| {
                 var matches: usize = 0;
                 for (elements) |element| {
                     if (!std.mem.eql(u8, element.identity, target.identity)) continue;
                     matches += 1;
                     try std.testing.expect(target.present);
-                    try std.testing.expectEqualDeep([4]i32{
-                        physicalCoordinate(target.bounds.left, app.dpi),
-                        physicalCoordinate(target.bounds.top, app.dpi),
-                        physicalCoordinate(target.bounds.right, app.dpi),
-                        physicalCoordinate(target.bounds.bottom, app.dpi),
-                    }, [4]i32{ element.left, element.top, element.right, element.bottom });
+                    if (target.name) |name| try std.testing.expectEqualStrings(name, element.name);
+                    if (target.invokable) |invokable| try std.testing.expectEqual(invokable, element.invokable);
+                    if (target.bounds) |bounds| {
+                        try std.testing.expectEqualDeep([4]i32{
+                            physicalCoordinate(bounds.left, app.dpi),
+                            physicalCoordinate(bounds.top, app.dpi),
+                            physicalCoordinate(bounds.right, app.dpi),
+                            physicalCoordinate(bounds.bottom, app.dpi),
+                        }, [4]i32{ element.left, element.top, element.right, element.bottom });
+                    }
                 }
                 try std.testing.expectEqual(@as(usize, if (target.present) 1 else 0), matches);
                 self.seen += matches;
             }
+            try std.testing.expect(GraphCanvas.attentionActionVisible(graph.nodes.items[0], graph.nodes.items, graph.edges.items));
             try std.testing.expect(self.seen > 0);
         }
     };
-    for ([_]u32{ 96, 120, 144, 192 }) |dpi| {
-        var app = try overviewTestApp(dpi);
-        defer deinitOverviewTestApp(&app);
-        app.surface = .project;
-        app.canvas = .{ .zoom = 1.25, .pan_x = -37, .pan_y = 23 };
-        _ = try app.model.updateFromFrame(
-            \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\notice-a","name":"Card parity"},"nodes":[{"id":"question","title":"Named question","state":"running","presence":"awaitingInput"},{"id":"resolved","title":"Safe reclaim","state":"succeeded","worktreeBinding":{"path":"C:\\notice-a\\tree-1"}},{"id":"ordinary","title":"Ordinary idle","state":"idle"},{"id":"unsafe","title":"Primary checkout","state":"succeeded","worktreeBinding":{"path":"C:\\notice-a\\tree-0"}}],"edges":[{"id":"question-resolved","from":"question","to":"resolved","kind":"handoff"},{"id":"resolved-ordinary","from":"resolved","to":"ordinary","kind":"handoff"},{"id":"ordinary-unsafe","from":"ordinary","to":"unsafe","kind":"handoff"}]}}}
-        );
-        try std.testing.expect(app.model.selectProject("C:\\notice-a"));
-        try installNoticeTestInspection(&app, "C:\\notice-a", 2, 1024);
-        const question = GraphCanvas.attentionActionBounds(GraphCanvas.nodeBounds(0, &app.canvas), &app.canvas);
-        try std.testing.expectEqual(@as(?usize, 0), GraphCanvas.hitTestAttentionAction(app.model.graph.?.nodes.items, app.model.graph.?.edges.items, question.left + 1, question.top + 1, &app.canvas));
-        var sink = Sink{ .app = &app };
-        app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
-        try std.testing.expect(sink.checked);
-        if (sink.failure) |err| return err;
-        try std.testing.expectEqual(@as(usize, 3), sink.seen);
-        try app.kept_worktree_paths.append(try app.allocator.dupe(u8, "C:\\notice-a\\tree-1"));
-        sink.checked = false;
-        app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
-        try std.testing.expect(sink.checked);
-        if (sink.failure) |err| return err;
-        try std.testing.expectEqual(@as(usize, 1), sink.seen);
-        for (app.kept_worktree_paths.items) |path| app.allocator.free(path);
-        app.kept_worktree_paths.clearRetainingCapacity();
+    var cases: usize = 0;
+    for ([_]struct { state: []const u8, presence: []const u8 }{
+        .{ .state = "running", .presence = "awaitingInput" },
+        .{ .state = "awaitingInput", .presence = "idle" },
+    }) |lifecycle| {
+        for ([_][]const u8{ "goalBased", "composite" }) |kind| {
+            for ([_]u32{ 96, 120, 144, 192 }) |dpi| {
+                var app = try overviewTestApp(dpi);
+                defer deinitOverviewTestApp(&app);
+                app.surface = .project;
+                app.canvas = .{ .zoom = 1.25, .pan_x = -37, .pan_y = 23 };
+                const frame = try std.fmt.allocPrint(app.allocator,
+                    \\{{"version":2,"kind":"event","sequence":1,"event":{{"graphChanged":{{"project":{{"path":"C:\\notice-a","name":"Card parity"}},"nodes":[{{"id":"question","title":"Named question","loopType":"{s}","state":"{s}","presence":"{s}"}},{{"id":"resolved","title":"Safe reclaim","state":"succeeded","worktreeBinding":{{"path":"C:\\notice-a\\tree-1"}}}},{{"id":"ordinary","title":"Ordinary idle","state":"idle"}},{{"id":"unsafe","title":"Primary checkout","state":"succeeded","worktreeBinding":{{"path":"C:\\notice-a\\tree-0"}}}},{{"id":"unwired-question","title":"Unwired question","loopType":"goalBased","state":"{s}","presence":"{s}"}}],"edges":[{{"id":"question-resolved","from":"question","to":"resolved","kind":"handoff"}},{{"id":"resolved-ordinary","from":"resolved","to":"ordinary","kind":"handoff"}},{{"id":"ordinary-unsafe","from":"ordinary","to":"unsafe","kind":"handoff"}}]}}}}}}
+                , .{ kind, lifecycle.state, lifecycle.presence, lifecycle.state, lifecycle.presence });
+                defer app.allocator.free(frame);
+                _ = try app.model.updateFromFrame(frame);
+                try std.testing.expect(app.model.selectProject("C:\\notice-a"));
+                try installNoticeTestInspection(&app, "C:\\notice-a", 2, 1024);
+                try std.testing.expect(app.refreshCanvasLayout(.{ .left = 0, .top = 0, .right = 1200, .bottom = 900 }));
+                const question = GraphCanvas.attentionActionBounds(GraphCanvas.nodeBounds(0, &app.canvas), &app.canvas);
+                var sink = Sink{ .app = &app };
+                app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+                try std.testing.expect(sink.checked);
+                if (sink.failure) |err| return err;
+                try std.testing.expectEqual(@as(usize, 5), sink.seen);
+                try std.testing.expectEqual(@as(?usize, 0), GraphCanvas.hitTestAttentionAction(app.model.graph.?.nodes.items, app.model.graph.?.edges.items, question.left + 1, question.top + 1, &app.canvas));
+                try app.kept_worktree_paths.append(try app.allocator.dupe(u8, "C:\\notice-a\\tree-1"));
+                sink.checked = false;
+                app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+                try std.testing.expect(sink.checked);
+                if (sink.failure) |err| return err;
+                try std.testing.expectEqual(@as(usize, 3), sink.seen);
+                for (app.kept_worktree_paths.items) |path| app.allocator.free(path);
+                app.kept_worktree_paths.clearRetainingCapacity();
+                cases += 1;
+            }
+        }
     }
+    try std.testing.expectEqual(@as(usize, 16), cases);
+    std.debug.print("cards Reply UIA publication fixture cases={d}\n", .{cases});
 }
 
 test "closed cycle UIA separates the footer reason from Inspect and preserves selected activation" {
@@ -23664,6 +24027,142 @@ fn nodeSubmissionTestApp(allocator: std.mem.Allocator) !App {
     };
 }
 
+test "canvas retype app preparation binds origin and stopped state" {
+    const allocator = std.testing.allocator;
+    var app = try nodeSubmissionTestApp(allocator);
+    // This fixture never starts or queues the client.
+    defer app.client.frame_buffer.deinit();
+    defer app.model.deinit();
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
+    _ = try app.model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"goal-resolved","loopType":"goalBased","state":"succeeded"},{"id":"goal-stopped","loopType":"goalBased","state":"stopped"},{"id":"timed-active","loopType":"timeBased","state":"running"},{"id":"timed-stopped","loopType":"timeBased","state":"stopped"},{"id":"turn-active","loopType":"turnBased","state":"running"},{"id":"sketch-stopped","loopType":"sketch","state":"stopped"}],"edges":[]}}
+    );
+    const cases = [_]struct { id: []const u8, command: ?usize, resolved: bool, sketch: bool = false }{
+        .{ .id = "goal-resolved", .command = 5122, .resolved = true },
+        .{ .id = "goal-stopped", .command = null, .resolved = true },
+        .{ .id = "timed-active", .command = 5121, .resolved = false },
+        .{ .id = "timed-stopped", .command = null, .resolved = true },
+        .{ .id = "turn-active", .command = null, .resolved = false },
+        .{ .id = "sketch-stopped", .command = null, .resolved = true, .sketch = true },
+    };
+    for (cases) |case| {
+        try std.testing.expect(app.model.setSelectedID(case.id));
+        for ([_]GraphContextMenu.NodeMenuOrigin{ .canvas, .sidebar }) |origin| {
+            var menu = try app.prepareNodeMenuForOrigin("A", null, case.id, false, origin);
+            defer menu.deinit();
+            const target = menu.popupTarget();
+            try std.testing.expectEqual(origin, target.retype.origin);
+            try std.testing.expectEqual(case.resolved, target.resolved);
+            const should_show = origin == .canvas and case.command != null;
+            try std.testing.expectEqual(should_show or case.sketch, target.promotion_context != null);
+            if (case.sketch) try std.testing.expect(GraphContextMenu.promotionEnabled(target));
+            const plan = GraphContextMenu.nodeMenuPlan(target);
+            var count: usize = 0;
+            for (plan.items[0..plan.len]) |item| switch (item) {
+                .command => |command| if (command.id == 5121 or command.id == 5122) {
+                    count += 1;
+                    try std.testing.expect(should_show);
+                    try std.testing.expectEqual(case.command.?, command.id);
+                    try std.testing.expect(command.enabled);
+                },
+                else => {},
+            };
+            try std.testing.expectEqual(@as(usize, if (should_show) 1 else 0), count);
+        }
+    }
+    const callback: GraphContextMenu.Callback = &onContextAction;
+    std.mem.doNotOptimizeAway(callback);
+    try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+}
+
+test "card transfer app preparation binds sidebar root and canvas scope without selection changes" {
+    const allocator = std.testing.allocator;
+    var app = try nodeSubmissionTestApp(allocator);
+    defer deinitNodeSubmissionTestApp(&app);
+    _ = try app.model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"C:\\A","name":"A"},"nodes":[{"id":"22222222-2222-4222-8222-222222222222","loopType":"composite","subGraph":{"project":{"path":"C:\\A","name":"A"},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","loopType":"main"}],"edges":[]}}],"edges":[]}}
+    );
+    _ = try app.model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"C:\\B","name":"B"},"nodes":[{"id":"33333333-3333-4333-8333-333333333333","loopType":"main"}],"edges":[]}}
+    );
+    try std.testing.expect(app.model.selectProject("C:\\A"));
+    try std.testing.expect(app.model.openComposite(custody_group_id));
+    try std.testing.expect(app.model.setSelectedID(custody_parent_id));
+    app.client.subgraph_node_id = try allocator.dupe(u8, custody_group_id);
+    var canvas_menu = try app.prepareNodeMenuForOrigin("C:\\A", custody_group_id, custody_parent_id, false, .canvas);
+    defer canvas_menu.deinit();
+    var sidebar_menu = try app.prepareNodeMenu("C:\\B", null, "33333333-3333-4333-8333-333333333333", false);
+    defer sidebar_menu.deinit();
+    try std.testing.expectEqual(GraphContextMenu.TransferMenuState.ready, canvas_menu.popupTarget().transfer);
+    try std.testing.expectEqual(GraphContextMenu.TransferMenuState.ready, sidebar_menu.popupTarget().transfer);
+    try std.testing.expectEqualStrings(custody_group_id, canvas_menu.transfer.?.containingComposite());
+    try std.testing.expectEqualStrings("root", sidebar_menu.transfer.?.containingComposite());
+    _ = try app.validateCardTransferMenu(&sidebar_menu);
+    try std.testing.expectEqualStrings("C:\\A", app.model.graph.?.project.path);
+    try std.testing.expectEqualStrings(custody_group_id, app.model.open_composite_id.?);
+    try std.testing.expectEqualStrings(custody_parent_id, app.model.selectedNodeID().?);
+    try std.testing.expect(app.product_settings == null);
+    try std.testing.expect(app.card_transfer_worker == null);
+    try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+}
+
+test "card transfer app menu guards reject remote missing and busy targets before native work" {
+    var app = try nodeSubmissionTestApp(std.testing.allocator);
+    defer deinitNodeSubmissionTestApp(&app);
+    _ = try app.model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"C:\\A","name":"A"},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","loopType":"main"}],"edges":[]}}
+    );
+    _ = try app.model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"ssh://builder/GraphCode","name":"Remote"},"nodes":[{"id":"33333333-3333-4333-8333-333333333333","loopType":"main"}],"edges":[]}}
+    );
+    try std.testing.expect(app.model.selectProject("C:\\A"));
+    var remote = try app.prepareNodeMenu("ssh://builder/GraphCode", null, "33333333-3333-4333-8333-333333333333", false);
+    defer remote.deinit();
+    try std.testing.expectEqual(GraphContextMenu.TransferMenuState.local_only, remote.popupTarget().transfer);
+    try std.testing.expectError(error.TransferLocalOnly, app.validateCardTransferMenu(&remote));
+    app.card_transfer_picker_open = true;
+    var busy = try app.prepareNodeMenu("C:\\A", null, custody_parent_id, false);
+    defer busy.deinit();
+    try std.testing.expectEqual(GraphContextMenu.TransferMenuState.busy, busy.popupTarget().transfer);
+    try std.testing.expectError(error.TransferBusy, app.validateCardTransferMenu(&busy));
+    app.card_transfer_picker_open = false;
+    var captured = try app.prepareNodeMenu("C:\\A", null, custody_parent_id, false);
+    defer captured.deinit();
+    app.exit_requested = true;
+    try std.testing.expectError(error.TransferShuttingDown, app.validateCardTransferMenu(&captured));
+    app.exit_requested = false;
+    _ = try app.model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"C:\\B","name":"B"},"nodes":[{"id":"44444444-4444-4444-8444-444444444444","loopType":"main"}],"edges":[]}}
+    );
+    var sidebar = try app.prepareNodeMenu("C:\\B", null, "44444444-4444-4444-8444-444444444444", false);
+    defer sidebar.deinit();
+    try std.testing.expectEqualStrings("C:\\A", sidebar.transfer.?.origin_project_path);
+    try std.testing.expectEqualStrings(custody_parent_id, sidebar.transfer.?.origin_node_id);
+    try std.testing.expectEqualStrings("", sidebar.transfer.?.origin_composite_id);
+    try std.testing.expectEqualStrings("C:\\A", app.model.graph.?.project.path);
+    try std.testing.expectEqualStrings("C:\\A", app.model.selected_project_path.?);
+    try std.testing.expectEqualStrings(custody_parent_id, app.model.selectedNodeID().?);
+    try std.testing.expect(app.model.open_composite_id == null);
+    try std.testing.expectEqualStrings("", app.client.subgraph_node_id);
+    _ = try app.model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"C:\\B","name":"B"},"nodes":[],"edges":[]}}
+    );
+    try std.testing.expectEqualStrings("C:\\A", app.model.graph.?.project.path);
+    try std.testing.expectEqualStrings("C:\\A", app.model.selected_project_path.?);
+    try std.testing.expectEqualStrings(custody_parent_id, app.model.selectedNodeID().?);
+    try std.testing.expect(app.model.open_composite_id == null);
+    try std.testing.expectEqualStrings("", app.client.subgraph_node_id);
+    try std.testing.expectError(error.TransferTargetMissing, app.validateCardTransferMenu(&sidebar));
+    _ = try app.model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"C:\\A","name":"A"},"nodes":[],"edges":[]}}
+    );
+    try std.testing.expectError(error.TransferContextChanged, app.validateCardTransferMenu(&captured));
+    try std.testing.expect(app.card_transfer_worker == null);
+    try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+}
+
 const custody_parent_id = "11111111-1111-4111-8111-111111111111";
 const custody_group_id = "22222222-2222-4222-8222-222222222222";
 const custody_graph_a =
@@ -23841,6 +24340,12 @@ fn custodyPopupAllocationCase(allocator: std.mem.Allocator, settings_available: 
         try std.testing.expect(menu.popupTarget().promotion_context == null);
         return error.OutOfMemory;
     };
+    if (menu.transfer_error) |err| if (err == error.OutOfMemory) {
+        try std.testing.expect(menu.transfer == null);
+        try std.testing.expectEqual(GraphContextMenu.TransferMenuState.context_changed, menu.target.transfer);
+        try std.testing.expectError(error.OutOfMemory, app.validateCardTransferMenu(&menu));
+        return error.OutOfMemory;
+    };
     try std.testing.expectEqual(settings_available and !resolved, menu.child != null);
     if (resolved) try std.testing.expect(menu.child_error == null);
 }
@@ -23958,6 +24463,7 @@ const CustodyOneFailureAllocator = struct {
 test "custody child combined popup isolates each optional allocation failure from the other feature" {
     var child_only_failed = false;
     var promotion_only_failed = false;
+    var transfer_only_failed = false;
     var generic_failed = false;
     var finished = false;
     for (0..128) |fail_index| {
@@ -23985,6 +24491,15 @@ test "custody child combined popup isolates each optional allocation failure fro
                 try std.testing.expectEqualStrings(custody_parent_id, (try menu.childForCreation()).initial.created_by);
                 promotion_only_failed = true;
             }
+            if (menu.transfer_error) |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                try std.testing.expect(menu.transfer == null);
+                try std.testing.expectEqual(GraphContextMenu.TransferMenuState.context_changed, target.transfer);
+                try std.testing.expectError(error.OutOfMemory, app.validateCardTransferMenu(&menu));
+                try std.testing.expect(target.can_create_child);
+                try std.testing.expect(GraphContextMenu.promotionEnabled(target));
+                transfer_only_failed = true;
+            }
         } else |err| {
             try std.testing.expectEqual(error.OutOfMemory, err);
             generic_failed = true;
@@ -23997,7 +24512,7 @@ test "custody child combined popup isolates each optional allocation failure fro
             break;
         }
     }
-    try std.testing.expect(finished and generic_failed and child_only_failed and promotion_only_failed);
+    try std.testing.expect(finished and generic_failed and child_only_failed and promotion_only_failed and transfer_only_failed);
 }
 
 test "custody child distinguishes nested and root parents with identical IDs" {

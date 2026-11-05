@@ -158,6 +158,104 @@ public sealed class ManagedUiSuite : IValidationSuite
         ActivationCases.Require(probe.Injected == test.Expected && (failure is not null) == mustRefuse &&
             (test.Moves is null || probe.Moves == test.Moves),
             $"UIA_INPUT_RED: {test.Name} injected={probe.Injected} expected={test.Expected} refusal={failure is not null}; {failure?.Message}");
+        if (test.Name == "owned-key") CheckControlModifier();
+    }
+
+    private static void CheckControlModifier()
+    {
+        var method = typeof(UiaInputSafety).GetMethod(nameof(UiaInputSafety.SendKeyInput),
+            new[] { typeof(IntPtr), typeof(uint), typeof(IntPtr), typeof(ushort), typeof(int), typeof(bool) });
+        ActivationCases.Require(method is not null, "Guarded optional-Control input contract is missing");
+        Exception? Send(InputFixture probe, bool modifier)
+        {
+            try
+            {
+                var result = method!.Invoke(new UiaInputSafety(probe),
+                    new object[] { new IntPtr(10), 123u, new IntPtr(20), (ushort)0x4C, 1, modifier });
+                ActivationCases.Require(result is int count && count == 1, "Complete key batch lost its return count");
+                return null;
+            }
+            catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null) { return error.InnerException; }
+        }
+        var normal = new InputFixture(); normal.Reset();
+        ActivationCases.Require(Send(normal, false) is null && normal.KeyBatches.Count == 1 &&
+            normal.KeyBatches[0].Length == 2 && normal.KeyBatches[0][0].Key.VirtualKey == 0x4C &&
+            normal.KeyBatches[0][0].Key.Flags == 0 && normal.KeyBatches[0][1].Key.Flags == 2 &&
+            normal.PressedKeys.Count == 0, "Default input is no longer the original two-event batch");
+        var original = new InputFixture(); original.Reset();
+        var originalInput = new UiaInputSafety(original);
+        ActivationCases.Require(originalInput.SendKeyInput(new IntPtr(10), 123, new IntPtr(20), 0x4C, 0) == 0 &&
+            original.KeyBatches.Count == 0 &&
+            originalInput.SendKeyInput(new IntPtr(10), 123, new IntPtr(20), 0x4C, 2) == 2 &&
+            original.KeyBatches.Count == 1 && original.KeyBatches[0].Length == 4 &&
+            original.KeyBatches[0].Select(record => record.Key.VirtualKey).SequenceEqual(new ushort[] { 0x4C, 0x4C, 0x4C, 0x4C }) &&
+            original.KeyBatches[0].Select(record => record.Key.Flags).SequenceEqual(new uint[] { 0, 2, 0, 2 }) &&
+            original.PressedKeys.Count == 0, "Original five-argument zero/repeated-key behavior changed");
+        for (uint sent = 0; sent <= 4; sent++)
+        {
+            var probe = new InputFixture(); probe.Reset(); probe.KeyReturns.Enqueue(sent);
+            probe.AfterFirstKeyInput = p => p.Focus = new IntPtr(21);
+            var error = Send(probe, true);
+            var batch = probe.KeyBatches[0];
+            ActivationCases.Require(batch.Length == 4 &&
+                batch.Select(record => record.Key.VirtualKey).SequenceEqual(new ushort[] { 0x11, 0x4C, 0x4C, 0x11 }) &&
+                batch.Select(record => record.Key.Flags).SequenceEqual(new uint[] { 0, 0, 2, 2 }) &&
+                batch.All(record => record.Type == 1) && probe.PressedKeys.Count == 0 &&
+                (sent == 4 ? error is null : error is InvalidOperationException) &&
+                probe.KeyBatches.Count == (sent is 1 or 2 or 3 ? 2 : 1) &&
+                probe.KeyBatches.Skip(1).SelectMany(records => records).All(record => record.Key.Flags == 2),
+                $"Control batch return {sent} changed order, failed to release keys, replayed keydowns or hid failure: {error}");
+        }
+        foreach (Action<InputFixture> invalidate in new Action<InputFixture>[] {
+            p => p.Foreground = false, p => p.Focus = new IntPtr(99),
+            p => p.Focus = new IntPtr(21), p => p.Focus = new IntPtr(30), p => p.Focus = IntPtr.Zero,
+            p => p.Alive = false, p => p.ForeignOwner = true,
+            p => p.ForegroundOverride = new IntPtr(30), p => p.Visible = false, p => p.Enabled = false })
+        {
+            var probe = new InputFixture(); probe.Reset(); invalidate(probe);
+            ActivationCases.Require(Send(probe, true) is InvalidOperationException &&
+                probe.KeyBatches.Count == 0, "Control modifier bypassed an original pre-input guard");
+        }
+        for (uint released = 0; released <= 2; released++)
+        {
+            var probe = new InputFixture(); probe.Reset();
+            probe.KeyReturns.Enqueue(2); probe.KeyReturns.Enqueue(released);
+            var error = Send(probe, true);
+            ActivationCases.Require(probe.KeyBatches.Count == 2 &&
+                probe.KeyBatches[1].Select(record => record.Key.VirtualKey).SequenceEqual(new ushort[] { 0x4C, 0x11 }) &&
+                probe.KeyBatches[1].All(record => record.Key.Flags == 2) &&
+                (released == 2 ? error is InvalidOperationException && probe.PressedKeys.Count == 0 :
+                    error is AggregateException aggregate && aggregate.InnerExceptions.Count == 2 &&
+                    probe.PressedKeys.Contains(0x11)),
+                $"Short key-up cleanup {released}/2 hid failure, replayed keydowns or claimed key release");
+        }
+        foreach (Action<InputFixture> invalidateCleanup in new Action<InputFixture>[] {
+            p => p.Foreground = false, p => p.Focus = new IntPtr(99), p => p.Focus = IntPtr.Zero,
+            p => p.Focus = new IntPtr(30), p => p.Alive = false, p => p.ForeignOwner = true,
+            p => p.ForegroundOverride = new IntPtr(30), p => p.Visible = false, p => p.Enabled = false })
+        {
+            var probe = new InputFixture(); probe.Reset();
+            probe.KeyReturns.Enqueue(2); probe.KeyReturns.Enqueue(0);
+            probe.AfterFirstKeyInput = invalidateCleanup;
+            var error = Send(probe, true);
+            ActivationCases.Require(error is AggregateException aggregate && aggregate.InnerExceptions.Count == 2 &&
+                aggregate.InnerExceptions[0] is InvalidOperationException primary &&
+                primary.Message.StartsWith("SendInput injected 2 of 4 key events", StringComparison.Ordinal) &&
+                aggregate.InnerExceptions[1] is InvalidOperationException &&
+                probe.KeyBatches.Count == 1 &&
+                probe.KeyBatches.Skip(1).SelectMany(records => records).All(record => record.Key.Flags == 2) &&
+                probe.PressedKeys.Contains(0x11),
+                "Unproved modifier cleanup lost its primary/separate error, bypassed ownership or hid held Ctrl");
+        }
+        foreach (var cleanup in new Exception[] { new InvalidOperationException("Fixture cleanup refused"),
+            new System.ComponentModel.Win32Exception(5) })
+        {
+            var probe = new InputFixture(); probe.Reset();
+            probe.KeyReturns.Enqueue(2); probe.KeyCleanupFailure = cleanup;
+            ActivationCases.Require(Send(probe, true) is AggregateException aggregate &&
+                aggregate.InnerExceptions.Count == 2 && ReferenceEquals(aggregate.InnerExceptions[1], cleanup) &&
+                probe.PressedKeys.Contains(0x11), "Native cleanup exception replaced the primary failure or hid held Ctrl");
+        }
     }
 
     private static void RunPopupEffect(string name)

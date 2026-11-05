@@ -3051,24 +3051,19 @@ fn drawLoopCard(
     };
     if (role != .unwired) if (action) |primary_action| {
         const action_bounds = attentionActionBounds(bounds, state);
-        if (primary_action == .inspect) {
-            roundedControl(hdc, action_bounds, scaled(5, state), 0x000A9FFF, 0x000A9FFF);
-            drawCardText(
-                hdc,
-                allocator,
-                attentionActionLabelFor(primary_action),
-                action_bounds,
-                11 * state.zoom,
-                .semibold,
-                0x00241703,
-                false,
-            ) catch |err| {
-                std.log.warn("Attention action label unavailable: {s}", .{@errorName(err)});
-            };
-        } else {
-            fill(hdc, action_bounds, 0x000A9FFF);
-            drawTextRect(hdc, allocator, attentionActionLabelFor(primary_action), action_bounds, scaled(9, state), 0x00241703, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
-        }
+        roundedControl(hdc, action_bounds, scaled(5, state), 0x000A9FFF, 0x000A9FFF);
+        drawCardText(
+            hdc,
+            allocator,
+            attentionActionLabelFor(primary_action),
+            rect(action_bounds.left + scaled(9, state), action_bounds.top, action_bounds.right - scaled(9, state), action_bounds.bottom),
+            11 * state.zoom,
+            .bold,
+            0x00031724,
+            false,
+        ) catch |err| {
+            std.log.warn("Attention action label unavailable: {s}", .{@errorName(err)});
+        };
     };
 
     if (role != .unwired and show_reclaim and reclaim != null) {
@@ -3096,7 +3091,8 @@ pub fn attentionActionLabel(node: GraphModel.Node) []const u8 {
 }
 
 pub fn attentionActionForNode(node: GraphModel.Node) AttentionAction {
-    if (std.mem.eql(u8, node.state, "running") and std.mem.eql(u8, node.presence, "awaitingInput")) return .reply;
+    if (std.mem.eql(u8, node.state, "awaitingInput") or
+        (std.mem.eql(u8, node.state, "running") and std.mem.eql(u8, node.presence, "awaitingInput"))) return .reply;
     if (std.mem.eql(u8, node.state, "blocked")) return .inspect;
     return .none;
 }
@@ -3119,7 +3115,9 @@ pub fn attentionActionBounds(bounds: c.RECT, state: *const CanvasState) c.RECT {
 }
 
 fn attentionActionBoundsForZoom(bounds: c.RECT, zoom: f32) c.RECT {
-    return rect(bounds.right - scaledValue(77, zoom), bounds.top + scaledValue(51, zoom), bounds.right - scaledValue(11, zoom), bounds.top + scaledValue(68, zoom));
+    const left = bounds.left + scaledValue(11, zoom);
+    const top = bounds.top + scaledValue(51, zoom);
+    return rect(left, top, left + scaledValue(60, zoom), top + scaledValue(20, zoom));
 }
 
 pub fn cycleReasonBounds(bounds: c.RECT, state: *const CanvasState) c.RECT {
@@ -3197,6 +3195,8 @@ pub fn hitTestAttentionAction(
     var index = nodes.len;
     while (index > 0) {
         index -= 1;
+        const role = projectNodeRole(state, index) orelse continue;
+        if (role == .unwired) continue;
         if (!attentionActionVisible(nodes[index], nodes, edges)) continue;
         if (insideGraph(x, y, attentionActionBounds(nodeBounds(index, state), state))) return index;
     }
@@ -4119,7 +4119,7 @@ fn drawCardBody(
     if (role == .unwired) {
         const actions = unwiredActionBoundsForZoom(bounds, zoom);
         roundedControl(hdc, actions.wire, scaledValue(5, zoom), 0x003A3535, 0x003A3535);
-        try drawCardText(hdc, allocator, "Wire it up", actions.wire, 11 * zoom, .semibold, 0x00D9D9D9, false);
+        try drawCardText(hdc, allocator, "Wire it up", rect(actions.wire.left + scaledValue(9, zoom), actions.wire.top, actions.wire.right - scaledValue(9, zoom), actions.wire.bottom), 11 * zoom, .semibold, 0x00D9D9D9, false);
         try drawCardText(hdc, allocator, "Mark as entry", actions.mark_entry, 11 * zoom, .regular, 0x00808080, false);
     } else {
         const live = if (reclaim) |offer| try reclaimLine(allocator, offer) else try cardLiveLine(allocator, node);
@@ -4369,8 +4369,8 @@ fn loopTypeColor(loop_type: []const u8) u32 {
 }
 
 fn needsAttention(node: GraphModel.Node, nodes: []const GraphModel.Node, edges: []const GraphModel.Edge) bool {
-    if (std.mem.eql(u8, node.state, "failed") or std.mem.eql(u8, node.state, "stalled")) return true;
-    if (std.mem.eql(u8, node.state, "running") and std.mem.eql(u8, node.presence, "awaitingInput")) return true;
+    const display_state = nodeDisplayState(node);
+    if (std.mem.eql(u8, display_state, "failed") or std.mem.eql(u8, display_state, "stalled") or std.mem.eql(u8, display_state, "awaitingInput")) return true;
     if (!std.mem.eql(u8, node.state, "blocked")) return false;
     for (edges) |edge| {
         if (!std.mem.eql(u8, edge.to, node.id) or !std.mem.eql(u8, edge.kind, "handoff") or edge.fired) continue;
@@ -6149,6 +6149,200 @@ test "canvas visual finish controls select actual UI and monospaced font faces" 
     }
 }
 
+test "cards paired review attention follows NEEDS YOU across lifecycle and recovery roles" {
+    for ([_][]const u8{ "goalBased", "sketch", "composite" }) |kind| {
+        for ([_][]const u8{ "awaitingInput", "running", "blocked", "succeeded" }) |lifecycle| {
+            var node = parityTestNode();
+            node.loop_type = @constCast(kind);
+            node.state = @constCast(lifecycle);
+            node.presence = @constCast(if (std.mem.eql(u8, lifecycle, "awaitingInput")) "idle" else "awaitingInput");
+            try std.testing.expectEqualStrings("NEEDS YOU", cardState(node).word);
+            try std.testing.expect(needsAttention(node, &.{node}, &.{}));
+            for ([_]NodeRole{ .entry, .interior, .unwired, .cycle_only }) |role| {
+                for ([_]bool{ false, true }) |selected| {
+                    const chrome = loopCardChrome(node, &.{}, role, needsAttention(node, &.{node}, &.{}), selected);
+                    try std.testing.expectEqual(Tokens.loop_card_attention_top, chrome.top);
+                    try std.testing.expectEqual(Tokens.loop_card_attention_bottom, chrome.bottom);
+                    try std.testing.expectEqual(@as(u32, 0x000A9FFF), chrome.halo);
+                    try std.testing.expectEqual(@as(f32, 0.45), chrome.halo_opacity);
+                    try std.testing.expectEqual(@as(f32, 18), chrome.halo_sigma);
+                    try std.testing.expectEqual(if (selected) Tokens.canvas_selection else @as(u32, 0x000A9FFF), chrome.border);
+                    try std.testing.expectEqual(role == .unwired and !selected, chrome.dashed);
+                    try std.testing.expectEqual(@as(u8, if (role == .unwired) 89 else 255), chrome.stripe_alpha);
+                }
+            }
+        }
+    }
+}
+
+test "cards paired review Inspect is a leading body button with metadata below" {
+    for ([_]f32{ 0.55, 0.75, 1, 1.25, 1.8 }) |zoom| {
+        const bounds = rect(40, 40, 40 + scaledValue(250, zoom), 40 + scaledValue(96, zoom));
+        const action = attentionActionBounds(bounds, &.{ .zoom = zoom });
+        const rows = cardTextLayout(bounds, zoom, scaledValue(80, zoom));
+        try std.testing.expectEqual(rows.live.left, action.left);
+        try std.testing.expectEqual(scaledValue(60, zoom), action.right - action.left);
+        try std.testing.expectEqual(scaledValue(20, zoom), action.bottom - action.top);
+        try std.testing.expect(action.top > rows.live.bottom);
+        try std.testing.expect(action.bottom <= rows.meta.top);
+        try std.testing.expectEqual(rows.meta, cycleReasonBounds(bounds, &.{ .zoom = zoom }));
+    }
+}
+
+test "cards paired review raw awaitingInput exposes Reply without presence" {
+    var cases: usize = 0;
+    for ([_][]const u8{ "goalBased", "composite", "turnBased", "sketch", "timeBased" }) |kind| {
+        for ([_][]const u8{ "", "idle", "awaitingInput", "busy", "absent", "unknown" }) |presence| {
+            var node = parityTestNode();
+            node.loop_type = @constCast(kind);
+            node.state = @constCast("awaitingInput");
+            node.presence = @constCast(presence);
+            try std.testing.expectEqual(AttentionAction.reply, attentionActionForNode(node));
+            try std.testing.expectEqualStrings("Reply", attentionActionLabel(node));
+            try std.testing.expectEqual(@as(?AttentionAction, .reply), primaryCardAction(node));
+            try std.testing.expect(attentionActionVisible(node, &.{node}, &.{}));
+            cases += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 30), cases);
+    std.debug.print("cards raw awaitingInput Reply classifier cases={d}\n", .{cases});
+}
+
+test "cards paired review hidden unwired primary action leaves leading body available for node press" {
+    for ([_][]const u8{ "running", "awaitingInput", "blocked" }) |lifecycle| {
+        var node = parityTestNode();
+        node.state = @constCast(lifecycle);
+        node.presence = @constCast(if (std.mem.eql(u8, lifecycle, "running")) "awaitingInput" else "idle");
+        const nodes = [_]GraphModel.Node{node};
+        try std.testing.expectEqual(if (std.mem.eql(u8, lifecycle, "blocked")) AttentionAction.inspect else AttentionAction.reply, primaryCardAction(node).?);
+        for ([_]f32{ 0.55, 1, 1.8 }) |zoom| {
+            var state = CanvasState{ .zoom = zoom };
+            defer state.deinitLayout();
+            state.project_layout = try LaneLayout.init(std.testing.allocator, &nodes, &[_]GraphModel.Edge{}, .{});
+            try std.testing.expectEqual(@as(?NodeRole, .unwired), projectNodeRole(&state, 0));
+            const bounds = nodeBounds(0, &state);
+            const x = bounds.left + scaledValue(20, zoom);
+            const y = bounds.top + scaledValue(60, zoom);
+            try std.testing.expect(insideGraph(x, y, attentionActionBounds(bounds, &state)));
+            try std.testing.expectEqual(@as(?UnwiredHit, null), hitTestUnwiredAction(&nodes, &.{}, &.{}, x, y, &state));
+            try std.testing.expectEqual(@as(?usize, null), hitTestAttentionAction(&nodes, &.{}, x, y, &state));
+            try std.testing.expectEqual(@as(?usize, 0), hitTest(&nodes, x, y, &state, rect(bounds.left, bounds.top, bounds.right, bounds.bottom)));
+            const recovery = unwiredActionBounds(bounds, &state);
+            try std.testing.expectEqual(UnwiredAction.wire, hitTestUnwiredAction(&nodes, &.{}, &.{}, recovery.wire.left + 1, recovery.wire.top + 1, &state).?.action);
+            try std.testing.expectEqual(UnwiredAction.mark_entry, hitTestUnwiredAction(&nodes, &.{}, &.{}, recovery.mark_entry.left + 1, recovery.mark_entry.top + 1, &state).?.action);
+        }
+    }
+}
+
+test "cards paired review visible primary actions retain declared entry and connected role hits" {
+    for ([_][]const u8{ "running", "awaitingInput", "blocked" }) |lifecycle| {
+        var node = parityTestNode();
+        node.state = @constCast(lifecycle);
+        node.presence = @constCast(if (std.mem.eql(u8, lifecycle, "running")) "awaitingInput" else "idle");
+        const nodes = [_]GraphModel.Node{ node, graphRoleTestNode("peer") };
+        for ([_]NodeRole{ .entry, .interior, .cycle_only }) |role| {
+            const edges: []const GraphModel.Edge = switch (role) {
+                .entry => &.{},
+                .interior => &.{graphRoleTestEdge("peer", node.id, "handoff")},
+                .cycle_only => &.{graphRoleTestEdge(node.id, node.id, "handoff")},
+                .unwired => unreachable,
+            };
+            const declared: []const []const u8 = if (role == .entry) &.{node.id} else &.{};
+            var state = CanvasState{};
+            defer state.deinitLayout();
+            state.project_layout = try LaneLayout.init(std.testing.allocator, &nodes, edges, .{ .declared_entries = declared });
+            try std.testing.expectEqual(@as(?NodeRole, role), projectNodeRole(&state, 0));
+            const bounds = nodeBounds(0, &state);
+            try std.testing.expectEqual(@as(?usize, 0), hitTestAttentionAction(&nodes, edges, bounds.left + 20, bounds.top + 60, &state));
+            try std.testing.expectEqual(@as(?UnwiredHit, null), hitTestUnwiredAction(&nodes, edges, declared, bounds.left + 20, bounds.top + 60, &state));
+        }
+    }
+}
+
+test "cards paired review Inspect uses bold padded title and preserves semibold card title" {
+    var actual = try ParityDib.init(360, 200);
+    defer actual.deinit();
+    var expected = try ParityDib.init(360, 200);
+    defer expected.deinit();
+    const bounds = rect(40, 40, 290, 136);
+    var node = parityTestNode();
+    node.state = @constCast("blocked");
+    const action = attentionActionBounds(bounds, &.{});
+    fill(actual.dc, rect(0, 0, 360, 200), Tokens.canvas_tone);
+    fill(expected.dc, rect(0, 0, 360, 200), Tokens.canvas_tone);
+    drawLoopCard(actual.dc, std.testing.allocator, node, bounds, &.{}, .cycle_only, false, .inspect, false, null, true);
+    roundedControl(expected.dc, action, 5, 0x000A9FFF, 0x000A9FFF);
+    try drawCardText(expected.dc, std.testing.allocator, "Inspect", rect(action.left + 9, action.top, action.right - 9, action.bottom), 11, .card_state, 0x00031724, false);
+    var y = action.top + 2;
+    while (y < action.bottom - 2) : (y += 1) {
+        var x = action.left + 5;
+        while (x < action.right - 5) : (x += 1) {
+            try std.testing.expectEqual(c.GetPixel(expected.dc, x, y), c.GetPixel(actual.dc, x, y));
+        }
+    }
+    const title = try inspectPaintFont(std.testing.allocator, actual.dc, AppFont.getStyle(14.5, .card_title), "Segoe UI", -15, c.FW_SEMIBOLD);
+    defer std.testing.allocator.free(title.actual_face);
+}
+
+test "cards paired review production paint warms Goal and preserves blocked cycle recovery precedence" {
+    try chrome764Native();
+    var dib = try ParityDib.init(640, 280);
+    defer dib.deinit();
+    const bounds = rect(100, 80, 350, 176);
+    for ([_][]const u8{ "goalBased", "sketch", "composite" }) |kind| {
+        for ([_]NodeRole{ .entry, .interior, .unwired, .cycle_only }) |role| {
+            for ([_]bool{ false, true }) |selected| {
+                for ([_]bool{ false, true }) |asking| {
+                    var node = parityTestNode();
+                    node.loop_type = @constCast(kind);
+                    node.state = @constCast(if (asking) "awaitingInput" else "blocked");
+                    node.presence = @constCast("idle");
+                    fill(dib.dc, rect(0, 0, 640, 280), Tokens.canvas_tone);
+                    const warm = needsAttention(node, &.{node}, &.{});
+                    drawLoopCardShadow(dib.dc, std.testing.allocator, node, bounds, &.{}, role, warm, selected);
+                    drawLoopCard(dib.dc, std.testing.allocator, node, bounds, &.{}, role, warm, primaryCardAction(node), selected, null, true);
+                    const pixel = c.GetPixel(dib.dc, bounds.right - 7, bounds.top + 48);
+                    try std.testing.expect(chrome764ColorNear(pixel, chrome764Face(asking, 48, 96), 1));
+                    if (asking) {
+                        const halo = c.GetPixel(dib.dc, bounds.right + 12, bounds.top + 48);
+                        try std.testing.expect((halo & 255) > (Tokens.canvas_tone & 255));
+                    }
+                    const recovery = unwiredActionBounds(bounds, &.{});
+                    const action = attentionActionBounds(bounds, &.{});
+                    if (role == .unwired) {
+                        try std.testing.expect(dib.count(recovery.wire, 0x003A3535) > 20);
+                        try std.testing.expectEqual(@as(usize, 0), dib.count(action, 0x000A9FFF));
+                    } else if (!asking) {
+                        try std.testing.expect(dib.count(action, 0x000A9FFF) > 20);
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "cards paired review recovery label retains Mac horizontal padding" {
+    var actual = try ParityDib.init(360, 200);
+    defer actual.deinit();
+    var expected = try ParityDib.init(360, 200);
+    defer expected.deinit();
+    const bounds = rect(40, 40, 290, 136);
+    const node = parityTestNode();
+    const wire = unwiredActionBounds(bounds, &.{}).wire;
+    fill(actual.dc, rect(0, 0, 360, 200), Tokens.canvas_tone);
+    fill(expected.dc, rect(0, 0, 360, 200), Tokens.canvas_tone);
+    try drawCardBody(actual.dc, std.testing.allocator, node, bounds, 1, .unwired, false, null, null);
+    roundedControl(expected.dc, wire, 5, 0x003A3535, 0x003A3535);
+    try drawCardText(expected.dc, std.testing.allocator, "Wire it up", rect(wire.left + 9, wire.top, wire.right - 9, wire.bottom), 11, .semibold, 0x00D9D9D9, false);
+    var y = wire.top + 2;
+    while (y < wire.bottom - 2) : (y += 1) {
+        var x = wire.left + 5;
+        while (x < wire.right - 5) : (x += 1) {
+            try std.testing.expectEqual(c.GetPixel(expected.dc, x, y), c.GetPixel(actual.dc, x, y));
+        }
+    }
+}
+
 test "loop card parity project metrics match the shipping card" {
     var state = try cardTestState(.{});
     defer state.deinitLayout();
@@ -6212,7 +6406,6 @@ test "loop card parity existing actions stay above the bottom meta row" {
         try std.testing.expect(offer.reclaim.bottom <= meta_top);
         try std.testing.expect(offer.keep.bottom <= meta_top);
         try std.testing.expect(offer.reclaim.right < offer.keep.left);
-        try std.testing.expect(offer.keep.right < action.left);
     }
 }
 
@@ -7257,7 +7450,7 @@ fn verifyPaint764CardPixels(
             try std.testing.expectEqual(@as(usize, 0), dib.count(track, 0x00444141));
         }
     }
-    if (attention) {
+    if (role != .unwired and primaryCardAction(node) != null) {
         const action = attentionActionBounds(bounds, &.{ .zoom = zoom });
         try std.testing.expect(dib.count(action, 0x000A9FFF) > 0);
     }
@@ -7273,7 +7466,7 @@ fn verifyPaint764CardPixels(
         const chip_bounds = rect(chip_left, chip_top, chip_left + chip_width, chip_top + chip_height);
         try std.testing.expect(dib.count(chip_bounds, chip.fill) > 20);
     }
-    if (!attention and role == .unwired) {
+    if (role == .unwired) {
         const actions = unwiredActionBoundsForZoom(bounds, zoom);
         try std.testing.expect(dib.count(actions.wire, 0x003A3535) > 20);
         try std.testing.expect(dib.count(actions.wire, 0x00D9D9D9) > 0);
@@ -8420,6 +8613,8 @@ test "loop card parity chrome 764 warmth remains independent of primary actions"
         else
             [_]bool{ true, false, false, true, false, true };
         const graph = fixture.model.graphs.items[0];
+        const roles = try resolveCardRoles(std.testing.allocator, graph.nodes.items, graph.edges.items, &.{});
+        defer std.testing.allocator.free(roles);
         for ([_]Paint764Scene{ .project, .overview }) |scene| {
             for (graph.nodes.items, 0..) |node, index| {
                 state.pan_x = 0;
@@ -8435,7 +8630,8 @@ test "loop card parity chrome 764 warmth remains independent of primary actions"
                 const expected_action: ?AttentionAction = if (index == 2) .inspect else if (index == 5) .reply else null;
                 checks.expect(action == expected_action, "preserved-independent-primary-action", scene, node.id);
                 const action_pixels = dib.count(attentionActionBounds(bounds, &state), 0x000A9FFF);
-                checks.expect(if (expected_action != null) action_pixels > 20 else action_pixels == 0, "primary-action-pixels-independent-of-warmth", scene, node.id);
+                const action_painted = roles[index] != .unwired and expected_action != null;
+                checks.expect(if (action_painted) action_pixels > 20 else action_pixels == 0, "primary-action-pixels-respect-recovery-precedence", scene, node.id);
             }
         }
     }
@@ -8620,7 +8816,7 @@ test "loop card parity chrome 764 preserves geometry content roles and affordanc
                 checks.expect(bounds.right - bounds.left == scaledValue(250, state.zoom) and bounds.bottom - bounds.top == scaledValue(96, state.zoom), "250-by-96-logical-hit-geometry-preserved", scene, node.id);
                 const live = try cardLiveLine(std.testing.allocator, node);
                 defer std.testing.allocator.free(live);
-                if (live.len != 0) {
+                if (live.len != 0 and roles[index] != .unwired) {
                     const rows = cardTextLayout(bounds, state.zoom, scaledValue(80, state.zoom));
                     checks.expect(dib.count(rows.live, 0x009F9C9C) > 0, "description-or-activity-ink-preserved", scene, node.id);
                 }
@@ -8636,7 +8832,8 @@ test "loop card parity chrome 764 preserves geometry content roles and affordanc
                 }
                 if (primaryCardAction(node) != null and scene == .project) {
                     const action = attentionActionBounds(bounds, &state);
-                    checks.expect(hitTestAttentionAction(graph.nodes.items, graph.edges.items, action.left + 1, action.top + 1, &state) == index, "reply-inspect-action-hit-preserved", scene, node.id);
+                    const action_hit = hitTestAttentionAction(graph.nodes.items, graph.edges.items, action.left + 1, action.top + 1, &state);
+                    checks.expect(if (roles[index] == .unwired) action_hit == null else action_hit == index, "reply-inspect-action-hit-respects-painted-role", scene, node.id);
                 }
             }
         }
@@ -9448,12 +9645,16 @@ test "loop card parity existing action fills use hit bounds and never paint over
     const allocator = std.testing.allocator;
     const dib = try ParityDib.init(1200, 500);
     defer dib.deinit();
-    var nodes = [_]GraphModel.Node{ parityTestNode(), parityTestNode() };
+    var nodes = [_]GraphModel.Node{ parityTestNode(), parityTestNode(), graphRoleTestNode("entry") };
     nodes[0].presence = @constCast("awaitingInput");
     nodes[1].id = @constCast("resolved");
     nodes[1].state = @constCast("succeeded");
     nodes[1].presence = @constCast("idle");
     nodes[1].worktree_path = @constCast("fixture-safe");
+    const edges = [_]GraphModel.Edge{
+        graphRoleTestEdge("entry", nodes[0].id, "handoff"),
+        graphRoleTestEdge("entry", nodes[1].id, "handoff"),
+    };
     var inspection = WorktreeStatus.Inspection{
         .entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator),
         .default_branch = @constCast("main"),
@@ -9462,16 +9663,24 @@ test "loop card parity existing action fills use hit bounds and never paint over
     defer inspection.entries.deinit();
     try inspection.entries.append(.{ .path = @constCast("fixture-safe"), .branch = @constCast("main"), .pushed = true, .landed = true });
     for ([_]f32{ 0.55, 0.75, 1, 1.25, 1.8 }) |zoom| {
-        var state = try cardTestState(.{ .zoom = zoom, .pan_x = 252 - 382 * zoom, .pan_y = 84 - 134 * zoom });
+        var state = CanvasState{ .zoom = zoom };
         defer state.deinitLayout();
+        state.project_layout = try LaneLayout.init(allocator, &nodes, &edges, .{});
+        const unpanned = nodeBounds(0, &state);
+        state.pan_x = @floatFromInt(252 - unpanned.left);
+        state.pan_y = @floatFromInt(84 - unpanned.top);
+        try std.testing.expectEqual(@as(i32, 252), nodeBounds(0, &state).left);
+        try std.testing.expectEqual(@as(i32, 84), nodeBounds(0, &state).top);
+        try std.testing.expectEqual(@as(?NodeRole, .interior), projectNodeRole(&state, 0));
+        try std.testing.expectEqual(@as(?NodeRole, .interior), projectNodeRole(&state, 1));
         fill(dib.dc, rect(0, 0, 1200, 500), 0);
-        for (nodes, 0..) |node, index| drawNode(dib.dc, allocator, node, index, null, &nodes, &.{}, .interior, &inspection, &.{}, &state);
+        for (nodes[0..2], 0..) |node, index| drawNode(dib.dc, allocator, node, index, null, &nodes, &edges, .interior, &inspection, &.{}, &state);
         const attention = attentionActionBounds(nodeBounds(0, &state), &state);
         const offer = reclaimOfferBounds(nodeBounds(1, &state));
         try std.testing.expect(c.GdiFlush() != 0);
         try std.testing.expect(dib.count(attention, 0x000A9FFF) > 0);
         try std.testing.expect(dib.count(offer.reclaim, 0x003A3535) > 0);
-        try std.testing.expectEqual(@as(?usize, 0), hitTestAttentionAction(&nodes, &.{}, attention.left + 1, attention.top + 1, &state));
+        try std.testing.expectEqual(@as(?usize, 0), hitTestAttentionAction(&nodes, &edges, attention.left + 1, attention.top + 1, &state));
         try std.testing.expectEqual(ReclaimAction.reclaim, hitTestReclaimOffer(&nodes, &inspection, &.{}, offer.reclaim.left + 1, offer.reclaim.top + 1, &state).?.action);
         for (0..2) |index| {
             const meta = cardTextLayout(nodeBounds(index, &state), zoom, scaledValue(80, zoom)).meta;
@@ -9883,11 +10092,14 @@ test "closed cycle card keeps Inspect in the body and its reason in the metadata
     node.backend = @constCast("copilotCLI");
     node.created_at = 1;
     const nodes = [_]GraphModel.Node{node};
+    const edges = [_]GraphModel.Edge{graphRoleTestEdge(node.id, node.id, "handoff")};
     const chip = cardRoleChip(.cycle_only).?;
 
     for ([_]f32{ 0.55, 1, 1.8 }) |zoom| {
-        var state = try cardTestState(.{ .zoom = zoom, .pan_x = 140, .pan_y = 30 });
+        var state = CanvasState{ .zoom = zoom, .pan_x = 140, .pan_y = 30 };
         defer state.deinitLayout();
+        state.project_layout = try LaneLayout.init(std.testing.allocator, &nodes, &edges, .{});
+        try std.testing.expectEqual(@as(?NodeRole, .cycle_only), projectNodeRole(&state, 0));
         const dib = try ParityDib.init(1600, 600);
         defer dib.deinit();
         const bounds = nodeBounds(0, &state);
@@ -9916,7 +10128,7 @@ test "closed cycle card keeps Inspect in the body and its reason in the metadata
             try std.testing.expect(dib.count(action, 0x000A9FFF) > 0);
             try std.testing.expect(dib.count(chip_bounds, chip.fill) > 0);
             try std.testing.expectEqual(@as(usize, 0), dib.count(rect(layout.detail.left, layout.detail.top, action.left, layout.detail.bottom), chip.fill));
-            try std.testing.expectEqual(@as(?usize, 0), hitTestAttentionAction(&nodes, &.{}, action.left + 1, action.top + 1, &state));
+            try std.testing.expectEqual(@as(?usize, 0), hitTestAttentionAction(&nodes, &edges, action.left + 1, action.top + 1, &state));
         }
     }
     try std.testing.expectEqual(@as(f32, 10), chip.font_size);

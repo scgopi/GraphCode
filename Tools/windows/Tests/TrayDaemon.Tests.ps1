@@ -101,6 +101,90 @@ if ($app -notmatch "test_hook_message[\s\S]*?PostMessageW[\s\S]*?notify_message"
 if ($app -notmatch "callbackTargetsIcon" -or
     $app -notmatch "restoreShellWindow") { throw "tray callback routing is incomplete" }
 $live = Get-Content (Join-Path $root "Tools\windows\Tests\TrayLive.Tests.ps1") -Raw
+function Assert-TrayAdmissionBoundary([string] $source) {
+  $parseErrors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$null, [ref]$parseErrors)
+  if ($parseErrors.Count -or $source -notmatch '\[switch\]\s*\$AdmissionOnly') {
+    throw "tray admission must be an explicit opt-in switch"
+  }
+  $main = @($ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.TryStatementAst] })
+  if ($main.Count -ne 1 -or $null -eq $main[0].Finally -or
+      $main[0].Finally.Extent.Text -notmatch 'Stop-Process -Id \$process.Id' -or
+      $main[0].Finally.Extent.Text -notmatch '(?s)if \(\$process\).*WaitForExit\(5000\).*TRAY_OWNED_CLEANUP=verified') {
+    throw "tray admission must retain the normal owned cleanup finally"
+  }
+  $statements = @($main[0].Body.Statements)
+  if ($statements[0].Extent.Text -cne '$previousDpiContext = [GraphCodeTrayLiveNative]::EnterPerMonitorV2()' -or
+      $source -notmatch '(?s)preEntryContext = GetThreadDpiAwarenessContext\(\);\s*if \(preEntryContext == IntPtr.Zero\)\s*throw.*IntPtr previous = SetThreadDpiAwarenessContext\(new IntPtr\(-4\)\);.*if \(previous == IntPtr.Zero\)\s*throw.*AreDpiAwarenessContextsEqual.*RestoreDpiAwareness\(preEntryContext\);.*return preEntryContext;' -or
+      $source -match 'return previous;|RestoreDpiAwareness\(previous\);' -or
+      $source -notmatch '(?s)if \(restoreThread != captureThread\)\s*throw' -or
+      $source -notmatch '(?s)void RestoreDpiAwareness\(IntPtr previous\).*SetThreadDpiAwarenessContext\(previous\);\s*int error = Marshal.GetLastWin32Error\(\);.*AreDpiAwarenessContextsEqual.*if \(result == IntPtr.Zero\).*throw.*if \(!equal\).*throw' -or
+      $source -match 'SetProcessDpiAwareness|SetProcessDPIAware') {
+    throw "tray geometry must admit thread-only PMv2 before launch and refuse failed context changes"
+  }
+  $cleanup = $main[0].Finally.Extent.Text
+  if ($cleanup -notmatch '(?s)try.*Stop-Process.*catch\s*\{\s*\$cleanupFailure = \$_\s*\}.*try.*RestoreDpiAwareness\(\$previousDpiContext\)' -or
+      $cleanup -notmatch '(?s)if \(\$null -ne \$primaryFailure\).*Write-Error -ErrorRecord \$_ -ErrorAction Continue' -or
+      $main[0].Extent.Text -match 'Tray live executable tests: PASS' -or
+      $ast.EndBlock.Statements[-1].Extent.Text -notmatch '(?s)^if \(\$trayAssertionsCompleted\).*Tray live executable tests: PASS') {
+    throw "tray restoration must preserve primary failure and precede the full success marker"
+  }
+  $initial = @($statements | Where-Object { $_.Extent.Text -match '^\$trayRect = Wait-PhysicalTrayIcon \$hwnd "initial"$' })
+  if ($initial.Count -ne 1) { throw "tray admission must retain the initial physical guard" }
+  $index = [Array]::IndexOf($statements, $initial[0])
+  $branch = $statements[$index + 1]
+  if ($branch -isnot [Management.Automation.Language.IfStatementAst] -or
+      $branch.Clauses.Count -ne 1 -or $null -ne $branch.ElseClause -or
+      $branch.Clauses[0].Item1.Extent.Text -cne '$AdmissionOnly' -or
+      $branch.Clauses[0].Item2.Extent.Text -notmatch 'Write-Output "TRAY_ADMISSION_MEASUREMENT=admitted"' -or
+      $branch.Clauses[0].Item2.Statements.Count -ne 3 -or
+      $branch.Clauses[0].Item2.Statements[0].Extent.Text -notmatch 'Write-TrayAdmissionGeometry.*-kind "MEASUREMENT"' -or
+      $branch.Clauses[0].Item2.Statements[-1] -isnot [Management.Automation.Language.ReturnStatementAst] -or
+      $statements[$index + 2].Extent.Text -notmatch '^\$racer = Start-Process') {
+    throw "tray admission must return after the initial guard and before the unchanged default interaction"
+  }
+  $wait = $ast.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Wait-PhysicalTrayIcon'
+  }, $true).Extent.Text
+  if ($wait -notmatch '(?s)Assert-TrayIcon.*FindWindow.*MonitorFromPoint.*throw "Shell_NotifyIconGetRect returned coordinates outside every monitor".*GetDpiForWindow.*return \$rect' -or
+      $wait -notmatch '(?s)if \(\$i -eq 29\) \{\s*Write-TrayAdmissionGeometry[^\r\n]*\s*throw\s*\}' -or
+      $wait -notmatch '\$i -lt 30' -or $wait -notmatch 'Start-Sleep -Milliseconds 100') {
+    throw "tray admission must preserve refusal propagation, guard order, and deadline"
+  }
+}
+Assert-TrayAdmissionBoundary $live
+$negativeSources = @(
+  $live.Replace('[switch] $AdmissionOnly', '[bool] $AdmissionOnly = $true'),
+  $live.Replace('if ($AdmissionOnly)', 'if ($true)'),
+  $live.Replace('Stop-Process -Id $process.Id', 'Write-Output $process.Id'),
+  $live.Replace('Write-Output "TRAY_ADMISSION_MEASUREMENT=admitted"', 'Write-Output "Tray live executable tests: PASS"'),
+  $live.Replace('throw "Shell_NotifyIconGetRect returned coordinates outside every monitor"', 'return $rect'),
+  $live.Replace('if (previous == IntPtr.Zero)', 'if (false)'),
+  $live.Replace('if (result == IntPtr.Zero)', 'if (false)'),
+  $live.Replace('[GraphCodeTrayLiveNative]::EnterPerMonitorV2()', '[IntPtr]::Zero'),
+  $live.Replace('[GraphCodeTrayLiveNative]::RestoreDpiAwareness($previousDpiContext)', 'Write-Output $previousDpiContext'),
+  $live.Replace('IntPtr result = SetThreadDpiAwarenessContext(previous);', 'IntPtr result = SetThreadDpiAwarenessContext(previous); GetThreadDpiAwarenessContext();'),
+  $live.Replace('if (!equal)', 'if (false)'),
+  $live.Replace('$trayAssertionsCompleted = $true', 'Write-Output "Tray live executable tests: PASS"'),
+  $live.Replace('if (preEntryContext == IntPtr.Zero)', 'if (false)'),
+  $live.Replace('return preEntryContext;', 'return previous;'),
+  $live.Replace('if (restoreThread != captureThread)', 'if (false)')
+)
+foreach ($negative in $negativeSources) {
+  $rejected = $false
+  try { Assert-TrayAdmissionBoundary $negative } catch { $rejected = $true }
+  if (-not $rejected) { throw "tray admission negative source control was accepted" }
+}
+$admissionCount = 1 + $negativeSources.Count
+Write-Output "TRAY_ADMISSION_SOURCE_CONTRACTS=$admissionCount"
+[ordered]@{
+  suite = "TrayAdmission"
+  executed = $admissionCount
+  passed = $admissionCount
+  failed = 0
+  skipped = 0
+} | ConvertTo-Json -Compress | Write-Output
 if ($live -match "WM_COMMAND" -or
     $live -notmatch "GetMenuString" -or
     $live -notmatch "GetMenuItemID" -or

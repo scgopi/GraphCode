@@ -11,6 +11,8 @@ finally { await TerminalSafety.PreserveRetainedAuthorityAsync(OwnedChildSupervis
 
 static async Task<int> RunAsync(string[] args)
 {
+    if (args.SequenceEqual(new[] { "--native-popup-effect-fixture" }))
+        return GraphCode.Validation.Ui.NativeUiSuite.RunPopupEffects();
     if (HostFixture.TryRun(args) is int hostFixtureExit) return hostFixtureExit;
     if (await OwnedFixture.TryRunAsync(args) is int fixtureExit) return fixtureExit;
     if (args.SequenceEqual(new[] { "--self-test" })) return HostSelfTests.Run();

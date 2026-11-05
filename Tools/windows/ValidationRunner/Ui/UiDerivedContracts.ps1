@@ -226,14 +226,56 @@ Invoke-Derived 'ui.root.source.line-6326' {
   Assert-Derived ([object]::ReferenceEquals($bindings, $streamAssembly)) 'Capture uses a foreign stream component'
   Assert-ContainsAll ([IO.File]::ReadAllText((Join-Path $RepositoryRoot 'Tools\windows\ValidationRunner\Ownership\UiaOwnedStreamCapture.cs'))) @('while ((count = await reader.ReadAsync', 'return text.ToString();')
 }
+function Confirm-ActivationBoundary([string] $Activation, [string] $Native) {
+  if ($Activation -match '\b(DllImport|LibraryImport|SendInput|keybd_event|AttachThreadInput|Marshal)\b') { return $false }
+  try {
+    $operations = Get-Region $Native 'private sealed class WindowActivationOperations' `
+      'private static readonly GraphCode.Windows.IUiaWindowActivationOperations ActivationOperations'
+  } catch { return $false }
+  if ($operations -match '\b(SendInput|SendKeyInputs|keybd_event|AttachThreadInput|PostKeyboard|PostMessage|SendMessage)\b') {
+    return $false
+  }
+  foreach ($method in @('BringWindowToTop', 'SetForegroundWindow')) {
+    $pattern = 'public GraphCode\.Windows\.UiaActivationCallResult ' + $method +
+      '\(IntPtr window\)\s*\{\s*bool succeeded = GraphCodeUiaGateState\.' + $method +
+      '\(window\);\s*int error = Marshal\.GetLastWin32Error\(\);\s*' +
+      'return new GraphCode\.Windows\.UiaActivationCallResult\(succeeded, error\);\s*\}'
+    if ([regex]::Matches($operations, $pattern).Count -ne 1) { return $false }
+  }
+  return $true
+}
 Invoke-Derived 'ui.root.source.line-6352' {
   Assert-ContainsAll $activationSource @('public interface IUiaWindowActivationOperations',
     'operations.ShowWindow(window, 9);', 'operations.IsForegroundWindow(window)',
     'operations.WindowProcessId(window) == expectedProcessId', 'operations.IsRetainedProcessAlive(expectedProcessId)',
     'broughtToTop.Succeeded ? 0 : broughtToTop.Error', 'foregroundSet.Succeeded ? 0 : foregroundSet.Error',
     'no synthetic keys or input-queue attachment')
-  Assert-Derived ($activationSource -notmatch '\b(DllImport|LibraryImport|SendInput|keybd_event|AttachThreadInput|Marshal)\b' -and
-    [regex]::Matches($nativeSource, 'int error = Marshal.GetLastWin32Error\(\);').Count -eq 2) 'Activation native errors or synthetic-input boundary changed'
+  Assert-Derived (Confirm-ActivationBoundary $activationSource $nativeSource) 'Activation native errors or synthetic-input boundary changed'
+  $dpiControl = $nativeSource + "`nint error = Marshal.GetLastWin32Error(); // unrelated thread-DPI operation"
+  Assert-Derived (Confirm-ActivationBoundary $activationSource $dpiControl) 'Unrelated DPI error capture changed the activation boundary'
+  foreach ($forbidden in @('SendInput', 'keybd_event', 'AttachThreadInput')) {
+    Assert-Derived (-not (Confirm-ActivationBoundary ($activationSource + "`n$forbidden();") $nativeSource)) `
+      "Forbidden activation operation mutant accepted: $forbidden"
+  }
+  foreach ($forbidden in @('SendInput', 'keybd_event', 'AttachThreadInput', 'PostKeyboard')) {
+    $mutant = $nativeSource.Replace('bool succeeded = GraphCodeUiaGateState.BringWindowToTop(window);',
+      "$forbidden(); bool succeeded = GraphCodeUiaGateState.BringWindowToTop(window);")
+    Assert-Derived (-not (Confirm-ActivationBoundary $activationSource $mutant)) `
+      "Forbidden native activation operation mutant accepted: $forbidden"
+  }
+  foreach ($method in @('BringWindowToTop', 'SetForegroundWindow')) {
+    $call = "bool succeeded = GraphCodeUiaGateState.$method(window);"
+    $original = $call + "`n      int error = Marshal.GetLastWin32Error();"
+    $normalized = $nativeSource.Replace("`r`n", "`n")
+    Assert-Derived ($normalized.Contains($original)) "Immediate native error control boundary missing: $method"
+    foreach ($replacement in @(
+        "$call`n      int error = 0;",
+        "$call`n      GraphCodeUiaGateState.IsForegroundWindow(window);`n      int error = Marshal.GetLastWin32Error();"
+      )) {
+      Assert-Derived (-not (Confirm-ActivationBoundary $activationSource ($normalized.Replace($original, $replacement)))) `
+        "Missing or delayed native error mutant accepted: $method"
+    }
+  }
 }
 function Confirm-Settings([string] $Gate) {
   try {
@@ -255,10 +297,54 @@ Invoke-Derived 'ui.root.source.line-6412' {
     '$null = [GraphCodeUiaGateState]::IsForegroundWindow($settingsWindow)')))) 'Missing foreground mutant accepted'
   Assert-Derived (-not (Confirm-Settings ($source.Replace('Require ($remainingSettings -eq $settingsHandle)', '$null = ($remainingSettings -eq $settingsHandle)')))) 'Closing Return mutant accepted'
 }
+function Confirm-NodeMenuContracts([string] $Gate) {
+  $menus = @(
+    @{ items = '$plainLoopItems'; order = '$plainLoopOrder'; end = '$compositeLoopPopup =';
+       labels = "Open Terminal|Change to Timed…|Rename...`tF2|Save as Template...|<separator>|Edit Details...|<separator>|Export Loop...|Import Loops Here...|<separator>|Delete Loop...`tDelete";
+       ids = '5104|5122|5101|5114|0|5100|0|5123|5124|0|5103'; disabled = '' },
+    @{ items = '$compositeLoopItems'; order = '$compositeLoopOrder'; end = '$unwiredLoopPopup =';
+       labels = "Open Terminal|New Child Node...|Open Group|Pilot Once…|Arm Schedule|Rename...`tF2|Save as Template...|Stop Loop`tCtrl+S|<separator>|Edit Details...|<separator>|Export Loop...|Import Loops Here...|<separator>|Delete Loop...`tDelete";
+       ids = '5104|5119|5113|5107|5108|5101|5114|5102|0|5100|0|5123|5124|0|5103'; disabled = ' -ne ($_.Id -ne 5108)' },
+    @{ items = '$unwiredLoopItems'; order = '$unwiredLoopOrder'; end = '$graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker';
+       labels = "Open Terminal|New Child Node...|Rename...`tF2|Save as Template...|Stop Loop`tCtrl+S|<separator>|Edit Details...|Wire it up|Mark as entry|<separator>|Export Loop...|Import Loops Here...|<separator>|Delete Loop...`tDelete";
+       ids = '5104|5119|5101|5114|5102|0|5100|5109|5112|0|5123|5124|0|5103'; disabled = '' },
+    @{ items = '$nodeCanvasMenu.Items'; order = '$nodeCanvasMenuOrder'; end = '$edgeCanvasMenuOrder =';
+       labels = "Open Terminal|Change to Timed…|Rename...`tF2|Save as Template...|<separator>|Edit Details...|<separator>|Export Loop...|Import Loops Here...|<separator>|Delete Loop...`tDelete";
+       ids = '5104|5122|5101|5114|0|5100|0|5123|5124|0|5103'; disabled = '' }
+  )
+  foreach ($menu in $menus) {
+    try { $body = Get-Region $Gate ($menu.order + ' = @(') $menu.end } catch { return $false }
+    $body = [regex]::Replace($body, '\s+', ' ')
+    $labels = [regex]::Replace($menu.labels.Replace("`t", '`t'), '\s+', ' ')
+    $state = if ($menu.disabled) { '($_.Enabled' + $menu.disabled + ') -or $_.Checked' } else { '-not $_.Enabled -or $_.Checked' }
+    foreach ($literal in @(
+      ($menu.order + ' = @(' + $menu.items + ' | ForEach-Object {'),
+      ('Require ((' + $menu.order + ' -join "|") -ceq "' + $labels + '")'),
+      ('Require ((@(' + $menu.items + ' | ForEach-Object { $_.Id }) -join "|") -ceq "' + $menu.ids + '")'),
+      ('Require (@(' + $menu.items + ' | Where-Object { -not $_.Separator -and (' + $state + ') }).Count -eq 0)')
+    )) {
+      if (-not $body.Contains($literal)) { return $false }
+    }
+  }
+  return $true
+}
 Invoke-Derived 'ui.root.source.line-6467' {
   $app = [IO.File]::ReadAllText((Join-Path $RepositoryRoot 'graphcode-windows\src\App.zig'))
   foreach ($pattern in @('fn showUiaContextMenu', 'MainWindow\.wm_uia_context_menu => \{', '(?s)wparam == MainWindow\.menu_watchdog_timer_id.*?c\.EndMenu\(\)')) {
     Assert-Derived ($app -match $pattern) 'Actual App context menu/watchdog contract missing'
+  }
+  Assert-Derived (Confirm-NodeMenuContracts $source) 'Actual node menu expectations omit current exact ordered labels, command identities or availability'
+  foreach ($mutation in @(
+    @{ from = '|Export Loop...|Import Loops Here...'; to = '' },
+    @{ from = '|Export Loop...|Import Loops Here...'; to = '|Import Loops Here...|Export Loop...' },
+    @{ from = '5123|5124'; to = '5123|5121' },
+    @{ from = '$plainLoopItems | ForEach-Object'; to = '$compositeLoopItems | ForEach-Object' },
+    @{ from = 'Change to Timed…'; to = 'Change to Goal…' },
+    @{ from = '-not $_.Enabled -or $_.Checked'; to = '-not $_.Enabled' }
+  )) {
+    Assert-Derived ($source.Contains($mutation.from)) "Node menu negative control anchor missing: $($mutation.from)"
+    Assert-Derived (-not (Confirm-NodeMenuContracts ($source.Replace($mutation.from, $mutation.to)))) `
+      "Node menu mutant accepted: $($mutation.from)"
   }
 }
 Invoke-Derived 'ui.root.source.line-6591' {

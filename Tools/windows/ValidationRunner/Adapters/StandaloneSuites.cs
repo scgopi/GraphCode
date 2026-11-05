@@ -14,8 +14,13 @@ public static class StandaloneSuites
         new ScriptSuite("ps.isolated-process-environment", "IsolatedProcessEnvironment.Contracts.Tests.ps1", EvidenceParser.IsolatedEnvironment),
         new ScriptSuite("ps.fixture-directory", "ValidationFixtureDirectory.Tests.ps1",
             output => EvidenceParser.Structured("ps.fixture-directory", "ValidationFixtureDirectory", output, 28, 28)),
+        new ScriptSuite("ps.tray-admission", "TrayDaemon.Tests.ps1",
+            output => EvidenceParser.Structured("ps.tray-admission", "TrayAdmission", output, 16, 16)),
         new ScriptSuite("ps.ui-scenario", "UiScenario.Tests.ps1",
             output => EvidenceParser.Structured("ps.ui-scenario", "UiScenario", output, 1, requireSkipped: false)),
+        new CaseScriptSuite("ui.cards-pilot-contracts", "Tools\\windows\\ValidationRunner\\Ui\\CardsPilotContracts.ps1",
+            "UI_CASE_RESULT=", required.Where(unit => unit.Id.StartsWith("ui.cards-pilot.", StringComparison.Ordinal))
+                .Select(unit => unit.Id).ToArray()),
         new CaptureSuite(required.Single(unit => unit.Id == "ps.ui-capture")),
         new ScriptSuite("ps.action-worker", "ActionWorkerImport.Tests.ps1",
             output => EvidenceParser.Structured("ps.action-worker", "ActionWorkerImport", output, 18, 18)),
