@@ -8288,6 +8288,65 @@ test "terminal parity intrinsic width displays all twelve tabs without changing 
     }
 }
 
+fn expectTwelveTabsAtFractionalDpiMinimum(dpi: u32) !void {
+    const allocator = std.testing.allocator;
+    var workspace = Workspace{
+        .parent = null,
+        .allocator = allocator,
+        .zmx_path = &.{},
+        .cwd = &.{},
+        .input_queue = .{ .allocator = allocator },
+        .layout = try WorkspaceLayout.Layout.init(allocator, "fractional-chrome-minimum"),
+        .layout_path = &.{},
+        .project_key = &.{},
+        .dpi = dpi,
+    };
+    defer workspace.layout.deinit();
+    for (0..12) |index| {
+        var id: [32]u8 = undefined;
+        try workspace.layout.addTab(try std.fmt.bufPrint(&id, "shell-{d}", .{index}), false);
+    }
+    workspace.layout_width = Dpi.scale(workspace.minimumChromeWidth(), dpi);
+    const controls = chromeControlBounds(0, 0, workspace.layout_width, dpi, 0);
+    const available = controls.left - Dpi.scale(Tokens.tab_controls_gap, dpi) -
+        Dpi.scale(Tokens.tab_bar_inset, dpi);
+    const required = 12 * Dpi.scale(Tokens.tab_min_width, dpi) +
+        11 * Dpi.scale(Tokens.tab_gap, dpi);
+    for ([_]usize{ 0, 11 }) |selected| {
+        try workspace.layout.selectTab(selected);
+        var visible: usize = 0;
+        for (0..12) |index| {
+            if (workspace.visibleTabBounds(index)) |bounds| {
+                try std.testing.expect(bounds.right > bounds.left and bounds.bottom > bounds.top);
+                try std.testing.expectEqual(index, workspace.tabActionAt(bounds.left + 1, bounds.top + 1).?.index);
+                visible += 1;
+            }
+        }
+        std.debug.print("TERMINAL_FRACTIONAL_MINIMUM dpi={d} advertised={d} available={d} required={d} visible={d} selected={d}\n", .{
+            dpi, workspace.layout_width, available, required, visible, workspace.layout.selected_tab,
+        });
+        try std.testing.expectEqual(@as(usize, 12), visible);
+        try std.testing.expect(available >= required);
+        try std.testing.expectEqual(selected, workspace.layout.selected_tab);
+    }
+}
+
+test "terminal parity fractional DPI intrinsic minimum exposes twelve tabs at 108 DPI" {
+    try expectTwelveTabsAtFractionalDpiMinimum(108);
+}
+
+test "terminal parity fractional DPI intrinsic minimum exposes twelve tabs at 120 DPI" {
+    try expectTwelveTabsAtFractionalDpiMinimum(120);
+}
+
+test "terminal parity fractional DPI intrinsic minimum exposes twelve tabs at 132 DPI" {
+    try expectTwelveTabsAtFractionalDpiMinimum(132);
+}
+
+test "terminal parity fractional DPI intrinsic minimum exposes twelve tabs at 168 DPI" {
+    try expectTwelveTabsAtFractionalDpiMinimum(168);
+}
+
 test "terminal parity pane label metrics follow the source font roles without fixed title slots" {
     const dc = c.CreateCompatibleDC(null) orelse return error.TestDcFailed;
     defer _ = c.DeleteDC(dc);

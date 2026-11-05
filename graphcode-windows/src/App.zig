@@ -14448,6 +14448,28 @@ test "terminal parity native minimum grows the host and publishes every fitting 
         original: c.WNDPROC,
         minimum_messages: usize = 0,
 
+        fn expectedWindowWidth(app: *const App, tab_count: i32) !i32 {
+            const dpi = app.dpi;
+            const chrome = tab_count * physicalCoordinate(Tokens.tab_min_width, dpi) +
+                @max(0, tab_count - 1) * physicalCoordinate(Tokens.tab_gap, dpi) +
+                2 * physicalCoordinate(Tokens.tab_bar_inset, dpi) +
+                physicalCoordinate(Tokens.tab_controls_gap, dpi) +
+                3 * physicalCoordinate(Tokens.tab_control_width, dpi) +
+                2 * physicalCoordinate(Tokens.tab_control_gap, dpi);
+            var frame = c.RECT{
+                .left = 0,
+                .top = 0,
+                .right = @max(physicalCoordinate(min_client_width, dpi), chrome +
+                    (if (app.workspace_controls.rail_visible) physicalCoordinate(Tokens.sidebar_width, dpi) else @as(i32, 0)) +
+                    (if (app.workspace_controls.panel_visible) physicalCoordinate(Tokens.loop_detail_width, dpi) else @as(i32, 0))),
+                .bottom = 0,
+            };
+            const style: c.DWORD = @truncate(@as(usize, @bitCast(c.GetWindowLongPtrW(app.window.hwnd, c.GWL_STYLE))));
+            const ex_style: c.DWORD = @truncate(@as(usize, @bitCast(c.GetWindowLongPtrW(app.window.hwnd, c.GWL_EXSTYLE))));
+            try std.testing.expect(AdjustWindowRectExForDpi(&frame, style, if (c.GetMenu(app.window.hwnd) != null) 1 else 0, ex_style, dpi) != 0);
+            return frame.right - frame.left;
+        }
+
         fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.c) c.LRESULT {
             const self: *@This() = @ptrFromInt(@as(usize, @bitCast(c.GetWindowLongPtrW(hwnd, c.GWLP_USERDATA))));
             if (message == c.WM_GETMINMAXINFO) {
@@ -14494,7 +14516,7 @@ test "terminal parity native minimum grows the host and publishes every fitting 
             try std.testing.expectEqual(index == self.workspace.layout.selected_tab, element.selected);
         }
     };
-    for ([_]u32{ 96, 144, 192 }) |dpi| {
+    for ([_]u32{ 96, 108, 120, 132, 144, 168, 192 }) |dpi| {
         var app = try overviewTestApp(dpi);
         defer {
             const hwnd = app.window.hwnd;
@@ -14559,7 +14581,7 @@ test "terminal parity native minimum grows the host and publishes every fitting 
             monitor.rcWork.top,      monitor.rcWork.right,     monitor.rcWork.bottom,
         });
         const work_width = monitor.rcWork.right - monitor.rcWork.left;
-        const desired = windowWidthForClient(app.window.hwnd, dpi, 1254 + Tokens.sidebar_width + Tokens.loop_detail_width);
+        const desired = try NativeDispatch.expectedWindowWidth(&app, 12);
         var info = std.mem.zeroes(c.MINMAXINFO);
         _ = c.SendMessageW(app.window.hwnd, c.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&info)));
         try std.testing.expectEqual(@as(usize, 1), dispatch.minimum_messages);
@@ -14582,6 +14604,25 @@ test "terminal parity native minimum grows the host and publishes every fitting 
         defer app.allocator.free(after);
         try std.testing.expectEqualSlices(u8, before, after);
 
+        for ([_][2]bool{ .{ false, false }, .{ false, true }, .{ true, false }, .{ true, true } }) |visibility| {
+            app.workspace_controls.rail_visible = visibility[0];
+            app.workspace_controls.panel_visible = visibility[1];
+            const visibility_desired = try NativeDispatch.expectedWindowWidth(&app, 12);
+            info = std.mem.zeroes(c.MINMAXINFO);
+            _ = c.SendMessageW(app.window.hwnd, c.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&info)));
+            try std.testing.expectEqual(@min(visibility_desired, work_width), info.ptMinTrackSize.x);
+            app.publishWorkspaceTabs();
+            app.syncAccessibilityTo(&sink, logicalClientRect(app.window.hwnd, dpi));
+            if (sink.failure) |err| return err;
+            try std.testing.expect(sink.count > 0);
+            if (visibility_desired <= work_width) try std.testing.expectEqual(@as(usize, 12), sink.count);
+            try std.testing.expectEqual(@as(usize, 0), workspace.layout.selected_tab);
+            try workspace.layout.save(after_path);
+            const visibility_layout = try temporary.dir.readFileAlloc(app.allocator, "after.json", 1024 * 1024);
+            defer app.allocator.free(visibility_layout);
+            try std.testing.expectEqualSlices(u8, before, visibility_layout);
+        }
+
         // A monitor-constrained or maximized window retains the selected-tab
         // overflow path; inject native maximized state without showing a window.
         const style = c.GetWindowLongW(app.window.hwnd, c.GWL_STYLE);
@@ -14600,6 +14641,36 @@ test "terminal parity native minimum grows the host and publishes every fitting 
         if (sink.failure) |err| return err;
         try std.testing.expect(sink.count > 0 and sink.count < 12);
         std.debug.print("TERMINAL_NATIVE_WIDTH dpi={d} desired={d} work={d} overflow-visible={d} selected={d}\n", .{ dpi, desired, work_width, sink.count, workspace.layout.selected_tab });
+
+        _ = c.SetWindowLongW(app.window.hwnd, c.GWL_STYLE, style);
+        try std.testing.expect(c.IsZoomed(app.window.hwnd) == 0);
+        const constrained_count: usize = @intCast(@divTrunc(work_width, physicalCoordinate(Tokens.tab_min_width, dpi)) + 12);
+        for (12..constrained_count) |index| {
+            var id: [32]u8 = undefined;
+            try workspace.layout.addTab(try std.fmt.bufPrint(&id, "shell-{d}", .{index}), false);
+        }
+        try workspace.layout.selectTab(constrained_count - 1);
+        const constrained_desired = try NativeDispatch.expectedWindowWidth(&app, @intCast(constrained_count));
+        try std.testing.expect(constrained_desired > work_width);
+        try workspace.layout.save(before_path);
+        info = std.mem.zeroes(c.MINMAXINFO);
+        _ = c.SendMessageW(app.window.hwnd, c.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&info)));
+        try std.testing.expectEqual(work_width, info.ptMinTrackSize.x);
+        app.publishWorkspaceTabs();
+        try std.testing.expect(c.GetWindowRect(app.window.hwnd, &window) != 0);
+        try std.testing.expectEqual(work_width, window.right - window.left);
+        try std.testing.expect(window.left >= monitor.rcWork.left and window.right <= monitor.rcWork.right);
+        app.syncAccessibilityTo(&sink, logicalClientRect(app.window.hwnd, dpi));
+        if (sink.failure) |err| return err;
+        try std.testing.expect(sink.count > 0 and sink.count < constrained_count);
+        try std.testing.expect(workspace.visibleTabBounds(constrained_count - 1) != null);
+        try std.testing.expectEqual(constrained_count - 1, workspace.layout.selected_tab);
+        try workspace.layout.save(after_path);
+        const capped_before = try temporary.dir.readFileAlloc(app.allocator, "before.json", 1024 * 1024);
+        defer app.allocator.free(capped_before);
+        const capped_after = try temporary.dir.readFileAlloc(app.allocator, "after.json", 1024 * 1024);
+        defer app.allocator.free(capped_after);
+        try std.testing.expectEqualSlices(u8, capped_before, capped_after);
     }
 }
 
