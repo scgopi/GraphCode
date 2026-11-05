@@ -248,6 +248,46 @@ struct RemoteRepositoryTests {
     #expect(draft.location == nil)
   }
 
+  // MARK: - Validation
+
+  /// The login-shell probes need zmx and python3 on the machine running the test, so
+  /// only the checks about the host and the folder itself run here.
+  private func folderCheckFailures(remotePath: String) throws -> [String] {
+    let plainFolder = RemoteProjectLocation(
+      user: "dev", host: "build-box", port: 22, remotePath: remotePath)
+    return try RemoteRepositoryClient.checks(for: plainFolder)
+      .filter { !$0.command.contains("zsh") }
+      .filter { check in
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", check.command]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus != 0
+      }
+      .map(\.failure)
+  }
+
+  @Test
+  func aFolderThatIsNotAGitRepositoryPassesValidation() throws {
+    let folder = FileManager.default.temporaryDirectory
+      .appendingPathComponent("plain-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+
+    #expect(try folderCheckFailures(remotePath: folder.path) == [])
+  }
+
+  @Test
+  func aMissingFolderStillFailsValidationByName() throws {
+    let missing = "/nonexistent-\(UUID().uuidString)"
+
+    #expect(
+      try folderCheckFailures(remotePath: missing) == ["\(missing) doesn't exist on build-box."])
+  }
+
   @Test
   @MainActor
   func aValidatedConnectionOpensTheRemoteProject() async {

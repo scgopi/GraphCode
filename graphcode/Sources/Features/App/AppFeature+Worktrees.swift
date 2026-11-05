@@ -236,7 +236,8 @@ struct AppWorktreesReducer: Reducer {
       // outside the app (a terminal's `git worktree add`, a loop's own plumbing) gets
       // picked up without waiting for a graph broadcast.
       case .projectHeaderTapped(let path):
-        // Remote repos are always git repos (validated on add); local ones need the check.
+        // A remote folder has no local `.git` to look for; a plain one fails the read and
+        // keeps no stats.
         let isRemote = RemoteProjectLocation.parse(projectPath: path) != nil
         guard Self.tracksWorktrees(path), isRemote || Self.isGitRepository(path)
         else { return .none }
