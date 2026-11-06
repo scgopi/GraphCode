@@ -6071,9 +6071,9 @@ $actionBindingSummaries=@($actionBindingOutput | Where-Object {
   })
 if ($actionBindingSummaries.Count -ne 1) {throw "RED: action binding structured count missing or duplicated"}
 $actionBindingSummary=ConvertFrom-Json $actionBindingSummaries[0]
-if ($actionBindingSummary.executed -ne 84 -or $actionBindingSummary.passed -ne 84 -or
+if ($actionBindingSummary.executed -ne 85 -or $actionBindingSummary.passed -ne 85 -or
     $actionBindingSummary.failed -ne 0 -or $actionBindingSummary.skipped -ne 0) {
-  throw "RED: action window binding requires all 84 contracts without skips"
+  throw "RED: action window binding requires all 85 contracts without skips"
 }
 $actionTopologyOutput=@(& $pwsh -NoProfile -File (Join-Path $PSScriptRoot "ActionTopologyImport.Tests.ps1"))
 $actionTopologyOutput | ForEach-Object {Write-Host $_}

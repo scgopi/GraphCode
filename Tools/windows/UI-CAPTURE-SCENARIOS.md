@@ -120,11 +120,11 @@ bindings, source/hash/run/authority/deadline/replacement failures, actual
 production startup refusal before launch, and initial/placed identity guard
 drift with modeled metrics. Its accepted startup intercepts the launcher without
 starting a process; it is not native-window evidence. ValidationRunner requires
-all 84 with zero skips, alongside the 20 import and unchanged 182/185 baseline.
+all 85 with zero skips, alongside the 20 import and unchanged 182/185 baseline.
 The W1 targeting repair expands that window-binding suite to **62** contracts:
 five additional startup refusals require an explicit nonnull, source/hash-bound
 source/target plan before either the stub or app can launch. The functional-only
-Wire route adds 22 further contracts, for **84** current identity contracts.
+Wire route adds 23 further contracts, for **85** current identity contracts.
 
 `Tests\ActionTopologyImport.Tests.ps1` adds **16 separately counted contracts**
 for production import, lexical top-level scope, exact topology copies, layout/
@@ -147,6 +147,8 @@ binary's actual build commit. A harness-only new head may reuse that binary
 only when its entire tracked `graphcode-windows` tree is identical; preparation
 and runtime both check that equivalence and retain the actual build commit,
 rather than claiming a new product build.
+The copied daemon is not executed by functional W1; its functional job metadata
+does not invent a daemon build-source commit.
 It uses the same production Wire worker and locked native/semantic endpoint
 reader, Create correlation, edge readback, and held-process/job/EOF cleanup.
 It does not authorize screenshots or establish visual, glyph, higher-DPI, or

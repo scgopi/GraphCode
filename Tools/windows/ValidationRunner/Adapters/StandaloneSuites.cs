@@ -25,7 +25,7 @@ public static class StandaloneSuites
         new ScriptSuite("ps.action-worker", "ActionWorkerImport.Tests.ps1",
             output => EvidenceParser.Structured("ps.action-worker", "ActionWorkerImport", output, 20, 20)),
         new ScriptSuite("ps.action-identity", "ActionWindowIdentity.Tests.ps1",
-            output => EvidenceParser.Structured("ps.action-identity", "ActionWindowIdentity", output, 84, 84)),
+            output => EvidenceParser.Structured("ps.action-identity", "ActionWindowIdentity", output, 85, 85)),
         new ScriptSuite("ps.action-topology", "ActionTopologyImport.Tests.ps1",
             output => EvidenceParser.Structured("ps.action-topology", "ActionTopologyImport", output, 16, 16)),
         new ScriptSuite("ps.wire-targeting", "WireTargeting.Tests.ps1",

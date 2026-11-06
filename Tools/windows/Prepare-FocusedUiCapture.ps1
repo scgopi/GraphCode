@@ -213,6 +213,9 @@ if ($FunctionalWireOnly) {
     $job.functionalWireOnly=$true
     $job.binaries.before.binaryBuiltAtSource=$GraphCodeBuildSource
     $job.binaries.after.binaryBuiltAtSource=$GraphCodeBuildSource
+    $job.binaries.daemon.source=$null
+    $job.binaries.daemon.binaryBuiltAtSource=$null
+    $job.binaries.daemon.evidenceMode='COPIED_RUNTIME_NOT_EXECUTED_BY_FUNCTIONAL_W1'
     $job.functionalWireContract=[ordered]@{
         schemaVersion=1L;scene='s-goal-unwired-unselected'
         windowSourcePath=$windowSource;windowSourceSha256=(Get-FileHash -LiteralPath $windowSource).Hash

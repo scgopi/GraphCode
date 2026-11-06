@@ -120,6 +120,28 @@ function Invoke-FunctionalWireContracts {
         if (($geometry.PhysicalClientWH -join ',') -cne '320,240') {throw 'Default visual geometry changed.'}
     }
     $results.Add(@{name='visual worker geometry remains independent of an action plan';passed=$true})
+    & {
+        $tokens=$null;$errors=$null
+        $prepare=[Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $driverDirectory 'Prepare-FocusedUiCapture.ps1'),[ref]$tokens,[ref]$errors)
+        if ($errors.Count -ne 0) {throw 'Focused preparation did not parse.'}
+        $assignments=@($prepare.FindAll({param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -cin @('$job.binaries.before.binaryBuiltAtSource',
+                    '$job.binaries.after.binaryBuiltAtSource','$job.binaries.daemon.source',
+                    '$job.binaries.daemon.binaryBuiltAtSource','$job.binaries.daemon.evidenceMode')
+        },$false))
+        if ($assignments.Count -ne 5) {throw 'Expected actual functional binary-provenance assignments.'}
+        $GraphCodeBuildSource='a'*40
+        $job=@{binaries=@{before=@{};after=@{};daemon=@{source='not-built';binaryBuiltAtSource='not-built'}}}
+        foreach ($assignment in $assignments) {. ([scriptblock]::Create($assignment.Extent.Text))}
+        if ($job.binaries.after.binaryBuiltAtSource -cne $GraphCodeBuildSource -or
+            $null -ne $job.binaries.daemon.source -or $null -ne $job.binaries.daemon.binaryBuiltAtSource -or
+            $job.binaries.daemon.evidenceMode -cne 'COPIED_RUNTIME_NOT_EXECUTED_BY_FUNCTIONAL_W1') {
+            throw 'Functional preparation invents a daemon build or loses the actual app build source.'
+        }
+    }
+    $results.Add(@{name='actual functional preparation records unused daemon without invented build provenance';passed=$true})
 }
 if ($FunctionalOnly) {
     $results=[Collections.Generic.List[object]]::new()
@@ -339,4 +361,4 @@ $report=[ordered]@{suite='ActionWindowIdentity';executed=$results.Count;passed=$
     productLaunches=0;providerLaunches=0;runtimeWindowEvidence=$false;cases=@($results)}
 $null=Write-BindingJson (Join-Path $caseRoot 'report.json') $report
 [pscustomobject]$report|Select-Object suite,executed,passed,failed,skipped|ConvertTo-Json -Compress
-if ($results.Count -ne 84) {throw "Unexpected binding contract count: $($results.Count)"}
+if ($results.Count -ne 85) {throw "Unexpected binding contract count: $($results.Count)"}
