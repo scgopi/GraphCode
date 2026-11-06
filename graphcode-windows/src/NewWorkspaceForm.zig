@@ -82,6 +82,15 @@ pub const ContentLayout = struct {
     bullets: [3]Sheet.Rect,
     preview: Sheet.Rect,
     extent: i32,
+
+    pub fn withIsolationHeight(self: ContentLayout, height: i32, dpi: u32) ContentLayout {
+        var result = self;
+        result.bullets[2].height = @max(self.bullets[2].height, height);
+        if (result.preview.x == result.name.x)
+            result.preview.y = @max(result.preview.y, result.bullets[2].bottom() + Dpi.scale(14, dpi));
+        result.extent = @max(result.extent, @max(result.bullets[2].bottom(), result.preview.bottom()) + Dpi.scale(24, dpi));
+        return result;
+    }
 };
 
 pub fn contentLayout(width: i32, dpi: u32) ContentLayout {
@@ -137,6 +146,7 @@ const Dialog = struct {
     preview_title: c.HWND = null,
     preview_empty: c.HWND = null,
     caption: c.HWND = null,
+    isolation: []const u8 = "",
     geometry: ContentLayout = undefined,
     result: ?Result = null,
     failure: ?anyerror = null,
@@ -199,7 +209,8 @@ pub fn show(parent: c.HWND, allocator: std.mem.Allocator, options: Options) !?Re
     dialog.bullets[1] = try control(&dialog, "STATIC", "+  Its own background daemon", 0, 0);
     const isolation = try std.fmt.allocPrint(allocator, "-  Nothing shared with {s}", .{current_name});
     defer allocator.free(isolation);
-    dialog.bullets[2] = try control(&dialog, "STATIC", isolation, 0, c.SS_ENDELLIPSIS);
+    dialog.isolation = isolation;
+    dialog.bullets[2] = try control(&dialog, "STATIC", isolation, 0, 0);
     dialog.preview_title = try control(&dialog, "STATIC", "Client Work", 0, c.SS_ENDELLIPSIS);
     dialog.preview_empty = try control(&dialog, "STATIC", "empty", 0, c.SS_CENTER);
     dialog.caption = try control(&dialog, "STATIC", "A second window, starting empty", 0, c.SS_CENTER);
@@ -244,15 +255,17 @@ fn previewRect(dialog: *const Dialog, x: i32, y: i32, width: i32, height: i32) S
 
 fn layoutDialog(context: ?*anyopaque, layout: Sheet.Layout) !void {
     const dialog: *Dialog = @ptrCast(@alignCast(context.?));
-    if (dialog.root == null) return;
+    if (dialog.root == null or dialog.bullets[2] == null) return;
     const host = dialog.host.?;
     const dpi = dialog.dpi();
     const scrollbar = if (layout.scroll.visible) Sheet.Metrics.forDpi(dpi).scrollbar_width else 0;
     const width = @max(0, layout.viewport.width - scrollbar);
     dialog.geometry = contentLayout(width, dpi);
+    dialog.geometry = dialog.geometry.withIsolationHeight(try isolationHeight(dialog), dpi);
     const extent = Dpi.unscale(dialog.geometry.extent, dpi);
     if (host.options.layout_input.content_extent != extent) {
-        try host.setContentExtent(extent);
+        host.options.layout_input.content_extent = extent;
+        try host.refreshOwnerGeometry();
         return;
     }
     if (c.MoveWindow(dialog.root, 0, -layout.scroll.offset, width, @max(layout.viewport.height, dialog.geometry.extent), 1) == 0)
@@ -270,6 +283,20 @@ fn layoutDialog(context: ?*anyopaque, layout: Sheet.Layout) !void {
     try place(dialog.preview_title, previewRect(dialog, 55, 4, 84, 11), 7, false, dpi);
     try place(dialog.preview_empty, previewRect(dialog, 59, 41, 82, 14), 7, false, dpi);
     try place(dialog.caption, previewRect(dialog, 0, 96, 150, 28), 10, false, dpi);
+}
+
+fn isolationHeight(dialog: *const Dialog) !i32 {
+    const wide = try std.unicode.utf8ToUtf16LeAllocZ(dialog.state.allocator, dialog.isolation);
+    defer dialog.state.allocator.free(wide);
+    const dc = c.GetDC(dialog.root) orelse return error.NewWorkspaceTextMeasurementFailed;
+    defer _ = c.ReleaseDC(dialog.root, dc);
+    const font = AppFont.getForDpi(11, false, dialog.dpi()) orelse return error.NewWorkspaceFontFailed;
+    const old_font = c.SelectObject(dc, font);
+    defer _ = c.SelectObject(dc, old_font);
+    var bounds = c.RECT{ .left = 0, .top = 0, .right = dialog.geometry.bullets[2].width, .bottom = 0 };
+    if (c.DrawTextW(dc, wide.ptr, @intCast(wide.len), &bounds, c.DT_CALCRECT | c.DT_WORDBREAK | c.DT_NOPREFIX) == 0)
+        return error.NewWorkspaceTextMeasurementFailed;
+    return bounds.bottom;
 }
 
 fn readName(dialog: *Dialog) ![]u8 {
@@ -572,4 +599,18 @@ test "new workspace state and handoff release every allocation on failure" {
     TestValidation.collision = false;
     TestValidation.failure = false;
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Exercise.run, .{});
+}
+
+test "new workspace long isolation text grows content and keeps the stacked preview below it" {
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        for ([_]i32{ 340, 460 }) |width| {
+            const base = contentLayout(Dpi.scale(width, dpi), dpi);
+            const grown = base.withIsolationHeight(Dpi.scale(54, dpi), dpi);
+            try std.testing.expectEqual(Dpi.scale(54, dpi), grown.bullets[2].height);
+            try std.testing.expect(grown.extent >= grown.bullets[2].bottom() + Dpi.scale(24, dpi));
+            if (width == 340)
+                try std.testing.expect(grown.preview.y >= grown.bullets[2].bottom() + Dpi.scale(14, dpi));
+            try std.testing.expect(grown.preview.bottom() + Dpi.scale(24, dpi) <= grown.extent);
+        }
+    }
 }
