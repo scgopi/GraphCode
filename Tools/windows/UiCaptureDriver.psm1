@@ -287,6 +287,19 @@ public static class CapNative {
     }
   }
 
+  public static void AssertWindowAncestry(CapWindowNode expected, CapWindowNode observed) {
+    if (expected == null || observed == null)
+      throw new InvalidOperationException("Window family: missing selected ancestry.");
+    if (expected.Handle != observed.Handle || expected.ProcessId != observed.ProcessId ||
+        expected.Parent != observed.Parent || expected.Owner != observed.Owner) {
+      var error = new InvalidOperationException("Window family: selected ancestry changed.");
+      error.Data["WindowAncestryFailure"] = new { Handle=observed.Handle, ProcessId=observed.ProcessId,
+        Parent=observed.Parent, Owner=observed.Owner, ExpectedHandle=expected.Handle,
+        ExpectedProcessId=expected.ProcessId, ExpectedParent=expected.Parent, ExpectedOwner=expected.Owner };
+      throw error;
+    }
+  }
+
   public static CapWindowNode[] SelectWindowFamily(CapWindowNode[] topology, long[] topLevelHandles,
     long rootHandle, int expectedPid) {
     if (topology == null || topLevelHandles == null || rootHandle == 0 || expectedPid <= 0)
@@ -442,8 +455,10 @@ public static class CapNative {
         NativeRect bounds;
         if (!GetWindowRect(window, out bounds))
           throw new InvalidOperationException("Window census bounds query failed.");
-        long parent = node.Parent, owner = node.Owner;
         bool visible = IsWindowVisible(window), enabled = IsWindowEnabled(window);
+        var liveTopology = ReadTopology(window, pid);
+        AssertWindowAncestry(node, liveTopology);
+        long parent = liveTopology.Parent, owner = liveTopology.Owner;
         UIntPtr textResult;
         if (SendMessageTimeoutW(window, 0x000D, (UIntPtr)name.Capacity, name, 2, 50, out textResult) == IntPtr.Zero) {
           int nativeError = Marshal.GetLastWin32Error();
@@ -2375,7 +2390,8 @@ function Get-CapOwnedWindowHierarchy {
         Write-CapTrace -Command 'OwnedWindowCensusFailure' -Parameters @{
             root=[long]$RootHandle;error=$cause.Message
             observedRows=($cause.Data['ObservedRows']|ConvertTo-Json -Depth 10 -Compress)
-            failedWindow=($cause.Data['WindowTextQueryFailure']|ConvertTo-Json -Depth 3 -Compress)}
+            failedWindow=($cause.Data['WindowTextQueryFailure']|ConvertTo-Json -Depth 3 -Compress)
+            ancestryChange=($cause.Data['WindowAncestryFailure']|ConvertTo-Json -Depth 3 -Compress)}
         throw
     }
     $null=Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity

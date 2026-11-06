@@ -231,9 +231,14 @@ ownership/parent relationships, never by class or visibility. Unresolved
 nonzero owners, cyclic or missing ancestry, conflicting duplicate handles,
 missing/ambiguous roots and foreign selected processes refuse. Only selected
 windows receive the unchanged 50ms text query within the 2s census deadline.
-Enumeration is not an atomic snapshot: newly created children may not appear
-until a later observation, and existing root/endpoint revalidation remains
-mandatory. This scope does not diagnose any earlier query timeout.
+Immediately before each selected text query, live parent/owner values are
+compared with the collected topology. Changed ancestry refuses without retry
+or re-resolution; the failure trace retains the observed and expected scalar
+relationships. Stable observations supply the success/text-failure rows.
+Neither enumeration nor this check is atomic: a window can change after the
+check, newly created children may be omitted, and HWND-generation identity is
+not established. Existing held-root and endpoint revalidation remain mandatory.
+This scope does not diagnose any earlier query timeout.
 It requires exactly one visible GraphCodeSheetHost owned by the app root and
 one visible GraphCodeNativeForm descendant through the viewport. The Create
 button belongs to the sheet footer, so UIA observation/invocation uses that
@@ -252,11 +257,12 @@ ambiguity, foreign identity, replacement, or native query errors refuse.
 On a native text-query failure, the error trace also retains the already-read
 HWND, class, process/thread IDs, bounds, parent/owner, visibility/enabled state
 and cached Win32 error. These existing structural reads precede the text query
-and are reused on success; no title/text payload or native query is added.
+and are reused on success. No title/text payload or new native API is added;
+parent/owner are re-read for the immediate ancestry validation described above.
 The original 50ms query, PID filter, refusal and rethrow
 remain unchanged. A zero native error is recorded as zero, not diagnosed as a
 specific timeout cause.
-The canonical capture suite runs 21 pure-selection/managed/source contracts
+The canonical capture suite runs 26 pure-selection/managed/source contracts
 for this metadata as an owned prerequisite before fresh fixture preparation.
 They are not added to the 182/185 capture-driver case inventory and do not
 invoke the native text-query failure path.

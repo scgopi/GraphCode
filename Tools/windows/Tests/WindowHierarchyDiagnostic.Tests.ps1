@@ -43,6 +43,8 @@ Add-Type -TypeDefinition $fixture
 $nodeStart=$source.IndexOf('public sealed class CapWindowNode {')
 $nodeEnd=$source.IndexOf('public sealed class CapPointerReceipt {',$nodeStart)
 $selectionStart=$source.IndexOf('public static CapWindowNode[] SelectWindowFamily(')
+$ancestryStart=$source.IndexOf('public static void AssertWindowAncestry(')
+if($ancestryStart-ge0){$selectionStart=$ancestryStart}
 $selectionEnd=$source.IndexOf('public static CapWindowNode[] WindowHierarchy(')
 $selection=if($selectionStart-ge0){$source.Substring($selectionStart,$selectionEnd-$selectionStart)}else{''}
 Add-Type -TypeDefinition ("using System;`n"+$source.Substring($nodeStart,$nodeEnd-$nodeStart)+
@@ -85,7 +87,8 @@ Check 'source keeps one original50ms query and PID filtering before text' {
             $method.IndexOf($query)-lt$method.IndexOf('SendMessageTimeoutW('))
     }
     Assert-True ($method.Contains('Parent=parent, Owner=owner')-and
-        $method.Contains('Visible=visible, Enabled=enabled'))
+        $method.Contains('Visible=visible, Enabled=enabled')-and
+        $method-match'(?s)var liveTopology = ReadTopology\(window, pid\);\s*AssertWindowAncestry\(node, liveTopology\);\s*long parent = liveTopology.Parent, owner = liveTopology.Owner;\s*UIntPtr textResult;\s*if \(SendMessageTimeoutW')
     Assert-True (-not($body-match'GetWindowText|GetAncestor|GetWindow\(|GetDlgCtrlID|GetCapture|Thread.Sleep|Sleep\('))
 }
 Check 'source retains received thread return and immediately captures existing last-error cache' {
@@ -98,6 +101,7 @@ Check 'source forwards only closed scalar failure facts without changing rethrow
     $finish=$text.IndexOf('function Get-CapDirectChildren {',$begin)
     $helper=$text.Substring($begin,$finish-$begin)
     Assert-True ($helper.Contains("failedWindow=(`$cause.Data['WindowTextQueryFailure']|ConvertTo-Json -Depth 3 -Compress)")-and
+        $helper.Contains("ancestryChange=(`$cause.Data['WindowAncestryFailure']|ConvertTo-Json -Depth 3 -Compress)")-and
         $helper.Contains("observedRows=(`$cause.Data['ObservedRows']|ConvertTo-Json -Depth 10 -Compress)")-and
         $helper.Contains('[CapNative]::WindowHierarchy($RootHandle,$ProcessIdentity.Pid)')-and
         $helper-match'(?s)OwnedWindowCensusFailure.*?\}\s*throw')
@@ -236,9 +240,30 @@ foreach($fault in @('zero-root','missing-root','duplicate-root','conflicting-dup
         }
     }
 }
+Check 'live ancestry accepts stable identity and relationships' {
+    $expected=Scope-Node 2 1
+    $observed=Scope-Node 2 1
+    [WindowFamilySelectionFixture]::AssertWindowAncestry($expected,$observed)
+    Assert-True ($observed.Parent-eq1-and$observed.Owner-eq0)
+}
+foreach($field in @('Parent','Owner','Handle','ProcessId')){
+    Check "live ancestry refuses changed $field with observed scalar evidence" {
+        $expected=Scope-Node 2 1
+        $observed=Scope-Node 2 1
+        $observed.$field=99
+        $caught=$null
+        try{[WindowFamilySelectionFixture]::AssertWindowAncestry($expected,$observed)}
+        catch{$caught=$_.Exception.GetBaseException()}
+        Assert-True ($caught-is[InvalidOperationException]-and$caught.Message-ceq'Window family: selected ancestry changed.')
+        $facts=$caught.Data['WindowAncestryFailure']
+        Assert-True ($facts.$field-eq99-and$facts.ExpectedParent-eq1-and$facts.ExpectedOwner-eq0-and
+            $facts.ExpectedHandle-eq2-and$facts.ExpectedProcessId-eq7-and
+            (@($facts.PSObject.Properties.Name|Sort-Object)-join',')-ceq'ExpectedHandle,ExpectedOwner,ExpectedParent,ExpectedProcessId,Handle,Owner,Parent,ProcessId')
+    }
+}
 $passed=@($results|Where-Object passed -EQ $true).Count
 @{suite='WindowHierarchyDiagnostic';executed=$results.Count;passed=$passed;failed=$results.Count-$passed;skipped=0
     nativeCalls=0;evidence='Actual extracted managed throw/data construction plus source contracts; not native fault behavior';cases=@($results)}|
     ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $ScratchRoot 'report.json') -Encoding utf8NoBOM
 @{suite='WindowHierarchyDiagnostic';executed=$results.Count;passed=$passed;failed=$results.Count-$passed;skipped=0;nativeCalls=0}|ConvertTo-Json -Compress
-if($results.Count-ne21-or$passed-ne21){exit 1}
+if($results.Count-ne26-or$passed-ne26){exit 1}
