@@ -222,7 +222,18 @@ connector use, modal cancellation, self/empty/cancelled drops and inline Mark
 priority. These are native-form/component contracts, not a live W1 campaign,
 physical input, daemon edge readback, higher-DPI captures, or macOS visual parity.
 
-Native modal observation now enumerates the held process's window hierarchy.
+Native modal observation enumerates the held root's window family, not every
+window in the process. A pure topology selector requires the exact root and
+matching PID, follows transitive top-level ownership, and includes every
+descendant of the selected roots, including hidden and disabled controls of
+arbitrary classes. A separate same-process family is excluded by its resolved
+ownership/parent relationships, never by class or visibility. Unresolved
+nonzero owners, cyclic or missing ancestry, conflicting duplicate handles,
+missing/ambiguous roots and foreign selected processes refuse. Only selected
+windows receive the unchanged 50ms text query within the 2s census deadline.
+Enumeration is not an atomic snapshot: newly created children may not appear
+until a later observation, and existing root/endpoint revalidation remains
+mandatory. This scope does not diagnose any earlier query timeout.
 It requires exactly one visible GraphCodeSheetHost owned by the app root and
 one visible GraphCodeNativeForm descendant through the viewport. The Create
 button belongs to the sheet footer, so UIA observation/invocation uses that
@@ -245,7 +256,7 @@ and are reused on success; no title/text payload or native query is added.
 The original 50ms query, PID filter, refusal and rethrow
 remain unchanged. A zero native error is recorded as zero, not diagnosed as a
 specific timeout cause.
-The canonical capture suite runs five managed-construction/source contracts
+The canonical capture suite runs 21 pure-selection/managed/source contracts
 for this metadata as an owned prerequisite before fresh fixture preparation.
 They are not added to the 182/185 capture-driver case inventory and do not
 invoke the native text-query failure path.

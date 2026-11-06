@@ -116,7 +116,7 @@ public static class StandaloneSuites
             var hierarchyContracts = await PowerShellPayload.RunAsync(context, Id + ".window-hierarchy-diagnostic",
                 "Tools\\windows\\Tests\\WindowHierarchyDiagnostic.Tests.ps1",
                 ["-ScratchRoot", Path.Combine(captureRoot, "window-hierarchy-contracts")], cancellationToken);
-            if (EvidenceParser.Structured(Id, "WindowHierarchyDiagnostic", hierarchyContracts.Output, 5, 5).Status != UnitStatus.Passed)
+            if (EvidenceParser.Structured(Id, "WindowHierarchyDiagnostic", hierarchyContracts.Output, 21, 21).Status != UnitStatus.Passed)
                 throw new InvalidDataException("Window hierarchy diagnostic contracts failed");
             string[] compilerArguments = context.FixtureCompilerInput is null ? [] :
                 ["-FixtureCompilerInput", context.FixtureCompilerInput,

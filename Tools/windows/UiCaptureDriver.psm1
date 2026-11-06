@@ -287,21 +287,154 @@ public static class CapNative {
     }
   }
 
-  public static CapWindowNode[] WindowHierarchy(int expectedPid) {
+  public static CapWindowNode[] SelectWindowFamily(CapWindowNode[] topology, long[] topLevelHandles,
+    long rootHandle, int expectedPid) {
+    if (topology == null || topLevelHandles == null || rootHandle == 0 || expectedPid <= 0)
+      throw new InvalidOperationException("Window family: missing root or topology.");
+    var nodes = new System.Collections.Generic.Dictionary<long, CapWindowNode>();
+    var order = new System.Collections.Generic.List<CapWindowNode>();
+    foreach (var node in topology) {
+      if (node == null || node.Handle == 0)
+        throw new InvalidOperationException("Window family: invalid window.");
+      CapWindowNode prior;
+      if (nodes.TryGetValue(node.Handle, out prior)) {
+        if (node.Handle == rootHandle || prior.Parent != node.Parent || prior.Owner != node.Owner ||
+            prior.ProcessId != node.ProcessId)
+          throw new InvalidOperationException("Window family: ambiguous or conflicting duplicate window.");
+      } else { nodes.Add(node.Handle, node); order.Add(node); }
+    }
+    var tops = new System.Collections.Generic.HashSet<long>();
+    foreach (long handle in topLevelHandles)
+      if (!nodes.ContainsKey(handle) || !tops.Add(handle))
+        throw new InvalidOperationException("Window family: missing or duplicate top-level window.");
+    if (!tops.Contains(rootHandle) || nodes[rootHandle].ProcessId != expectedPid)
+      throw new InvalidOperationException("Window family: missing or foreign root.");
+    var included = new System.Collections.Generic.Dictionary<long, bool>();
+    foreach (long handle in topLevelHandles) {
+      var path = new System.Collections.Generic.List<long>();
+      var seen = new System.Collections.Generic.HashSet<long>();
+      long cursor = handle;
+      while (cursor != 0 && !included.ContainsKey(cursor)) {
+        if (!tops.Contains(cursor))
+          throw new InvalidOperationException("Window family: unresolved nonzero owner.");
+        if (!seen.Add(cursor))
+          throw new InvalidOperationException("Window family: cyclic ownership.");
+        if (nodes[cursor].ProcessId != expectedPid)
+          throw new InvalidOperationException("Window family: foreign top-level process.");
+        path.Add(cursor);
+        cursor = nodes[cursor].Owner;
+      }
+      bool member = cursor != 0 && included[cursor];
+      for (int index = path.Count - 1; index >= 0; index--) {
+        member = path[index] == rootHandle || member;
+        included.Add(path[index], member);
+      }
+    }
+    foreach (var node in order) {
+      if (!included.ContainsKey(node.Handle)) included.Add(node.Handle, false);
+      if (node.Owner != 0 && !tops.Contains(node.Owner))
+        throw new InvalidOperationException("Window family: unresolved nonzero owner.");
+      if (!tops.Contains(node.Handle) && (node.Parent == 0 || !nodes.ContainsKey(node.Parent)))
+        throw new InvalidOperationException("Window family: missing parent ancestry.");
+    }
+    var states = new System.Collections.Generic.Dictionary<long, int>();
+    foreach (var node in order) {
+      var stack = new System.Collections.Generic.Stack<(long Handle, bool Exit)>();
+      stack.Push((node.Handle, false));
+      while (stack.Count != 0) {
+        var next = stack.Pop();
+        if (next.Exit) { states[next.Handle] = 2; continue; }
+        int state;
+        if (states.TryGetValue(next.Handle, out state)) {
+          if (state == 1) throw new InvalidOperationException("Window family: cyclic ancestry.");
+          continue;
+        }
+        states.Add(next.Handle, 1);
+        stack.Push((next.Handle, true));
+        var current = nodes[next.Handle];
+        if (nodes.ContainsKey(current.Parent)) stack.Push((current.Parent, false));
+        if (current.Owner != 0) stack.Push((current.Owner, false));
+      }
+    }
+    bool changed;
+    do {
+      changed = false;
+      foreach (var node in order) {
+        bool parentIncluded, ownerIncluded;
+        if (!included[node.Handle] &&
+            ((included.TryGetValue(node.Parent, out parentIncluded) && parentIncluded) ||
+             (included.TryGetValue(node.Owner, out ownerIncluded) && ownerIncluded))) {
+          included[node.Handle] = true;
+          changed = true;
+        }
+      }
+    } while (changed);
+    var selected = new System.Collections.Generic.List<CapWindowNode>();
+    foreach (var node in order) {
+      if (!included[node.Handle]) continue;
+      if (node.ProcessId != expectedPid || (node.Owner != 0 && !included[node.Owner]))
+        throw new InvalidOperationException("Window family: foreign or conflicting selected window.");
+      selected.Add(node);
+    }
+    return selected.ToArray();
+  }
+
+  public static CapWindowNode[] WindowHierarchy(IntPtr rootWindow, int expectedPid) {
+    if (rootWindow == IntPtr.Zero || expectedPid <= 0)
+      throw new InvalidOperationException("Window family: missing root or process.");
     var rows = new System.Collections.Generic.List<CapWindowNode>();
     IntPtr previous = EnterPerMonitorV2();
     Exception primary = null;
     try {
       Exception failure = null;
       var clock = System.Diagnostics.Stopwatch.StartNew();
-      WindowCallback record = delegate(IntPtr window, IntPtr value) {
-       try {
+      var topology = new System.Collections.Generic.List<CapWindowNode>();
+      var topHandles = new System.Collections.Generic.List<long>();
+      void CheckDeadline() {
         if (clock.ElapsedMilliseconds > 2000) throw new InvalidOperationException("Owned window census exceeded 2000ms.");
+      }
+      CapWindowNode ReadTopology(IntPtr window, uint pid) {
+        return new CapWindowNode { Handle=window.ToInt64(), Parent=GetAncestor(window, 1).ToInt64(),
+          Owner=GetWindow(window, 4).ToInt64(), ProcessId=(int)pid };
+      }
+      bool complete = EnumWindows(delegate(IntPtr window, IntPtr value) {
+        try {
+          CheckDeadline();
+          uint pid;
+          GetWindowThreadProcessId(window, out pid);
+          if (pid != expectedPid) return true;
+          topHandles.Add(window.ToInt64());
+          topology.Add(ReadTopology(window, pid));
+          return true;
+        } catch (Exception error) { failure=error; return false; }
+      }, IntPtr.Zero);
+      if (failure != null) throw failure;
+      if (!complete) throw new InvalidOperationException("Owned EnumWindows failed: " + Marshal.GetLastWin32Error());
+      var roots = SelectWindowFamily(topology.ToArray(), topHandles.ToArray(), rootWindow.ToInt64(), expectedPid);
+      CheckDeadline();
+      foreach (var root in roots) {
+        EnumChildWindows(new IntPtr(root.Handle), delegate(IntPtr window, IntPtr value) {
+          try {
+            CheckDeadline();
+            uint childPid;
+            if (GetWindowThreadProcessId(window, out childPid) == 0 || childPid != expectedPid)
+              throw new InvalidOperationException("Window family: missing or foreign descendant process.");
+            topology.Add(ReadTopology(window, childPid));
+            return true;
+          } catch (Exception error) { failure=error; return false; }
+        }, IntPtr.Zero);
+        if (failure != null) throw failure;
+      }
+      var family = SelectWindowFamily(topology.ToArray(), topHandles.ToArray(), rootWindow.ToInt64(), expectedPid);
+      CheckDeadline();
+      foreach (var node in family) {
+        IntPtr window = new IntPtr(node.Handle);
+        CheckDeadline();
         uint pid;
         uint thread = GetWindowThreadProcessId(window, out pid);
         if (thread == 0)
           throw new InvalidOperationException("Window census process query failed.");
-        if (pid != expectedPid) return true;
+        if (pid != expectedPid) throw new InvalidOperationException("Window family: selected process changed.");
         var cls = new StringBuilder(256);
         var name = new StringBuilder(512);
         if (GetClassName(window, cls, cls.Capacity) == 0)
@@ -309,7 +442,7 @@ public static class CapNative {
         NativeRect bounds;
         if (!GetWindowRect(window, out bounds))
           throw new InvalidOperationException("Window census bounds query failed.");
-        long parent = GetAncestor(window, 1).ToInt64(), owner = GetWindow(window, 4).ToInt64();
+        long parent = node.Parent, owner = node.Owner;
         bool visible = IsWindowVisible(window), enabled = IsWindowEnabled(window);
         UIntPtr textResult;
         if (SendMessageTimeoutW(window, 0x000D, (UIntPtr)name.Capacity, name, 2, 50, out textResult) == IntPtr.Zero) {
@@ -323,26 +456,10 @@ public static class CapNative {
         rows.Add(new CapWindowNode { Handle=window.ToInt64(), Parent=parent, Owner=owner,
           ProcessId=(int)pid, ClassName=cls.ToString(), Name=name.ToString(), Visible=visible, Enabled=enabled,
           Bounds=new int[] {bounds.Left,bounds.Top,bounds.Right,bounds.Bottom} });
-        return true;
-       } catch (Exception error) { failure=error; return false; }
-      };
-      bool complete = EnumWindows(delegate(IntPtr window, IntPtr value) {
-        if (failure != null) return false;
-        uint pid;
-        GetWindowThreadProcessId(window, out pid);
-        if (pid == expectedPid) {
-          if (!record(window, value)) return false;
-          EnumChildWindows(window, record, value);
-        }
-        return failure == null;
-      }, IntPtr.Zero);
-      if (failure != null) {
-        failure.Data["ObservedRows"]=rows.ToArray();
-        throw failure;
       }
-      if (!complete) throw new InvalidOperationException("Owned EnumWindows failed: " + Marshal.GetLastWin32Error());
+      CheckDeadline();
       return rows.ToArray();
-    } catch (Exception error) { primary=error; throw; }
+    } catch (Exception error) { error.Data["ObservedRows"]=rows.ToArray(); primary=error; throw; }
     finally { RestoreDpiAwareness(previous, primary); }
   }
 
@@ -2251,7 +2368,7 @@ function Get-CapWireAlgorithmPreflight {
 function Get-CapOwnedWindowHierarchy {
     param([Parameter(Mandatory)][IntPtr]$RootHandle,[Parameter(Mandatory)]$ProcessIdentity)
     $null=Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity
-    try {$rows=@([CapNative]::WindowHierarchy($ProcessIdentity.Pid))}
+    try {$rows=@([CapNative]::WindowHierarchy($RootHandle,$ProcessIdentity.Pid))}
     catch {
         $cause=$_.Exception
         while ($cause.InnerException) {$cause=$cause.InnerException}

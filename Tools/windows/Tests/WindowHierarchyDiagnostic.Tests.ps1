@@ -40,6 +40,13 @@ public static class WindowCensusFailureFixture {
 }
 "@
 Add-Type -TypeDefinition $fixture
+$nodeStart=$source.IndexOf('public sealed class CapWindowNode {')
+$nodeEnd=$source.IndexOf('public sealed class CapPointerReceipt {',$nodeStart)
+$selectionStart=$source.IndexOf('public static CapWindowNode[] SelectWindowFamily(')
+$selectionEnd=$source.IndexOf('public static CapWindowNode[] WindowHierarchy(')
+$selection=if($selectionStart-ge0){$source.Substring($selectionStart,$selectionEnd-$selectionStart)}else{''}
+Add-Type -TypeDefinition ("using System;`n"+$source.Substring($nodeStart,$nodeEnd-$nodeStart)+
+    "`npublic static class WindowFamilySelectionFixture {`n"+$selection+"`n}")
 $results=[Collections.Generic.List[object]]::new()
 function Check([string]$CaseName,[scriptblock]$Action){
     try{& $Action;$results.Add(@{name=$CaseName;passed=$true})}
@@ -67,7 +74,11 @@ Check 'source keeps one original50ms query and PID filtering before text' {
         [regex]::Matches($region,'SendMessageTimeoutW\(').Count-eq1)
     $method=$source.Substring($source.IndexOf('public static CapWindowNode[] WindowHierarchy('))
     $method=$method.Substring(0,$method.IndexOf('public static int[] ConvertPointerScreen'))
-    Assert-True ($method.IndexOf('if (pid != expectedPid) return true;')-lt$method.IndexOf('SendMessageTimeoutW('))
+    Assert-True ($method.Contains('WindowHierarchy(IntPtr rootWindow, int expectedPid)')-and
+        $method.IndexOf('SelectWindowFamily(')-lt$method.IndexOf('SendMessageTimeoutW(')-and
+        $method.IndexOf('foreach (var node in family)')-lt$method.IndexOf('SendMessageTimeoutW(')-and
+        $method.Contains('if (pid != expectedPid) throw')-and
+        $method.Contains('if (rootWindow == IntPtr.Zero || expectedPid <= 0)'))
     foreach($query in @('GetWindowRect(window, out bounds)','GetAncestor(window, 1)','GetWindow(window, 4)',
         'IsWindowVisible(window)','IsWindowEnabled(window)')){
         Assert-True ([regex]::Matches($method,[regex]::Escape($query)).Count-eq1-and
@@ -88,6 +99,7 @@ Check 'source forwards only closed scalar failure facts without changing rethrow
     $helper=$text.Substring($begin,$finish-$begin)
     Assert-True ($helper.Contains("failedWindow=(`$cause.Data['WindowTextQueryFailure']|ConvertTo-Json -Depth 3 -Compress)")-and
         $helper.Contains("observedRows=(`$cause.Data['ObservedRows']|ConvertTo-Json -Depth 10 -Compress)")-and
+        $helper.Contains('[CapNative]::WindowHierarchy($RootHandle,$ProcessIdentity.Pid)')-and
         $helper-match'(?s)OwnedWindowCensusFailure.*?\}\s*throw')
     $directory=Split-Path -Parent $path
     $entryText=[IO.File]::ReadAllText((Join-Path $directory 'Invoke-MatchedActionSupplement.ps1'))
@@ -158,9 +170,75 @@ Check 'source forwards only closed scalar failure facts without changing rethrow
     & ([scriptblock]::Create($branch.Extent.Text+"`n`$script:defaultContinued=`$true"))
     Assert-True ($script:defaultContinued-and$script:diagnosticReads-eq2)
 }
+function Scope-Node([long]$Handle,[long]$Parent=0,[long]$Owner=0,[int]$ProcessId=7,[bool]$Visible=$true){
+    $node=[CapWindowNode]::new()
+    $node.Handle=$Handle;$node.Parent=$Parent;$node.Owner=$Owner;$node.ProcessId=$ProcessId
+    $node.Visible=$Visible;$node.Enabled=$false;$node.ClassName='ArbitraryClass'
+    return $node
+}
+function Select-Scope($Rows,[long[]]$Tops,[long]$Root=1){
+    return ,@([WindowFamilySelectionFixture]::SelectWindowFamily([CapWindowNode[]]$Rows,$Tops,$Root,7))
+}
+Check 'scope keeps exact root without inspecting its external parent' {
+    $actual=Select-Scope @((Scope-Node 1 65548)) @(1)
+    Assert-True ($actual.Count-eq1-and$actual[0].Handle-eq1)
+}
+Check 'scope keeps hidden disabled child and grandchild' {
+    $actual=Select-Scope @((Scope-Node 1),(Scope-Node 2 1 0 7 $false),(Scope-Node 3 2 0 7 $false)) @(1,2)
+    Assert-True (($actual.Handle-join',')-ceq'1,2,3')
+}
+Check 'scope retains owned host viewport native form and scrim' {
+    $actual=Select-Scope @((Scope-Node 1),(Scope-Node 2 0 1),(Scope-Node 3 2),(Scope-Node 4 3),
+        (Scope-Node 5 0 1 7 $false)) @(1,2,5)
+    Assert-True (($actual.Handle-join',')-ceq'1,2,3,4,5')
+}
+Check 'scope retains nested owned modal and its hidden child' {
+    $actual=Select-Scope @((Scope-Node 1),(Scope-Node 2 0 1),(Scope-Node 3 0 2),
+        (Scope-Node 4 3 0 7 $false)) @(1,2,3)
+    Assert-True (($actual.Handle-join',')-ceq'1,2,3,4')
+}
+Check 'scope classification does not depend on enumeration order' {
+    $actual=Select-Scope @((Scope-Node 4 3),(Scope-Node 3 0 2),(Scope-Node 2 0 1),(Scope-Node 1)) @(3,1,2)
+    Assert-True ((@($actual.Handle|Sort-Object)-join',')-ceq'1,2,3,4')
+}
+Check 'scope excludes positively unrelated families regardless of visibility or class' {
+    $related=Scope-Node 2 1 0 7 $false;$related.ClassName='ComboLBox'
+    $other=Scope-Node 8 65548 0 7 $true;$other.ClassName='ComboLBox'
+    $actual=Select-Scope @((Scope-Node 1),$related,$other,(Scope-Node 9 0 8 7 $false),(Scope-Node 10 9)) @(1,8,9)
+    Assert-True (($actual.Handle-join',')-ceq'1,2')
+}
+foreach($fault in @('zero-root','missing-root','duplicate-root','conflicting-duplicate','owner-cycle',
+    'parent-cycle','missing-owner','missing-parent','foreign-descendant','foreign-root')){
+    Check "scope refuses $fault" {
+        $rows=@((Scope-Node 1),(Scope-Node 2 1));$tops=@(1L);$root=1L
+        switch($fault){
+            'zero-root' {$root=0L}
+            'missing-root' {$rows=@((Scope-Node 2));$tops=@(2L)}
+            'duplicate-root' {$rows+=$rows[0]}
+            'conflicting-duplicate' {$rows+=(Scope-Node 2 99)}
+            'owner-cycle' {$rows+=@((Scope-Node 3 0 4),(Scope-Node 4 0 3));$tops+=@(3L,4L)}
+            'parent-cycle' {$rows[1].Parent=3;$rows+=(Scope-Node 3 2)}
+            'missing-owner' {$rows+=(Scope-Node 3 0 99);$tops+=3L}
+            'missing-parent' {$rows[1].Parent=99}
+            'foreign-descendant' {$rows[1].ProcessId=8}
+            'foreign-root' {$rows[0].ProcessId=8}
+        }
+        $caught=$null
+        try{Select-Scope $rows $tops $root|Out-Null}catch{$caught=$_.Exception.GetBaseException()}
+        Assert-True ($caught-is[InvalidOperationException]-and$caught.Message.StartsWith('Window family:'))
+        if($fault-ceq'owner-cycle'){
+            $rows=@((Scope-Node 1 0 2),(Scope-Node 2 0 1));$caught=$null
+            try{Select-Scope $rows @(1,2)|Out-Null}catch{$caught=$_.Exception.GetBaseException()}
+            Assert-True ($caught-is[InvalidOperationException]-and$caught.Message-ceq'Window family: cyclic ownership.')
+            $rows=@((Scope-Node 1 0 2),(Scope-Node 2 1));$caught=$null
+            try{Select-Scope $rows @(1,2)|Out-Null}catch{$caught=$_.Exception.GetBaseException()}
+            Assert-True ($caught-is[InvalidOperationException]-and$caught.Message-ceq'Window family: cyclic ancestry.')
+        }
+    }
+}
 $passed=@($results|Where-Object passed -EQ $true).Count
 @{suite='WindowHierarchyDiagnostic';executed=$results.Count;passed=$passed;failed=$results.Count-$passed;skipped=0
     nativeCalls=0;evidence='Actual extracted managed throw/data construction plus source contracts; not native fault behavior';cases=@($results)}|
     ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $ScratchRoot 'report.json') -Encoding utf8NoBOM
 @{suite='WindowHierarchyDiagnostic';executed=$results.Count;passed=$passed;failed=$results.Count-$passed;skipped=0;nativeCalls=0}|ConvertTo-Json -Compress
-if($results.Count-ne5-or$passed-ne5){exit 1}
+if($results.Count-ne21-or$passed-ne21){exit 1}
