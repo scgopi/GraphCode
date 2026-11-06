@@ -145,6 +145,19 @@ function Assert-CapActionWindowContext {
                 throw 'Action window binding in-memory plan/job differs from bound bytes.'
             }
         }
+        if (Test-CapFunctionalWireJob -Job $job -Group $plan.group) {
+            $repositoryRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+            $contract=$job.functionalWireContract
+            if ($contract.windowSourcePath -cne (Join-Path $repositoryRoot 'graphcode-windows\src\MainWindow.zig')) {
+                throw 'Functional Wire requires the current owned repository window source.'
+            }
+            foreach ($revision in @('HEAD',$job.binaries.after.binaryBuiltAtSource)) {
+                $appTree=(& git -C $repositoryRoot rev-parse ($revision+':graphcode-windows')).Trim()
+                if ($LASTEXITCODE -ne 0 -or $appTree -cne $contract.applicationSourceTree) {
+                    throw 'Functional Wire binary/application input equivalence changed.'
+                }
+            }
+        }
         return @(Assert-CapActionWindowBindings -Job $job -Plan $plan)
     } finally {$held.Pin.Dispose()}
 }
@@ -152,8 +165,19 @@ function Assert-CapActionWindowContext {
 function Get-CapWorkerWireBinding {
     $null=Assert-CapActionWindowContext
     $binding=if ($plan.PSObject.Properties['wireTargetBinding']) {$plan.wireTargetBinding} else {$null}
-    return Assert-CapWireTargetBinding -Binding $binding `
+    $bound=Assert-CapWireTargetBinding -Binding $binding `
         -Repository ([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))) -OwnedRoot $root
+    if (Test-CapFunctionalWireJob -Job $job -Group $plan.group) {
+        $state=Read-CapBoundJson -Root $root -Reference $plan.functionalWireState
+        $expected=Get-CapFunctionalWireStatePlan -WireBinding $bound -SourceHead $plan.sourceHead `
+            -WorkerSha256 $plan.workerSha256 -StubSha256 $plan.stubDaemonSha256
+        if (-not [Text.Json.Nodes.JsonNode]::DeepEquals(
+            [Text.Json.Nodes.JsonNode]::Parse(($state|ConvertTo-Json -Depth 30 -Compress)),
+            [Text.Json.Nodes.JsonNode]::Parse(($expected|ConvertTo-Json -Depth 30 -Compress)))) {
+            throw 'Functional Wire fresh state provenance differs.'
+        }
+    }
+    return $bound
 }
 
 function Get-CapWorkerWindowIdentity {
@@ -177,6 +201,14 @@ function Get-CapMatchedWindowGeometry {
     param([Parameter(Mandatory)][string]$Phase,[string]$SceneName='')
     $identity=Get-CapWorkerWindowIdentity -Phase $Phase -SceneName $SceneName
     $area=Get-CapPrimaryPhysicalWorkArea
+    if (Test-CapFunctionalWireJob -Job $job) {
+        if ((Get-FileHash -LiteralPath $identity.sourcePath).Hash -cne $identity.sourceSha256) {
+            throw 'Functional Wire window source changed.'
+        }
+        return [pscustomobject]@{kind='OWNED_WINDOW_MEASUREMENT_REQUIRED'
+            WorkArea=@($area.Left,$area.Top,$area.Right,$area.Bottom)
+            actualDpi=$null;runtimeWindowEvaluated=$false;visualParityClaimed=$false}
+    }
     $contract = $job.captureContract
     return Get-CapDpiGeometry -LogicalClientWH @($contract.logicalClientWH) `
         -ExpectedDpi ([uint32]$contract.expectedWindowDpi) `
@@ -532,7 +564,7 @@ function Get-CapBaseEnvironment {
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
-    if (Test-CapMatchedAdapter) {
+    if ((Test-CapMatchedAdapter) -or (Test-CapFunctionalWireJob -Job $job)) {
         $project=Assert-CapOwnedPath (Join-Path $root 'fixtures\projects\Matched')
         $null=New-Item -ItemType Directory -Path $project -Force
         return @{
@@ -1170,6 +1202,7 @@ function Save-CapSceneImage {
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
     Assert-CapWorkerDeadline "before image $Phase/$SceneName"
+    if (Test-CapFunctionalWireJob -Job $job) {throw 'Functional Wire does not authorize screenshots.'}
     $metrics = Get-CapWindowMetrics -Window $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
     $expectedOuter = @(30, 30, 1486, 989)
     $isD=$job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'D_QUICK_CHAT_V1'
@@ -1413,7 +1446,7 @@ function Start-CapGraphCodeApp {
     $arguments = if ($rehearsal) { [string[]]@($job.rehearsalTarget.arguments) } else { [string[]]@() }
     if ($rehearsal) { $role = 'rehearsal-target' }
     $isD=$job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'D_QUICK_CHAT_V1'
-    $isS=Test-CapMatchedAdapter
+    $isS=(Test-CapMatchedAdapter) -or (Test-CapFunctionalWireJob -Job $job)
     $workingDirectory = if ($rehearsal) {$Roots.Peer} elseif ($isS) {Join-Path $root 'fixtures\projects\Matched'} elseif ($isD) {Join-Path $root 'fixtures\projects\D Offline Capture Fixture'} else {Join-Path $root 'fixtures\projects\Alpha'}
     if (-not $rehearsal) {
         $shellSession = 'graphcode-' + $SessionPrefix + '-' + [guid]::Empty.ToString('D')
@@ -1463,6 +1496,18 @@ function Start-CapGraphCodeApp {
         Set-CapWindowPosition -Window $window -ProcessIdentity $run.Identity -X $placement.x -Y $placement.y -Width $placement.width -Height $placement.height
         $appRun | Add-Member -NotePropertyName Placement -NotePropertyValue $placement
         $appRun | Add-Member -NotePropertyName Roots -NotePropertyValue $Roots
+    } elseif (Test-CapFunctionalWireJob -Job $job) {
+        $beforeMetrics=Get-CapWindowMetrics -Window $window -ProcessIdentity $run.Identity
+        $identity=Get-CapWorkerWindowIdentity -Phase $Phase -SceneName $SceneName
+        $area=Get-CapPrimaryPhysicalWorkArea
+        $placement=Get-CapFunctionalWirePlacement -Identity $identity -Metrics $beforeMetrics `
+            -WorkArea @($area.Left,$area.Top,$area.Right,$area.Bottom)
+        $geometry=$placement.Geometry
+        Set-CapWindowPosition -Window $window -ProcessIdentity $run.Identity `
+            -X $geometry.OuterBounds[0] -Y $geometry.OuterBounds[1] `
+            -Width $geometry.OuterWH[0] -Height $geometry.OuterWH[1]
+        $appRun | Add-Member -NotePropertyName FunctionalPlacement -NotePropertyValue $placement
+        $appRun | Add-Member -NotePropertyName Roots -NotePropertyValue $Roots
     } elseif (Test-CapMatchedDpiAdapter) {
         $beforeMetrics=Get-CapWindowMetrics -Window $window -ProcessIdentity $run.Identity
         $contract=$job.captureContract
@@ -1477,7 +1522,9 @@ function Start-CapGraphCodeApp {
     } else {Set-CapWindowPosition -Window $window -ProcessIdentity $run.Identity}
     Start-Sleep -Milliseconds 500
     $metrics = Get-CapWindowMetrics -Window $window -ProcessIdentity $run.Identity
-    if (Test-CapMatchedDpiAdapter) {
+    if (Test-CapFunctionalWireJob -Job $job) {
+        $null=Assert-CapFunctionalWireWindow -AppRun $appRun
+    } elseif (Test-CapMatchedDpiAdapter) {
         $geometry=$appRun.Placement
         $identity=Get-CapWorkerWindowIdentity -Phase $Phase -SceneName $SceneName
         $null=Assert-CapDpiWindowIdentity -Metrics $metrics -Identity $identity `
@@ -2461,6 +2508,22 @@ function Invoke-CapMatchedTerminalSceneSupplement {
     return [pscustomobject]$receipt
 }
 
+function Assert-CapFunctionalWireWindow {
+    param([Parameter(Mandatory)]$AppRun)
+    $descriptor=Get-CapWorkerWindowIdentity -Phase 'wire-completion' -SceneName 's-goal-unwired-unselected'
+    if ((Get-FileHash -LiteralPath $descriptor.sourcePath).Hash -cne $descriptor.sourceSha256) {
+        throw 'Functional Wire source changed after startup.'
+    }
+    $area=Get-CapPrimaryPhysicalWorkArea
+    $placement=$AppRun.FunctionalPlacement
+    if ((@($area.Left,$area.Top,$area.Right,$area.Bottom) -join ',') -cne ($placement.WorkArea -join ',')) {
+        throw 'Functional Wire measured work area changed.'
+    }
+    $metrics=Get-CapWindowMetrics -Window $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
+    return Assert-CapDpiWindowIdentity -Metrics $metrics -Identity $placement.Identity `
+        -ExpectedOuterBounds $placement.Geometry.OuterBounds
+}
+
 function Read-CapWireTargetObservation {
     param([Parameter(Mandatory)]$AppRun,[Parameter(Mandatory)]$Binding)
     $null=Assert-CapRootProcess -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
@@ -2476,9 +2539,13 @@ function Read-CapWireTargetObservation {
             RuntimeId=@($_.GetRuntimeId());Bounds=@($b.Left,$b.Top,$b.Right,$b.Bottom)}
     })
     $metrics=Get-CapWindowMetrics -Window $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
-    $identity=Get-CapWorkerWindowIdentity -Phase 'wire-completion' -SceneName $Binding.scene
-    $geometry=Get-CapMatchedWindowGeometry -Phase 'wire-completion' -SceneName $Binding.scene
-    $null=Assert-CapDpiWindowIdentity -Metrics $metrics -Identity $identity -ExpectedOuterBounds $geometry.OuterBounds
+    if (Test-CapFunctionalWireJob -Job $job) {
+        $metrics=Assert-CapFunctionalWireWindow -AppRun $AppRun
+    } else {
+        $identity=Get-CapWorkerWindowIdentity -Phase 'wire-completion' -SceneName $Binding.scene
+        $geometry=Get-CapMatchedWindowGeometry -Phase 'wire-completion' -SceneName $Binding.scene
+        $null=Assert-CapDpiWindowIdentity -Metrics $metrics -Identity $identity -ExpectedOuterBounds $geometry.OuterBounds
+    }
     $observation=Get-CapWireTargetObservation -Binding $Binding -Rows $rows `
         -ExpectedProcessId $AppRun.Run.Identity.Pid -Dpi $metrics.Dpi
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters @{
@@ -2680,6 +2747,17 @@ function Invoke-CapWireCompletionSupplement {
             }
             requestIds=@($stubResult.appliedEdgeCreateRequests)
             correlated=$stubResult.unansweredRequests.Count -eq 0
+        }
+        if (Test-CapFunctionalWireJob -Job $job) {
+            $receipt | Add-Member -NotePropertyName sceneState -NotePropertyValue ([pscustomobject]@{
+                evidenceMode='FRESH_OWNED_UIA_STATE_AND_CORRELATED_EDGE_NOT_VISUAL_PARITY'
+                plan=$plan.functionalWireState
+                processId=$app.Run.Identity.Pid;creationFileTimeUtc=$app.Run.Identity.CreationFileTimeUtc
+                stubProcessId=$stub.Identity.Pid;stubCreationFileTimeUtc=$stub.Identity.CreationFileTimeUtc
+                rootRuntimeId=$rootRuntime;beforeArmHierarchy=$beforeHierarchy;armedCards=$reacquired
+                placement=$app.FunctionalPlacement;finalMetrics=(Assert-CapFunctionalWireWindow -AppRun $app)
+                imageEvidence=$false;visualParityClaimed=$false
+            })
         }
         return $receipt
     } catch {

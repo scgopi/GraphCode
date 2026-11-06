@@ -1,5 +1,6 @@
 param(
-    [string]$ScratchRoot = (Join-Path ([IO.Path]::GetTempPath()) ('ab' + [guid]::NewGuid().ToString('N').Substring(0,8)))
+    [string]$ScratchRoot = (Join-Path ([IO.Path]::GetTempPath()) ('ab' + [guid]::NewGuid().ToString('N').Substring(0,8))),
+    [switch]$FunctionalOnly
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
@@ -10,6 +11,125 @@ $null=New-Item -ItemType Directory -Path $caseRoot
 . (Join-Path $driverDirectory 'Invoke-UiCaptureWorker.ps1') -OwnedRoot $caseRoot -DefinitionsOnly
 Import-Module $modulePath -Force -WarningAction SilentlyContinue
 Set-CapTracePath -Path (Join-Path $caseRoot 'calls.jsonl')
+function Invoke-FunctionalWireContracts {
+    $source=Join-Path $PSScriptRoot 'fixtures\c8r-window-after.zig'
+    $contract=[pscustomobject]@{
+        schemaVersion=1L;scene='s-goal-unwired-unselected'
+        windowSourcePath=$source;windowSourceSha256=(Get-FileHash -LiteralPath $source).Hash
+        placement='MEASURED_OWNED_WINDOW_FIT_WORKAREA';preferredLogicalClientWH=@(1280L,720L)
+        pngAllowed=$false;visualParityClaimed=$false;applicationSourceTree=('b'*40)
+    }
+    $functional=[pscustomobject]@{
+        head=('a'*40);sceneAdapter='S_FUNCTIONAL_W1_V1';functionalWireOnly=$true
+        functionalWireContract=$contract
+        binaries=[pscustomobject]@{after=[pscustomobject]@{source=('a'*40);binaryBuiltAtSource=('a'*40)}}
+    }
+    $binding=@(Get-CapActionWindowBindings -Job $functional -Group WireCompletion)
+    if ($binding.Count -ne 1 -or $binding[0].actionPhase -cne 'wire-completion' -or
+        ($binding[0].actionIds -join ',') -cne 'W1' -or
+        $binding[0].identity.measurement -cne 'REQUIRED_AT_OWNED_WINDOW_STARTUP') {
+        throw 'Functional W1 must resolve through the actual action binding without invented DPI/image evidence.'
+    }
+    $results.Add(@{name='functional W1 actual action binding requires owned runtime measurement';passed=$true})
+    function Reject-FunctionalCase([string]$Name,[scriptblock]$Action) {
+        $failure=$null
+        try {& $Action|Out-Null} catch {$failure=$_}
+        if ($null -eq $failure) {throw "Functional Wire accepted $Name."}
+        $results.Add(@{name="functional W1 refuses $Name";passed=$true;refusal=$failure.Exception.Message})
+    }
+    foreach ($group in @('TerminalActions','FinalBoundedActions')) {
+        Reject-FunctionalCase $group {Get-CapActionWindowBindings -Job $functional -Group $group}
+    }
+    foreach ($fault in @('opt-in','adapter','source','png','parity','build-source','app-tree')) {
+        $changed=$functional|ConvertTo-Json -Depth 20|ConvertFrom-Json
+        switch ($fault) {
+            'opt-in' {$changed.functionalWireOnly=$false}
+            'adapter' {$changed.sceneAdapter='S_MATCHED_V12_DPI_V1'}
+            'source' {$changed.binaries.after.source='f'*40}
+            'png' {$changed.functionalWireContract.pngAllowed=$true}
+            'parity' {$changed.functionalWireContract.visualParityClaimed=$true}
+            'build-source' {$changed.binaries.after.binaryBuiltAtSource='foreign'}
+            'app-tree' {$changed.functionalWireContract.applicationSourceTree='foreign'}
+        }
+        Reject-FunctionalCase $fault {Get-CapActionWindowBindings -Job $changed -Group WireCompletion}
+    }
+    foreach ($dpi in @(96,144,192)) {
+        $initial=Get-CapGraphCodeWindowIdentity -SourceText ([IO.File]::ReadAllText($source)) `
+            -SourceCommit $functional.head -ExpectedDpi $dpi -LogicalClientWH @(96,96)
+        $metrics=[pscustomobject]@{
+            Dpi=[long]$dpi;Style=$initial.expectedRuntimeWindowStyle;ExStyle=$initial.expectedRuntimeWindowExStyle
+            HasMenu=$true;OuterBounds=@(0L,0L,1280L,820L)
+            ClientBounds=@(0L,0L,$initial.expectedInitialClientWH[0],$initial.expectedInitialClientWH[1])
+        }
+        $placement=Get-CapFunctionalWirePlacement -Identity $binding[0].identity -Metrics $metrics `
+            -WorkArea @(0,0,1920,885)
+        $bounds=$placement.Geometry.OuterBounds
+        if ($placement.Geometry.Dpi -ne $dpi -or $bounds[0] -lt 0 -or $bounds[1] -lt 0 -or
+            $bounds[2] -gt 1920 -or $bounds[3] -gt 885) {throw 'Functional measured-fit model escaped work area.'}
+        $metrics.OuterBounds=$bounds
+        $metrics.ClientBounds=@(0L,0L,$placement.Geometry.PhysicalClientWH[0],$placement.Geometry.PhysicalClientWH[1])
+        $null=Assert-CapDpiWindowIdentity -Metrics $metrics -Identity $placement.Identity -ExpectedOuterBounds $bounds
+        $results.Add(@{name="functional W1 fits injected DPI$dpi metrics without a192 visual contract";passed=$true
+            evidence='INJECTED_COMPONENT_METRICS_NOT_LIVE_WINDOW_OR_DPI_CAPTURE'})
+    }
+    Reject-FunctionalCase 'invalid work area' {
+        Get-CapFunctionalWirePlacement -Identity $binding[0].identity -Metrics $metrics -WorkArea @(0,0,0,0)
+    }
+    $wrongIdentity=$binding[0].identity|ConvertTo-Json|ConvertFrom-Json
+    $wrongIdentity.sourceSha256='0'*64
+    Reject-FunctionalCase 'changed window source' {
+        Get-CapFunctionalWirePlacement -Identity $wrongIdentity -Metrics $metrics -WorkArea @(0,0,1920,885)
+    }
+    $root=$caseRoot
+    $job=$functional
+    $wire=Get-CapWireTargetBinding -Repository ([IO.Path]::GetFullPath((Join-Path $driverDirectory '..\..'))) -OwnedRoot $root
+    $statePath=Join-Path $root 'functional-wire-state.json'
+    $plan=[pscustomobject]@{group='WireCompletion';sourceHead=$functional.head;wireTargetBinding=$wire
+        workerSha256=(Get-FileHash -LiteralPath (Join-Path $driverDirectory 'Invoke-UiCaptureWorker.ps1')).Hash
+        stubDaemonSha256=(Get-FileHash -LiteralPath (Join-Path $driverDirectory 'Stub-Daemon.ps1')).Hash
+        functionalWireState=[pscustomobject]@{path=$statePath;sha256=''}}
+    $state=Get-CapFunctionalWireStatePlan -WireBinding $wire -SourceHead $plan.sourceHead `
+        -WorkerSha256 $plan.workerSha256 -StubSha256 $plan.stubDaemonSha256
+    # Only the outer authorization observation is modeled; execute the actual worker state reader.
+    function Assert-CapActionWindowContext {}
+    [IO.File]::WriteAllText($statePath,($state|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))
+    $plan.functionalWireState.sha256=(Get-FileHash -LiteralPath $statePath).Hash
+    $read=Get-CapWorkerWireBinding
+    if ($read.targetNodeId -cne $wire.targetNodeId) {throw 'Actual worker state reader changed target.'}
+    $results.Add(@{name='functional W1 actual worker accepts exact fresh planned state without image';passed=$true})
+    foreach ($fault in @('sourceHead','workerSha256','stubDaemonSha256','target','initial-edge')) {
+        $changed=$state|ConvertTo-Json -Depth 30|ConvertFrom-Json
+        switch ($fault) {
+            'target' {$changed.wireBinding.targetNodeId='foreign'}
+            'initial-edge' {$changed.expectedBefore.edges=1L}
+            default {$changed.$fault='foreign'}
+        }
+        [IO.File]::WriteAllText($statePath,($changed|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))
+        $plan.functionalWireState.sha256=(Get-FileHash -LiteralPath $statePath).Hash
+        Reject-FunctionalCase "rehashed state $fault" {Get-CapWorkerWireBinding}
+    }
+    & {
+        $actionSupplementMode=$false
+        $plan=$null
+        $visualIdentity=Get-CapGraphCodeWindowIdentity -SourceText ([IO.File]::ReadAllText($source)) `
+            -SourceCommit $functional.head -ExpectedDpi 96 -LogicalClientWH @(320,240)
+        $job=[pscustomobject]@{sceneAdapter='S_MATCHED_V12_DPI_V1'
+            captureContract=[pscustomobject]@{logicalClientWH=@(320L,240L);expectedWindowDpi=96L
+                windowIdentities=[pscustomobject]@{after=$visualIdentity}}}
+        $geometry=Get-CapMatchedWindowGeometry -Phase after
+        if (($geometry.PhysicalClientWH -join ',') -cne '320,240') {throw 'Default visual geometry changed.'}
+    }
+    $results.Add(@{name='visual worker geometry remains independent of an action plan';passed=$true})
+}
+if ($FunctionalOnly) {
+    $results=[Collections.Generic.List[object]]::new()
+    Invoke-FunctionalWireContracts
+    $report=[pscustomobject]@{suite='ActionWindowIdentityFunctional';executed=$results.Count
+        passed=$results.Count;failed=0;skipped=0;runtimeWindowEvidence=$false;cases=@($results)}
+    $report|ConvertTo-Json -Depth 15|Set-Content -LiteralPath (Join-Path $caseRoot 'report.json')
+    $report|Select-Object suite,executed,passed,failed,skipped|ConvertTo-Json -Compress
+    return
+}
 $sourceHead='a'*40
 $identity=Get-CapGraphCodeWindowIdentity `
     -SourceText ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures\c8r-window-after.zig'))) `
@@ -214,8 +334,9 @@ $reachedLaunch=$false
 }
 Assert-BindingCase $reachedLaunch 'Valid production startup did not reach the intercepted launcher.'
 $results.Add(@{name='actual production startup resolves binding before intercepted launcher';passed=$true})
+Invoke-FunctionalWireContracts
 $report=[ordered]@{suite='ActionWindowIdentity';executed=$results.Count;passed=$results.Count;failed=0;skipped=0
     productLaunches=0;providerLaunches=0;runtimeWindowEvidence=$false;cases=@($results)}
 $null=Write-BindingJson (Join-Path $caseRoot 'report.json') $report
 [pscustomobject]$report|Select-Object suite,executed,passed,failed,skipped|ConvertTo-Json -Compress
-if ($results.Count -ne 62) {throw "Unexpected binding contract count: $($results.Count)"}
+if ($results.Count -ne 84) {throw "Unexpected binding contract count: $($results.Count)"}

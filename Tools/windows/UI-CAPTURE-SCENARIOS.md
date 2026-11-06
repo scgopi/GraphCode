@@ -107,10 +107,10 @@ A failed precondition
 is a bounded tooling/setup blocker, never permission to retry a product action.
 No prior W1 setup exception is reconstructed by this dry run.
 
-`Tests\ActionWorkerImport.Tests.ps1` adds **18 separately counted contracts**
+`Tests\ActionWorkerImport.Tests.ps1` has **20 separately counted contracts**
 (including two actual production-entry dry runs and null/reset/path/hash/run/
 authority/deadline/replacement negatives). `ValidationRunner.Tests.ps1` requires
-all 18 with zero skips, in addition to the unchanged **182 default / 185
+all 20 with zero skips, in addition to the unchanged **182 default / 185
 real-zmx** UiCaptureDriver baseline. The new cases are not omitted or used to
 replace baseline cases.
 
@@ -120,21 +120,58 @@ bindings, source/hash/run/authority/deadline/replacement failures, actual
 production startup refusal before launch, and initial/placed identity guard
 drift with modeled metrics. Its accepted startup intercepts the launcher without
 starting a process; it is not native-window evidence. ValidationRunner requires
-all 57 with zero skips, alongside the 18 import and unchanged 182/185 baseline.
+all 84 with zero skips, alongside the 20 import and unchanged 182/185 baseline.
 The W1 targeting repair expands that window-binding suite to **62** contracts:
 five additional startup refusals require an explicit nonnull, source/hash-bound
-source/target plan before either the stub or app can launch.
+source/target plan before either the stub or app can launch. The functional-only
+Wire route adds 22 further contracts, for **84** current identity contracts.
 
 `Tests\ActionTopologyImport.Tests.ps1` adds **16 separately counted contracts**
 for production import, lexical top-level scope, exact topology copies, layout/
 session hash refusals, missing layouts, prepare-only manifests and invocation,
 default launcher reachability (intercepted without a process), invalid session
-inventories, and cleanup/idempotence with modeled launcher output. The 18 import
+inventories, and cleanup/idempotence with modeled launcher output. The import
 contracts also exercise all five qualified topology/seed preparation paths
 through the unmodified production entry dry run. ValidationRunner requires all
 16 with zero skips without replacing the existing suites or baseline cases.
 
 ### W1 target selection and native form observation
+
+The explicit `-FunctionalWireOnly` opt-in is available on
+`Prepare-FocusedUiCapture.ps1 -FocusedProfile PostFixCards -PlanOnly`,
+`Prepare-MatchedActionSupplement.ps1 -Group WireCompletion`, and
+`Invoke-MatchedActionSupplement.ps1` (including `-DryRun`). All three must agree;
+other action groups and image-manifest arguments are refused in this mode.
+Functional preparation also requires `-GraphCodeBuildSource` identifying the
+binary's actual build commit. A harness-only new head may reuse that binary
+only when its entire tracked `graphcode-windows` tree is identical; preparation
+and runtime both check that equivalence and retain the actual build commit,
+rather than claiming a new product build.
+It uses the same production Wire worker and locked native/semantic endpoint
+reader, Create correlation, edge readback, and held-process/job/EOF cleanup.
+It does not authorize screenshots or establish visual, glyph, higher-DPI, or
+whole-application parity.
+
+The functional plan binds a fresh owned scene-**state** plan, the exact source/
+target IDs and source files, worker and stub hashes, rather than inventing an
+existing image hash. This plan is explicitly not runtime evidence. A successful
+actual action separately records the owned process generations, UIA state,
+measured placement, locked endpoints, and correlated graph result.
+Its `S_FUNCTIONAL_W1_V1` contract derives frame identity from the current
+`MainWindow.zig`, measures the owned window's actual DPI and physical work area,
+and fits a preferred 1280-by-720 logical client within that measured area.
+After placement and on target reacquisition, DPI, source identity, frame and
+client bounds, and work area must remain unchanged. A too-small or changed
+window still fails normal visible-card/target admission; it is not resampled.
+The functional dry run records measurement **pending** until an owned product
+window exists, not a fabricated measured DPI.
+
+The default visual/matched-DPI route retains its existing image-manifest and
+DPI192/2880-by-1800-client/2906-by-1910-work-area guards unchanged. Choosing
+functional W1 does not lower those visual guards or authorize a capture
+campaign. Prepare canonical owned offline backend/peer inputs and a fresh
+current-controls 185-case report as usual; fixture compilation, injected DPI
+component models, and harmless dry-run custody are not live W1 acceptance.
 
 The prepared action plan includes `wireTargetBinding` for WireCompletion and
 FinalBoundedActions. It binds the owned project path, exact source and target

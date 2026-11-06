@@ -4279,9 +4279,92 @@ function Get-CapMatchedCapturePlan {
     }
 }
 
+function Test-CapFunctionalWireJob {
+    param([Parameter(Mandatory)]$Job,[string]$Group='WireCompletion')
+    $enabled=$Job.PSObject.Properties['functionalWireOnly'] -and $Job.functionalWireOnly -ceq $true
+    $adapter=if ($Job.PSObject.Properties['sceneAdapter']) {$Job.sceneAdapter} else {''}
+    if (-not $enabled -and $adapter -cne 'S_FUNCTIONAL_W1_V1') {return $false}
+    if (-not $enabled -or $adapter -cne 'S_FUNCTIONAL_W1_V1' -or $Group -cne 'WireCompletion') {
+        throw 'Functional Wire opt-in permits only W1/WireCompletion.'
+    }
+    Assert-CapDataRecord $Job.functionalWireContract @{schemaVersion=[long];scene=[string]
+        windowSourcePath=[string];windowSourceSha256=[string];placement=[string]
+        preferredLogicalClientWH=[array];pngAllowed=[bool];visualParityClaimed=[bool]
+        applicationSourceTree=[string]} 'Functional Wire contract'
+    $contract=$Job.functionalWireContract
+    if ($contract.schemaVersion -ne 1 -or $contract.scene -cne 's-goal-unwired-unselected' -or
+        $contract.placement -cne 'MEASURED_OWNED_WINDOW_FIT_WORKAREA' -or
+        ($contract.preferredLogicalClientWH -join ',') -cne '1280,720' -or
+        $contract.pngAllowed -cne $false -or $contract.visualParityClaimed -cne $false -or
+        $contract.windowSourceSha256 -cnotmatch '^[A-F0-9]{64}$' -or
+        $Job.head -cnotmatch '^[a-f0-9]{40}$' -or $Job.binaries.after.source -cne $Job.head -or
+        $Job.binaries.after.binaryBuiltAtSource -cnotmatch '^[a-f0-9]{40}$' -or
+        $contract.applicationSourceTree -cnotmatch '^[a-f0-9]{40}$') {
+        throw 'Functional Wire contract/source/no-image boundary differs.'
+    }
+    return $true
+}
+
+function Get-CapFunctionalWireStatePlan {
+    param([Parameter(Mandatory)]$WireBinding,[Parameter(Mandatory)][string]$SourceHead,
+        [Parameter(Mandatory)][string]$WorkerSha256,[Parameter(Mandatory)][string]$StubSha256)
+    return [pscustomobject][ordered]@{
+        schemaVersion=1L
+        evidenceMode='FRESH_OWNED_W1_STATE_PLAN_NOT_RUNTIME_EVIDENCE'
+        sourceHead=$SourceHead
+        workerSha256=$WorkerSha256
+        stubDaemonSha256=$StubSha256
+        wireBinding=$WireBinding
+        expectedBefore=[pscustomobject]@{cards=2L;edges=0L;sourceTitle='Wire source';targetTitle='Wire target'}
+        requiredOutcome='OWNED_LOCKED_EXACT_ENDPOINTS_BEFORE_CREATE_AND_CORRELATED_APPLIED_EDGE'
+        imageEvidence=$false
+        visualParityClaimed=$false
+    }
+}
+
+function Get-CapFunctionalWirePlacement {
+    param([Parameter(Mandatory)]$Identity,[Parameter(Mandatory)]$Metrics,
+        [Parameter(Mandatory)][int[]]$WorkArea)
+    if ($Identity.measurement -cne 'REQUIRED_AT_OWNED_WINDOW_STARTUP' -or
+        (Get-FileHash -LiteralPath $Identity.sourcePath -Algorithm SHA256).Hash -cne $Identity.sourceSha256 -or
+        $WorkArea.Count -ne 4 -or $WorkArea[2] -le $WorkArea[0] -or $WorkArea[3] -le $WorkArea[1]) {
+        throw 'Functional Wire source/work-area measurement differs.'
+    }
+    $sourceIdentity=Get-CapGraphCodeWindowIdentity -SourceText ([IO.File]::ReadAllText($Identity.sourcePath)) `
+        -SourceCommit $Identity.sourceCommit -ExpectedDpi $Metrics.Dpi -LogicalClientWH @(96,96)
+    $null=Assert-CapDpiWindowIdentity -Metrics $Metrics -Identity $sourceIdentity -Initial
+    $frame=@(($sourceIdentity.expectedAdjustedOuterWH[0]-$Metrics.Dpi),
+        ($sourceIdentity.expectedAdjustedOuterWH[1]-$Metrics.Dpi))
+    $client=@(
+        [long][Math]::Min([Math]::Round(1280.0*$Metrics.Dpi/96),$WorkArea[2]-$WorkArea[0]-$frame[0]),
+        [long][Math]::Min([Math]::Round(720.0*$Metrics.Dpi/96),$WorkArea[3]-$WorkArea[1]-$frame[1]))
+    if ($client[0] -le 0 -or $client[1] -le 0) {throw 'Functional Wire window cannot fit measured work area.'}
+    $outer=@(($client[0]+$frame[0]),($client[1]+$frame[1]))
+    $left=[long]($WorkArea[0]+[Math]::Floor(($WorkArea[2]-$WorkArea[0]-$outer[0])/2))
+    $top=[long]($WorkArea[1]+[Math]::Floor(($WorkArea[3]-$WorkArea[1]-$outer[1])/2))
+    $sourceIdentity.expectedPhysicalClientWH=$client
+    $sourceIdentity.expectedAdjustedOuterWH=$outer
+    return [pscustomobject]@{
+        evidenceMode='MEASURED_OWNED_WINDOW_DPI_AND_WORKAREA_NOT_VISUAL_PARITY'
+        Identity=$sourceIdentity;InitialMetrics=$Metrics;WorkArea=@($WorkArea)
+        Geometry=[pscustomobject]@{OuterBounds=@($left,$top,($left+$outer[0]),($top+$outer[1]))
+            OuterWH=$outer;PhysicalClientWH=$client;Dpi=[long]$Metrics.Dpi}
+    }
+}
+
 function Get-CapActionWindowBindings {
     param([Parameter(Mandatory)]$Job,
         [Parameter(Mandatory)][ValidateSet('WireCompletion','TerminalActions','FinalBoundedActions',IgnoreCase=$false)][string]$Group)
+    if (Test-CapFunctionalWireJob -Job $Job -Group $Group) {
+        return [pscustomobject]@{
+            actionPhase='wire-completion';capturePhase='after'
+            sceneNames=@('s-goal-unwired-unselected');actionIds=@('W1');sourceCommit=$Job.head
+            identity=[pscustomobject]@{sourceContract='GRAPHCODE_MAIN_WINDOW_V1';sourceCommit=$Job.head
+                sourcePath=$Job.functionalWireContract.windowSourcePath
+                sourceSha256=$Job.functionalWireContract.windowSourceSha256
+                measurement='REQUIRED_AT_OWNED_WINDOW_STARTUP'}
+        }
+    }
     if ($Job.sceneAdapter -cne 'S_MATCHED_V12_DPI_V1') {
         throw 'Action window binding requires the matched DPI adapter.'
     }
@@ -6662,6 +6745,7 @@ function Assert-CapNoWorkerTransientArtifacts {
 }
 
 Export-ModuleMember -Function @(
+    'Test-CapFunctionalWireJob','Get-CapFunctionalWireStatePlan','Get-CapFunctionalWirePlacement',
     'Get-UiaReadonlyEndpointsDecision','Read-UiaReadonlyEdgeEndpoints',
     'Get-CapWireTargetBinding','Assert-CapWireTargetBinding','Get-CapWireTargetObservation',
     'Resolve-CapOwnedSheet','Get-CapOwnedWindowHierarchy','Assert-CapWireTargetStable','Get-CapWireAlgorithmPreflight',

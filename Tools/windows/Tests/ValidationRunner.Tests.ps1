@@ -6059,9 +6059,9 @@ $actionImportSummaries = @($actionImportOutput | Where-Object {
   })
 if ($actionImportSummaries.Count -ne 1) { throw "RED: action import structured count missing or duplicated" }
 $actionImportSummary = ConvertFrom-Json $actionImportSummaries[0]
-if ($actionImportSummary.executed -ne 18 -or $actionImportSummary.passed -ne 18 -or
+if ($actionImportSummary.executed -ne 20 -or $actionImportSummary.passed -ne 20 -or
     $actionImportSummary.failed -ne 0 -or $actionImportSummary.skipped -ne 0) {
-  throw "RED: action import requires all 18 contracts without skips"
+  throw "RED: action import requires all 20 contracts without skips"
 }
 $actionBindingOutput = @(& $pwsh -NoProfile -File (Join-Path $PSScriptRoot "ActionWindowIdentity.Tests.ps1"))
 $actionBindingOutput | ForEach-Object { Write-Host $_ }
@@ -6071,9 +6071,9 @@ $actionBindingSummaries=@($actionBindingOutput | Where-Object {
   })
 if ($actionBindingSummaries.Count -ne 1) {throw "RED: action binding structured count missing or duplicated"}
 $actionBindingSummary=ConvertFrom-Json $actionBindingSummaries[0]
-if ($actionBindingSummary.executed -ne 62 -or $actionBindingSummary.passed -ne 62 -or
+if ($actionBindingSummary.executed -ne 84 -or $actionBindingSummary.passed -ne 84 -or
     $actionBindingSummary.failed -ne 0 -or $actionBindingSummary.skipped -ne 0) {
-  throw "RED: action window binding requires all 62 contracts without skips"
+  throw "RED: action window binding requires all 84 contracts without skips"
 }
 $actionTopologyOutput=@(& $pwsh -NoProfile -File (Join-Path $PSScriptRoot "ActionTopologyImport.Tests.ps1"))
 $actionTopologyOutput | ForEach-Object {Write-Host $_}

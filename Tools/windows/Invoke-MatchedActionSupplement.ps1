@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory)][string]$OwnedRoot,
     [Parameter(Mandatory)][string]$ActionPlanPath,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ActionPlanSha256,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$FunctionalWireOnly
 )
 $ErrorActionPreference='Stop'
 $root=[IO.Path]::GetFullPath($OwnedRoot).TrimEnd('\')
@@ -14,6 +15,12 @@ if (-not $planPath.StartsWith($root + '\',[StringComparison]::OrdinalIgnoreCase)
     throw 'Action supplement plan path or hash mismatch.'
 }
 $plan=Get-Content $planPath -Raw | ConvertFrom-Json -DateKind String
+$functional=[bool]($plan.PSObject.Properties['functionalWireOnly'] -and $plan.functionalWireOnly)
+if ($functional -ne $FunctionalWireOnly.IsPresent -or ($functional -and
+    ($plan.group -cne 'WireCompletion' -or $plan.maximumResultPngs -ne 0 -or
+        @($plan.imageBindings.PSObject.Properties).Count -ne 0))) {
+    throw 'Functional Wire execution requires the explicit W1-only no-image opt-in.'
+}
 if ($plan.status -cne 'PREPARED_NO_AUTHORITY' -or $plan.pngArtifacts -ne 0 -or
     $plan.processLaunches -ne 0 -or @(Get-ChildItem $root -Recurse -File -Filter '*.png').Count -ne 0) {
     throw 'Action supplement plan no-authority boundary differs.'
@@ -29,6 +36,8 @@ $workerPath=Join-Path $repositoryRoot 'Tools\windows\Invoke-UiCaptureWorker.ps1'
 $stubPath=Join-Path $repositoryRoot 'Tools\windows\Stub-Daemon.ps1'
 $actionRunnerPath=$PSCommandPath
 $actionSeedHelperPath=Join-Path $repositoryRoot 'Tools\windows\Start-MatchedActionSessions.ps1'
+$sceneInput=if ($functional) {@($plan.functionalWireState.path,$plan.functionalWireState.sha256)}
+    else {@($plan.existingSceneManifestPath,$plan.existingSceneManifestSha256)}
 foreach ($binding in @(
     @($modulePath,$plan.moduleSha256),
     @($workerPath,$plan.workerSha256),
@@ -37,7 +46,7 @@ foreach ($binding in @(
     @($actionSeedHelperPath,$plan.actionSeedHelperSha256),
     @($plan.jobPath,$plan.jobSha256),
     @($plan.preflightReceiptPath,$plan.preflightReceiptSha256),
-    @($plan.existingSceneManifestPath,$plan.existingSceneManifestSha256)
+    @($sceneInput[0],$sceneInput[1])
 )) {
     if (-not (Test-Path $binding[0] -PathType Leaf) -or
         (Get-FileHash $binding[0] -Algorithm SHA256).Hash -ne [string]$binding[1]) {
@@ -88,7 +97,10 @@ $authorizationHandle=Open-CapActionAuthorization -Path $authorizationPath -Sha25
 $selfProcess=$null
 try {
 $job=Get-Content $plan.jobPath -Raw | ConvertFrom-Json -DateKind String
-if (-not $DryRun) {$matchedCapturePlan=Get-CapMatchedCapturePlan -Job $job}
+if ((Test-CapFunctionalWireJob -Job $job -Group $plan.group) -ne $functional) {
+    throw 'Functional Wire job and explicit execution opt-in differ.'
+}
+if (-not $DryRun -and -not $functional) {$matchedCapturePlan=Get-CapMatchedCapturePlan -Job $job}
 $fixturePath=Join-Path $root 'fixtures\fixture.json'
 $peerScript=Join-Path $root 'inputs\offline-peer-source.ps1'
 $runDirectory=$actionRunDirectory
@@ -194,9 +206,9 @@ try {
             geometry=$null
             preconditionsEvaluated=$true
         }
-        if (-not (Test-CapMatchedDpiAdapter)) {throw 'Action dry run requires the production matched DPI contract.'}
+        if (-not (Test-CapMatchedDpiAdapter) -and -not $functional) {throw 'Action dry run requires the production matched DPI contract.'}
         $dryRunProof.geometry=$windowPreflight[0].geometry
-    } else {
+    } elseif (-not $functional) {
         $matchedFixture=Get-Content $fixturePath -Raw | ConvertFrom-Json -DateKind String
         Initialize-CapMatchedWorktrees -Fixture $matchedFixture
     }
@@ -216,8 +228,10 @@ try {
     } elseif ($plan.group -ceq 'WireCompletion') {
         $receipt=Invoke-CapWireCompletionSupplement -StubDaemonPath $stubPath
         $receipt | Add-Member -NotePropertyName actionIds -NotePropertyValue @('W1')
-        $receipt | Add-Member -NotePropertyName imageBindingSha256 `
-            -NotePropertyValue ([string]$plan.imageBindings.'s-goal-unwired-unselected')
+        if (-not $functional) {
+            $receipt | Add-Member -NotePropertyName imageBindingSha256 `
+                -NotePropertyValue ([string]$plan.imageBindings.'s-goal-unwired-unselected')
+        }
         $actionSupplementReceipts.Add($receipt)
     } else {
         $wireReceipt=Invoke-CapWireCompletionSupplement -StubDaemonPath $stubPath
@@ -289,7 +303,8 @@ $manifest=[ordered]@{
     sourceTree=$tree
     actionPlanSha256=$ActionPlanSha256.ToUpperInvariant()
     authorizationSha256=$authorizationHandle.Sha256
-    executionMode=$(if ($DryRun) {'DRY_RUN_NO_AUTHORITY'} else {'MATCHED_ACTION_SUPPLEMENT'})
+    executionMode=$(if ($DryRun) {'DRY_RUN_NO_AUTHORITY'}
+        elseif ($functional) {'FUNCTIONAL_W1_STATE_ONLY_NOT_VISUAL_PARITY'} else {'MATCHED_ACTION_SUPPLEMENT'})
     dryRun=$dryRunProof
     startedUtc=$startedUtc.ToString('o')
     finishedUtc=[DateTime]::UtcNow.ToString('o')
