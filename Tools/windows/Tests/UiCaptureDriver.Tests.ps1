@@ -5421,7 +5421,7 @@ function Invoke-CapReceiptReadControl {
             [IO.File]::WriteAllText($temporary, (ConvertTo-Json $PublishValue -Compress), [Text.UTF8Encoding]::new($false))
             $publishDeadline=[DateTime]::UtcNow.AddSeconds(2)
             while ($true) {
-                try {[IO.File]::Move($temporary,$Path,$true);break}
+                try {[IO.File]::Replace($temporary,$Path,[System.Management.Automation.Language.NullString]::Value);break}
                 catch [UnauthorizedAccessException] {
                     if ([DateTime]::UtcNow -ge $publishDeadline) {throw}
                     Start-Sleep -Milliseconds 25
@@ -5489,7 +5489,13 @@ function Invoke-CapReceiptIoCase {
             }
             'partial-json' {
                 [IO.File]::WriteAllText($path, '{', [Text.UTF8Encoding]::new($false))
-                $read = Invoke-CapReceiptReadControl $run $path $deadline -PublishValue $value
+                $snapshot = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+                    ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                try {
+                    $read = Invoke-CapReceiptReadControl $run $path $deadline -PublishValue $value
+                    Assert-CapTest ($snapshot.ReadByte() -eq 123 -and $snapshot.ReadByte() -eq -1) `
+                        'Atomic publication did not preserve the held partial receipt snapshot.'
+                } finally { $snapshot.Dispose() }
                 if (-not $read.Outcome.Succeeded) { throw $read.Outcome.Failure }
                 Assert-CapTest (-not $read.CompletedBeforeRelease -and $read.Outcome.Record.creationFileTimeUtc -eq 100000000L) `
                     'A partial JSON receipt was accepted before complete atomic publication.'
