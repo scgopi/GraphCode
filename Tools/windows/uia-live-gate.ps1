@@ -229,8 +229,8 @@ function Read-UiaTerminalComputedMarker([string] $text, [string] $nonce, [long] 
 }
 
 function Assert-UiaRestorationPeerCapability {
-  # Filled only during coordinated intake of the natively qualified shared source.
-  $qualifiedPeerSourceSha256 = ""
+  # Qualified observer-only M3 source intake; this is not M2 native evidence.
+  $qualifiedPeerSourceSha256 = "B499EA0FBECC7B8CE17DBAD853DE17C56281DA1768167262700B2ABDCD391ABF"
   Require ($qualifiedPeerSourceSha256 -cmatch '^[0-9A-F]{64}$') `
     "M2 preflight refused before launch: qualified shared pipe-peer source intake is pending"
   $module = Join-Path $PSScriptRoot "UiCaptureDriver.psm1"

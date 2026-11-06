@@ -319,12 +319,14 @@ Test-Route "canonical opt-in dispatch" {
     $dispatch[0].Extent.StartOffset -lt $ast.Extent.Text.IndexOf('$oldZmx =')) `
     "real opt-in must return before any default fixture environment or PID-reopen launch"
 }
-Test-Route "unqualified peer refuses before resources" {
+Test-Route "unqualified peer bytes refuse before resources" {
+  function Join-Path($Path, $ChildPath) { return "HEADLESS_MODULE_PATH" }
+  function Get-FileHash($LiteralPath, $Algorithm) { return @{ Hash = "0" * 64 } }
   function New-UiaRestorationState { throw "UNEXPECTED_RESOURCE_CREATION" }
   $failure = $null
   try { Invoke-UiaRestoredTerminalRoute "shell" "daemon" "cli" "zmx" "root" } catch { $failure = $_ }
-  Assert-Contract ($failure.Exception.Message.Contains("qualified shared pipe-peer source intake is pending")) `
-    "unqualified shared source must refuse before creating resources"
+  Assert-Contract ($failure.Exception.Message.Contains("shared pipe-peer source differs from its qualified intake")) `
+    "unqualified shared source bytes must still refuse before creating resources: $failure"
 }
 Test-Route "work deadline preserves reserve" {
   $state = @{ clock = @{ ElapsedMilliseconds = 1110000L } }

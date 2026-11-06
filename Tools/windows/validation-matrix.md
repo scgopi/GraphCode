@@ -866,13 +866,26 @@ shell PIDs, or nonce output on another pane. The opt-in
 `-RestoredTerminalInputOnly` route now calls these guards, with 25 additional
 mock/source/managed-file adapter cases in that same headless entry point.
 
-**Preflight remains refused:** `Assert-UiaRestorationPeerCapability` has no
-qualified source hash until coordinated intake of the shared read-only pipe-peer
-helper after its native contracts pass. There is no command-line waiver.
-Intake must set the hash of the qualified `UiCaptureDriver.psm1`; the route then
-checks those source bytes, requires a fresh helper load, and requires the actual
-`PipeServerProcessId(SafePipeHandle)` method. Headless orchestration mocks that
-boundary only in tests. No native restoration result is claimed.
+**Qualified observer source intake, not M2 native qualification:**
+`Assert-UiaRestorationPeerCapability` binds `UiCaptureDriver.psm1` to SHA-256
+`B499EA0FBECC7B8CE17DBAD853DE17C56281DA1768167262700B2ABDCD391ABF`.
+The minimal source-only intake is M3's `df0a80cc`, `2379a614`, `8aec6ba1`,
+and `d621c494`, not its App/form changes or built artifacts. Preflight checks
+those source bytes, requires a fresh helper load, and requires the actual
+`PipeServerProcessId(SafePipeHandle)` method. Different bytes still refuse
+before resource creation; there is no command-line waiver.
+
+The coordinator qualified M3 source `d621c4948b5b5ee2172e4ab9ae6e8c9db9bf6857`
+with its actual All-five receipt at `D:\np5b\s\report.json`, SHA-256
+`217703BE1ED8FFA0DE346EC062BB052DF21A30C04F2104384CEFC79E58361F4C`.
+Its terminal receipt hash was
+`09A0DC3A9B54F2B95EFDC488E64CC3144D08372CD3A722497FACEA0834ED2AD7`;
+elapsed 3.443 seconds, all six cleanup booleans true, original held child PID
+27920/generation 134384774974541102 matched both kernel queries, with three
+matched payload bytes and preserved nonpipe error 6. This is the original
+**M3 tuple**, not a rerun or M2 app/provider/daemon qualification. The earlier
+`np5`/`8aec6ba1` failure remains failed. The imported test source hash is
+`0328888460DB9F6E859C82C4B12D93A2DE15AA5DE1A6D2B1E1B02F309B01D9DF`.
 
 The normal default UIA gate sets synthetic fixture and
 connection-failure flags and uses its identity-file/PID-reopen launcher. It
@@ -908,8 +921,8 @@ must appear on that provider and not the other one. Printed PIDs are data
 witnesses, never process-control authority. The read-only peer query proves
 only the observer connection's server, not the shell's separate pipe handle.
 
-Coordinator/executor invocation **after** qualified source intake, source/binary
-admission and a serialized native lane (do not run while preflight is refused):
+Coordinator/executor invocation **after** own source-bound guard/build custody,
+source/binary admission and a serialized native lane:
 
 ```powershell
 pwsh -NoProfile -File Tools\windows\uia-live-gate.ps1 `
