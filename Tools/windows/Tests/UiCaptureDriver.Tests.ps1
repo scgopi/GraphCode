@@ -13,6 +13,8 @@ param(
     [switch]$ActionBudgetContractOnly,
     [switch]$PreflightReportContractOnly,
     [switch]$NativeBindingsContractOnly,
+    [switch]$NativePipePeerContractOnly,
+    [ValidateSet('All','SourceOnly')][string]$NativePipePeerCase = 'All',
     [ValidateSet('All','Accepted')][string]$NativeBindingCase = 'All',
     [switch]$SelectorRefusalContractOnly,
     [switch]$IdentityContractOnly,
@@ -7618,6 +7620,177 @@ function Invoke-CapIdentityContracts {
         Assert-CapTest ($details.Count -eq 3 -and @(Get-CapPendingLaunches).Count -eq 0) 'Synthetic-only pending test records were not removed.'
         return @{ cases = @($details); processStarts = 0; scope = 'Actual failed-launch handler and rollback with controlled wrappers; no target' }
     }
+}
+
+if ($NativePipePeerContractOnly) {
+    $expectedNames = @(
+        'pipe peer helper exposes only a safe pipe handle query'
+        'pipe peer native source preserves error and nonzero guards'
+        'pipe peer rejects null invalid and disposed handles before native access'
+    )
+    if ($NativePipePeerCase -ceq 'All') {
+        $expectedNames += @(
+            'pipe peer identifies the actual connected owned server within one deadline'
+            'pipe peer preserves the kernel error for a nonpipe handle'
+        )
+    }
+
+    Invoke-CapTest 'pipe peer helper exposes only a safe pipe handle query' {
+        $method = [CapNative].GetMethod('PipeServerProcessId', [Reflection.BindingFlags]'Public,Static')
+        Assert-CapTest ($null -ne $method) 'Missing read-only pipe peer helper.'
+        $parameters = $method.GetParameters()
+        Assert-CapTest ($parameters.Count -eq 1 -and
+            $parameters[0].ParameterType -eq [Microsoft.Win32.SafeHandles.SafePipeHandle] -and
+            $method.ReturnType -eq [int]) 'Pipe peer helper must take a SafePipeHandle and return a PID only.'
+        return @{ parameters = 1; returns = 'System.Int32'; nativeCalls = 0 }
+    }
+
+    Invoke-CapTest 'pipe peer native source preserves error and nonzero guards' {
+        $source = Get-Content -LiteralPath $modulePath -Raw
+        $declaration = [regex]::Matches($source,
+            '(?s)\[DllImport\("kernel32\.dll", SetLastError=true\)\]\s*private static extern bool GetNamedPipeServerProcessId\(Microsoft\.Win32\.SafeHandles\.SafePipeHandle pipe, out uint processId\);')
+        $methods = [regex]::Matches($source,
+            '(?s)public static int PipeServerProcessId\(Microsoft\.Win32\.SafeHandles\.SafePipeHandle pipe\) \{(?<body>.*?)\n  \}')
+        Assert-CapTest ($declaration.Count -eq 1 -and $methods.Count -eq 1) 'Expected exactly one safe-handle kernel declaration and public query.'
+        $body = $methods[0].Groups['body'].Value
+        $nullGuard = $body.IndexOf('pipe == null', [StringComparison]::Ordinal)
+        $closedGuard = $body.IndexOf('pipe.IsClosed', [StringComparison]::Ordinal)
+        $invalidGuard = $body.IndexOf('pipe.IsInvalid', [StringComparison]::Ordinal)
+        $query = $body.IndexOf('GetNamedPipeServerProcessId(pipe, out processId)', [StringComparison]::Ordinal)
+        Assert-CapTest ($nullGuard -ge 0 -and $closedGuard -gt $nullGuard -and
+            $invalidGuard -gt $closedGuard -and $query -gt $invalidGuard -and
+            $body.Contains('throw new Win32Exception(Marshal.GetLastWin32Error())') -and
+            $body.Contains('if (processId == 0) throw new InvalidOperationException(') -and
+            $body.Contains('return checked((int)processId);') -and
+            -not $body.Contains('DangerousGetHandle') -and
+            -not $body.Contains('OpenProcess') -and -not $body.Contains('CloseHandle')) `
+            'Pipe peer query lost guard ordering, kernel error, zero refusal or read-only handle ownership.'
+        Assert-CapTest ($source.Contains('[Microsoft.Win32.SafeHandles.SafePipeHandle].Assembly.Location')) `
+            'Native helper compilation must reference the actual SafePipeHandle assembly.'
+        return @{ declarations = 1; nativeCalls = 0; processControlCalls = 0 }
+    }
+
+    Invoke-CapTest 'pipe peer rejects null invalid and disposed handles before native access' {
+        $zero = [Microsoft.Win32.SafeHandles.SafePipeHandle]::new([IntPtr]::Zero, $false)
+        $minusOne = [Microsoft.Win32.SafeHandles.SafePipeHandle]::new([IntPtr]::new(-1), $false)
+        $disposed = [Microsoft.Win32.SafeHandles.SafePipeHandle]::new([IntPtr]::new(-2), $false)
+        $disposed.Dispose()
+        try {
+            $cases = @(
+                @{ handle = $null; expected = [ArgumentNullException] },
+                @{ handle = $zero; expected = [ArgumentException] },
+                @{ handle = $minusOne; expected = [ArgumentException] },
+                @{ handle = $disposed; expected = [ObjectDisposedException] }
+            )
+            $refused = 0
+            foreach ($case in $cases) {
+                $failure = $null
+                try { $null = [CapNative]::PipeServerProcessId($case.handle) } catch {
+                    $failure = $_.Exception
+                    while ($failure.InnerException) { $failure = $failure.InnerException }
+                }
+                Assert-CapTest ($null -ne $failure -and $failure.GetType() -eq $case.expected) `
+                    'Null, invalid or disposed pipe handle did not fail before native access.'
+                $refused++
+            }
+            return @{ refused = $refused; nativeCalls = 0; handlesOwned = 0 }
+        } finally {
+            $zero.Dispose()
+            $minusOne.Dispose()
+            $disposed.Dispose()
+        }
+    }
+
+    if ($NativePipePeerCase -ceq 'All') {
+        Invoke-CapTest 'pipe peer identifies the actual connected owned server within one deadline' {
+            $pipeName = 'graphcode-peer-contract-' + [guid]::NewGuid().ToString('N')
+            $limit = [Threading.CancellationTokenSource]::new(5000)
+            $server = $null
+            $client = $null
+            $waiting = $null
+            $primary = $null
+            try {
+                $server = [IO.Pipes.NamedPipeServerStream]::new($pipeName, [IO.Pipes.PipeDirection]::InOut,
+                    1, [IO.Pipes.PipeTransmissionMode]::Byte,
+                    ([IO.Pipes.PipeOptions]::Asynchronous -bor [IO.Pipes.PipeOptions]::CurrentUserOnly))
+                $client = [IO.Pipes.NamedPipeClientStream]::new('.', $pipeName,
+                    [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
+                $waiting = $server.WaitForConnectionAsync($limit.Token)
+                $null = $client.ConnectAsync($limit.Token).GetAwaiter().GetResult()
+                $null = $waiting.GetAwaiter().GetResult()
+                $before = [CapNative]::PipeServerProcessId($client.SafePipeHandle)
+                Assert-CapTest ($before -gt 0 -and $before -eq [Environment]::ProcessId) `
+                    'Kernel peer differs from the known owned same-process server.'
+                $payload = [byte[]]@(11, 22, 33)
+                $null = $client.WriteAsync($payload, 0, $payload.Length, $limit.Token).GetAwaiter().GetResult()
+                $read = [byte[]]::new($payload.Length)
+                $offset = 0
+                while ($offset -lt $read.Length) {
+                    $count = $server.ReadAsync($read, $offset, ($read.Length - $offset), $limit.Token).GetAwaiter().GetResult()
+                    Assert-CapTest ($count -gt 0) 'Owned pipe ended before its complete payload.'
+                    $offset += $count
+                }
+                $after = [CapNative]::PipeServerProcessId($client.SafePipeHandle)
+                Assert-CapTest ($after -eq $before -and ($read -join ',') -ceq ($payload -join ',')) `
+                    'Kernel peer or actual owned pipe payload changed during the live connection.'
+                return @{ before = $before; after = $after; payloadBytes = $offset
+                    scope = 'ACTUAL_OBSERVER_CONNECTION_ONLY_NOT_ANOTHER_APP_CONNECTION' }
+            } catch {
+                $primary = $_.Exception
+                throw
+            } finally {
+                $limit.Cancel()
+                if ($null -ne $client) { $client.Dispose() }
+                if ($null -ne $server) { $server.Dispose() }
+                try {
+                    if ($null -ne $waiting) {
+                        try { $null = $waiting.GetAwaiter().GetResult() } catch {
+                            $cause = $_.Exception
+                            while ($cause.InnerException) { $cause = $cause.InnerException }
+                            if ($cause -isnot [OperationCanceledException] -or -not $limit.IsCancellationRequested) {
+                                if ($null -eq $primary) { throw }
+                                $primary.Data['CapPipeWaitCleanupFailure'] = $cause.ToString()
+                            }
+                        }
+                    }
+                } finally { $limit.Dispose() }
+            }
+        }
+
+        Invoke-CapTest 'pipe peer preserves the kernel error for a nonpipe handle' {
+            # -2 is the current-thread pseudo-handle, never a pipe; this wrapper owns nothing.
+            $notPipe = [Microsoft.Win32.SafeHandles.SafePipeHandle]::new([IntPtr]::new(-2), $false)
+            try {
+                $failure = $null
+                try { $null = [CapNative]::PipeServerProcessId($notPipe) } catch {
+                    $failure = $_.Exception
+                    while ($failure.InnerException) { $failure = $failure.InnerException }
+                }
+                Assert-CapTest ($failure -is [ComponentModel.Win32Exception] -and $failure.NativeErrorCode -eq 6) `
+                    'Expected the real ERROR_INVALID_HANDLE from a nonpipe handle.'
+                return @{ nativeErrorCode = $failure.NativeErrorCode; handlesOwned = 0 }
+            } finally { $notPipe.Dispose() }
+        }
+    }
+
+    foreach ($path in $sourceHashesBefore.Keys) {
+        Assert-CapTest ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ceq $sourceHashesBefore[$path]) `
+            "Source changed during pipe peer contracts: $path"
+    }
+    $names = @($results | ForEach-Object { $_.name })
+    Assert-CapTest ($names.Count -eq $expectedNames.Count -and
+        ($names -join '|') -ceq ($expectedNames -join '|') -and
+        @($names | Sort-Object -Unique).Count -eq $expectedNames.Count) 'Pipe peer literal case registry differs.'
+    $passed = @($results | Where-Object passed -EQ $true).Count
+    $failed = @($results | Where-Object passed -EQ $false).Count
+    $report = [pscustomobject]@{ suite = 'UiCaptureNativePipePeerContracts'; executed = $results.Count
+        passed = $passed; failed = $failed; cases = @($results); sourceHashesBeforeImport = $sourceHashesBefore
+        mode = if ($NativePipePeerCase -ceq 'SourceOnly') { 'PURE_SOURCE_AND_MANAGED_GUARDS_NO_KERNEL_PIPE_QUERY' }
+            else { 'OWNED_SAME_PROCESS_PIPE_NO_GUI_NO_PROCESS_CONTROL' } }
+    $report | ConvertTo-Json -Depth 25 | Set-Content -LiteralPath (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
+    $report | Select-Object suite,executed,passed,failed | ConvertTo-Json -Compress
+    if ($results.Count -ne $expectedNames.Count -or $passed -ne $expectedNames.Count -or $failed -ne 0) { exit 1 }
+    exit 0
 }
 
 if ($IdentityContractOnly) {
