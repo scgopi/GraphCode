@@ -165,6 +165,59 @@ function Require([bool] $condition, [string] $message) {
   if (-not $condition) { throw $message }
 }
 
+# Observation guards only: roster order must come from the persisted layout,
+# never a screen-coordinate sort or a focus-setting helper.
+function Assert-UiaUnrepairedTerminalFocus($snapshot, [int] $processId, [string] $selectedIdentity) {
+  Require ($processId -gt 0 -and -not [string]::IsNullOrWhiteSpace($selectedIdentity)) `
+    "Unrepaired terminal input requires an exact current pane identity"
+  Require ($snapshot.foreground -is [bool] -and $snapshot.foreground -and
+    $snapshot.focusedProcessId -eq $processId -and
+    $snapshot.focusedIdentity -ceq $selectedIdentity) `
+    "Unrepaired terminal input refused: the selected owned pane is not the actual foreground focus"
+  $panes = @($snapshot.panes)
+  Require ($panes.Count -ge 2) "Unrepaired terminal input requires a nontrivial pane topology"
+  $identities = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  foreach ($pane in $panes) {
+    Require (-not [string]::IsNullOrWhiteSpace($pane.identity) -and
+      $identities.Add([string]$pane.identity) -and $pane.processId -eq $processId -and
+      $pane.parentProcessId -eq $processId -and
+      $pane.visible -is [bool] -and $pane.visible -and
+      $pane.focused -is [bool]) "Unrepaired terminal input refused: invalid or foreign pane topology"
+  }
+  Require ($panes[0].identity -cne $selectedIdentity) `
+    "Unrepaired terminal input requires a nonzero selected pane"
+  $selected = @($panes | Where-Object { $_.identity -ceq $selectedIdentity })
+  $focused = @($panes | Where-Object { $_.focused })
+  Require ($selected.Count -eq 1 -and $selected[0].focused -and $focused.Count -eq 1) `
+    "Unrepaired terminal input refused: selected pane does not exclusively own keyboard focus"
+}
+
+function Assert-UiaTerminalChallengeOutput(
+  [string[]] $before, [string[]] $after, [int] $selectedIndex,
+  [string] $nonce, [long] $expectedArithmetic
+) {
+  Require ($before.Count -ge 2 -and $after.Count -eq $before.Count -and
+    $selectedIndex -gt 0 -and $selectedIndex -lt $before.Count -and
+    $nonce -cmatch '^[0-9a-f]{24}$') "Terminal challenge requires an exact nonzero pane and fresh nonce"
+  $prefix = "GC_${nonce}_"
+  Require (@($before | Where-Object { $_.Contains($prefix) }).Count -eq 0) `
+    "Terminal challenge nonce was already present before input"
+  for ($index = 0; $index -lt $after.Count; $index++) {
+    if ($index -ne $selectedIndex) {
+      Require (-not $after[$index].Contains($prefix)) "Terminal challenge reached a nonselected pane"
+    }
+  }
+  $matches = [regex]::Matches($after[$selectedIndex],
+    '(?m)^' + [regex]::Escape($prefix) + '(?<pid>[1-9][0-9]*)_(?<value>[0-9]+)\s*$')
+  Require ($matches.Count -eq 1) "Terminal challenge did not publish exactly one shell-computed output line"
+  $shellProcessId = 0L
+  $arithmetic = 0L
+  Require ([long]::TryParse($matches[0].Groups["pid"].Value, [ref]$shellProcessId) -and
+    [long]::TryParse($matches[0].Groups["value"].Value, [ref]$arithmetic) -and
+    $arithmetic -eq $expectedArithmetic) "Terminal challenge shell PID or arithmetic is invalid"
+  return $shellProcessId
+}
+
 function Wait-UiaUnwiredRecoveryVisibility($root, $rawWalker, $process, $wire, $mark) {
   $wireId = [string]$wire.Current.AutomationId
   $markId = [string]$mark.Current.AutomationId

@@ -854,6 +854,43 @@ so the two run in parallel.
 - Runs for any other event use a unique concurrency group, so they are never
   cancelled.
 
+## Automatic selected-pane restoration qualification
+
+The observation guards `Assert-UiaUnrepairedTerminalFocus` and
+`Assert-UiaTerminalChallengeOutput` in `uia-live-gate.ps1` have headless contracts
+in the existing `Tests\TerminalGate.Tests.ps1` entry point (20 executed cases).
+They reject absent, duplicate, foreign, background, stale, or nonexclusive focus,
+require a nonzero selected pane in a **persisted-layout-ordered** roster, and
+reject stale nonces, command echoes, duplicate output, wrong arithmetic, invalid
+shell PIDs, or nonce output on another pane. These are assertion primitives, not
+a native qualification route; no existing gate calls them to inject input.
+
+**Unsupported prerequisite:** the normal UIA gate sets synthetic fixture and
+connection-failure flags and uses its identity-file/PID-reopen launcher. It
+cannot establish real-daemon/session restoration. A future opt-in route must use
+`ShellProcessOwnership.psm1` suspended launches and retained jobs, its own
+profile/support/temp, and no UIA fixture flags. It must bind the production
+daemon peer and current provider roster to the persisted pane/session before
+using these assertions. This does not require a new product UIA schema: launch
+two real pinned zmx sessions with distinct fresh shell-computed nonce/PID/arithmetic
+markers, map each owned provider's actual TextPattern readback to its unique
+session marker, and correlate the normally persisted selected pane ID with its
+actual seed session name. Geometry order and generic provider IDs are not that
+mapping. The printed shell PID is a data witness, never process-control authority.
+A separate observer pipe connection's server PID does
+not attest the shell's connection. The shared read-only pipe-peer helper must
+be natively qualified before intake; these guards do not substitute for it.
+
+There is **no canonical native M2 command yet**. The missing adapter must perform
+normal first-window selection/persistence, real close/reopen without destroying
+the session, fresh provider/session binding, then read actual focus before any
+input. It must use existing guarded native input APIs without SetFocus, pane
+clicks, focus setters, or forced foreground recovery; respect the original
+20-minute case budget and 90-second cleanup reserve; retain independent raw
+stdout/stderr; and prove zero owned survivors or retain UNKNOWN lifetime
+authority. The shell-computed nonce/PID/arithmetic line must appear only in the
+expected pane. A headless contract pass establishes none of those native facts.
+
 ## Winghostty fork
 
 `Tools/windows/bootstrap.ps1` checks out the public provider at the exact commit in

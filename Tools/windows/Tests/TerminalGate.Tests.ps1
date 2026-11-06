@@ -14,7 +14,8 @@ if ($List) {
     "provider-pins",
     "graphcode-owned-host",
     "persistent-zmx",
-    "lifecycle-contract"
+    "lifecycle-contract",
+    "unrepaired-focus-guards"
   )
   exit 0
 }
@@ -181,5 +182,119 @@ foreach ($token in @(
     "validation runner is missing real-provider gate handling: $token"
 }
 
+$gatePath = Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1"
+$tokens = $null
+$parseErrors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($gatePath, [ref]$tokens, [ref]$parseErrors)
+Assert-Contract ($parseErrors.Count -eq 0) "UIA gate must parse before extracting headless guards"
+foreach ($name in @("Require", "Assert-UiaUnrepairedTerminalFocus", "Assert-UiaTerminalChallengeOutput")) {
+  $functions = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+  }, $true))
+  Assert-Contract ($functions.Count -eq 1) "expected one source-bound guard: $name"
+  . ([scriptblock]::Create($functions[0].Extent.Text))
+}
+
+$script:guardCases = 0
+function Test-Guard([string] $name, [scriptblock] $action, [string] $expectedError = "") {
+  $failure = $null
+  try { $null = & $action } catch { $failure = $_ }
+  if ($expectedError) {
+    Assert-Contract ($null -ne $failure -and $failure.Exception.Message.Contains($expectedError)) `
+      "$name did not reject for the expected reason: $failure"
+  } else {
+    Assert-Contract ($null -eq $failure) "$name unexpectedly failed: $failure"
+  }
+  $script:guardCases++
+}
+function New-FocusSnapshot {
+  [pscustomobject]@{
+    foreground = $true; focusedProcessId = 42; focusedIdentity = "current-pane-1"
+    panes = @(
+      [pscustomobject]@{ identity = "current-pane-0"; processId = 42; parentProcessId = 42
+        visible = $true; focused = $false },
+      [pscustomobject]@{ identity = "current-pane-1"; processId = 42; parentProcessId = 42
+        visible = $true; focused = $true }
+    )
+  }
+}
+Test-Guard "exclusive observed focus" {
+  Assert-UiaUnrepairedTerminalFocus (New-FocusSnapshot) 42 "current-pane-1"
+}
+Test-Guard "empty roster" {
+  $snapshot = New-FocusSnapshot; $snapshot.panes = @()
+  Assert-UiaUnrepairedTerminalFocus $snapshot 42 "current-pane-1"
+} "nontrivial pane topology"
+Test-Guard "foreign foreground focus" {
+  $snapshot = New-FocusSnapshot; $snapshot.focusedProcessId = 99
+  Assert-UiaUnrepairedTerminalFocus $snapshot 42 "current-pane-1"
+} "actual foreground focus"
+Test-Guard "background window" {
+  $snapshot = New-FocusSnapshot; $snapshot.foreground = $false
+  Assert-UiaUnrepairedTerminalFocus $snapshot 42 "current-pane-1"
+} "actual foreground focus"
+Test-Guard "foreign provider" {
+  $snapshot = New-FocusSnapshot; $snapshot.panes[0].processId = 99
+  Assert-UiaUnrepairedTerminalFocus $snapshot 42 "current-pane-1"
+} "foreign pane topology"
+Test-Guard "foreign parent" {
+  $snapshot = New-FocusSnapshot; $snapshot.panes[1].parentProcessId = 99
+  Assert-UiaUnrepairedTerminalFocus $snapshot 42 "current-pane-1"
+} "foreign pane topology"
+Test-Guard "duplicate providers" {
+  $snapshot = New-FocusSnapshot; $snapshot.panes[0].identity = "current-pane-1"
+  Assert-UiaUnrepairedTerminalFocus $snapshot 42 "current-pane-1"
+} "foreign pane topology"
+Test-Guard "two focused providers" {
+  $snapshot = New-FocusSnapshot; $snapshot.panes[0].focused = $true
+  Assert-UiaUnrepairedTerminalFocus $snapshot 42 "current-pane-1"
+} "exclusively own keyboard focus"
+Test-Guard "stale selected identity" {
+  Assert-UiaUnrepairedTerminalFocus (New-FocusSnapshot) 42 "previous-window-pane-1"
+} "actual foreground focus"
+Test-Guard "trivial first pane" {
+  $snapshot = New-FocusSnapshot
+  $snapshot.focusedIdentity = "current-pane-0"
+  $snapshot.panes[0].focused = $true; $snapshot.panes[1].focused = $false
+  Assert-UiaUnrepairedTerminalFocus $snapshot 42 "current-pane-0"
+} "nonzero selected pane"
+
+$nonce = "0123456789abcdef01234567"
+$before = @("pane zero", "cmd prompt")
+$resultLine = "GC_${nonce}_1234_323"
+Test-Guard "shell-computed output" {
+  $observed = Assert-UiaTerminalChallengeOutput $before @("pane zero", $resultLine) 1 $nonce 323
+  Assert-Contract ($observed -eq 1234) "challenge must return its parsed shell PID"
+}
+Test-Guard "echo is not output" {
+  Assert-UiaTerminalChallengeOutput $before @("pane zero", "cmd /c echo $resultLine") 1 $nonce 323
+} "shell-computed output line"
+Test-Guard "empty output topology" {
+  Assert-UiaTerminalChallengeOutput $before @() 1 $nonce 323
+} "exact nonzero pane"
+Test-Guard "first pane output" {
+  Assert-UiaTerminalChallengeOutput $before @($resultLine, "cmd prompt") 0 $nonce 323
+} "exact nonzero pane"
+Test-Guard "foreign destination" {
+  Assert-UiaTerminalChallengeOutput $before @($resultLine, $resultLine) 1 $nonce 323
+} "nonselected pane"
+Test-Guard "old nonce" {
+  Assert-UiaTerminalChallengeOutput @("pane zero", $resultLine) @("pane zero", $resultLine) 1 $nonce 323
+} "already present"
+Test-Guard "wrong arithmetic" {
+  Assert-UiaTerminalChallengeOutput $before @("pane zero", "GC_${nonce}_1234_322") 1 $nonce 323
+} "arithmetic is invalid"
+Test-Guard "duplicate output" {
+  Assert-UiaTerminalChallengeOutput $before @("pane zero", "$resultLine`n$resultLine") 1 $nonce 323
+} "exactly one"
+Test-Guard "zero shell PID" {
+  Assert-UiaTerminalChallengeOutput $before @("pane zero", "GC_${nonce}_0_323") 1 $nonce 323
+} "shell-computed output line"
+Test-Guard "overflow shell PID" {
+  Assert-UiaTerminalChallengeOutput $before @("pane zero", "GC_${nonce}_9999999999999999999999_323") 1 $nonce 323
+} "arithmetic is invalid"
+Assert-Contract ($script:guardCases -eq 20) "expected 20 executed unrepaired terminal guard cases"
+Write-Output "Unrepaired terminal input guards: PASS executed=$script:guardCases headless-only"
 Write-Output "Windows terminal gate contract: PASS"
 exit 0
