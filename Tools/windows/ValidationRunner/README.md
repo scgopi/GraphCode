@@ -32,6 +32,55 @@ are not compiled into the production binding library.
 `Build-CompiledValidationRunner.ps1` is a convenience for PowerShell consumers.
 CI builds the project and runs the normal executable directly.
 
+### Explicit fixture compiler input
+
+Default capture-fixture preparation still discovers the installed MSVC with the
+guarded `vswhere` child. To select a known installed toolchain explicitly, supply
+`--fixture-compiler-input` and `--fixture-compiler-input-sha256` together to the
+normal executable. The convenience contract script exposes the corresponding
+`-FixtureCompilerInput` and `-FixtureCompilerInputSha256` parameters. This is an
+explicit preparation route, not a fallback after failed discovery or an
+external/prebuilt manifest override.
+
+The input is an absolute path to a UTF-8 JSON file, bound by its uppercase SHA256,
+with exactly these fields:
+
+```json
+{
+  "schemaVersion": 1,
+  "installationPath": "C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise",
+  "msvcVersion": "14.51.36231",
+  "compilerSha256": "SHA256 of the selected Hostx64\\x64\\cl.exe",
+  "vcvarsSha256": "SHA256 of the installation's VC\\Auxiliary\\Build\\vcvars64.bat",
+  "sdkRoot": "C:\\Program Files (x86)\\Windows Kits\\10",
+  "sdkVersion": "10.0.28000.0"
+}
+```
+
+Replace the illustrative paths/versions with the installed inputs and both hash
+descriptions with actual 64-character digests. These versions are examples, not
+new repository pins. Obtain the digests with `Get-FileHash -Algorithm SHA256`;
+hash the final JSON separately. Installation and SDK paths must be batch-safe.
+The compiler is derived from the installation and exact MSVC version; arbitrary
+executables or wrappers are not accepted.
+
+The capture adapter first executes the 27 controlled compiler-input contracts,
+then freshly prepares all 14 artifacts in its own new directory. Both compiler
+recipes call the selected, hash-verified `vcvars64.bat` with the explicit SDK and
+MSVC versions, retain the actual INCLUDE/LIB and tool/SDK observations in their
+compile logs, and reject different effective inputs or changed compiler/vcvars
+bytes. Native held compile-host identity, original deadlines, exit and independent
+pipe EOF checks, original flags, current control-source hashes, and path-bound
+artifact/log provenance remain required. No discovery process is launched on
+this explicit route. Its selection and input digest are recorded in each new
+provenance receipt; successful preparation alone is not native qualification or
+full CI acceptance. Compiler raw log EOF remains explicitly unproven.
+
+For preparation alone, use `Tests\UiCaptureDriver.Tests.ps1 -PrepareFixturesOnly`
+with the two PowerShell parameters and a fresh short `-ScratchRoot`. Supplying
+compiler input to the fixture consumer without `-PrepareFixturesOnly` is refused.
+The prepared manifest binds the compiler helper as a seventh control source.
+
 ## Proof and diagnostic modes
 
 A successful full invocation exits zero, writes `coverage.json`, and emits

@@ -108,8 +108,16 @@ public static class StandaloneSuites
             var captureRoot = PowerShellPayload.CreateScratchRoot(context.RepositoryRoot);
             await File.WriteAllTextAsync(Path.Combine(context.ArtifactRoot, "capture-root.txt"), captureRoot, cancellationToken);
             var prebuilt = Path.Combine(captureRoot, "prebuilt");
+            var compilerContracts = await PowerShellPayload.RunAsync(context, Id + ".compiler-input",
+                "Tools\\windows\\Tests\\FixtureCompiler.Tests.ps1",
+                ["-ScratchRoot", Path.Combine(captureRoot, "compiler-contracts")], cancellationToken);
+            if (EvidenceParser.Structured(Id, "FixtureCompiler", compilerContracts.Output, 27, 27).Status != UnitStatus.Passed)
+                throw new InvalidDataException("Fixture compiler input contracts failed");
+            string[] compilerArguments = context.FixtureCompilerInput is null ? [] :
+                ["-FixtureCompilerInput", context.FixtureCompilerInput,
+                 "-FixtureCompilerInputSha256", context.FixtureCompilerInputSha256!];
             await PowerShellPayload.RunAsync(context, Id + ".prepare", script,
-                ["-PrepareFixturesOnly", "-ScratchRoot", prebuilt], cancellationToken);
+                ["-PrepareFixturesOnly", "-ScratchRoot", prebuilt, .. compilerArguments], cancellationToken);
             var manifest = Path.Combine(prebuilt, "fixtures.json");
             var hash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(manifest, cancellationToken)));
             var suiteRoot = Path.Combine(captureRoot, "suite");

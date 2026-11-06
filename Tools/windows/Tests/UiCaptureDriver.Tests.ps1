@@ -31,6 +31,8 @@ param(
     [ValidateSet('All','SceneContract','ActualAdmission','FixtureDirectory')][string]$DAdapterCase = 'All',
     [string]$PrebuiltFixtureManifest = '',
     [string]$PrebuiltFixtureManifestSha256 = '',
+    [string]$FixtureCompilerInput = '',
+    [string]$FixtureCompilerInputSha256 = '',
     [switch]$RequireRealSeed,
     [switch]$RealSeedContractOnly,
     [string]$RealSeedZmxPath = '',
@@ -46,6 +48,10 @@ $supervisorPath = Join-Path $driverDirectory 'Invoke-UiCapture.ps1'
 $workerPath = Join-Path $driverDirectory 'Invoke-UiCaptureWorker.ps1'
 $baselineWindowSourcePath = Join-Path $PSScriptRoot 'fixtures\c8r-window-before.zig'
 $currentWindowSourcePath = Join-Path $PSScriptRoot 'fixtures\c8r-window-after.zig'
+$fixtureCompilerPath = Join-Path $driverDirectory 'FixtureCompiler.ps1'
+if (($FixtureCompilerInput -or $FixtureCompilerInputSha256) -and -not $PrepareFixturesOnly) {
+    throw 'FixtureCompilerInput: explicit compiler selection is preparation-only.'
+}
 
 function Write-JournalContractJson {
     param([string]$Path, $Value)
@@ -194,9 +200,10 @@ if (Test-Path -LiteralPath $scratch) { throw "Refusing to replace capture test e
 $null = New-Item -ItemType Directory -Path $scratch
 $sourceHashesBefore = [ordered]@{}
 foreach ($path in @($modulePath, $supervisorPath, $workerPath, $PSCommandPath,
-    $baselineWindowSourcePath, $currentWindowSourcePath)) {
+    $baselineWindowSourcePath, $currentWindowSourcePath, $fixtureCompilerPath)) {
     $sourceHashesBefore[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
 }
+. $fixtureCompilerPath
 Import-Module $modulePath -Force -WarningAction SilentlyContinue
 Set-CapTracePath -Path (Join-Path $scratch 'test-calls.jsonl')
 
@@ -1005,19 +1012,10 @@ int wmain(int argc, wchar_t **argv) {
 '@
     $sourcePath = Join-Path $fixture 'capture-target.c'
     [IO.File]::WriteAllText($sourcePath, $source, [Text.UTF8Encoding]::new($false))
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
-        throw 'Existing MSVC discovery is unavailable; this offline suite does not install a compiler.'
-    }
-    $discovery = Invoke-CapBoundedChild -FilePath $vswhere -Arguments @(
-        '-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-        '-property', 'installationPath'
-    ) -Directory $fixture -Role 'fixture-compiler-discovery'
-    Assert-CapTest ($discovery.exitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($discovery.stdout)) 'Existing MSVC was not found.'
-    $installation = $discovery.stdout.Trim()
-    $vcvars = Join-Path $installation 'VC\Auxiliary\Build\vcvars64.bat'
-    $version = [IO.File]::ReadAllText((Join-Path $installation 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt')).Trim()
-    $compiler = Join-Path $installation "VC\Tools\MSVC\$version\bin\Hostx64\x64\cl.exe"
+    $selection = Resolve-CapFixtureCompiler $FixtureCompilerInput $FixtureCompilerInputSha256 $fixture 'fixture-compiler-discovery'
+    $vcvars = $selection.vcvars
+    $version = $selection.msvcVersion
+    $compiler = $selection.compiler
     $exe = Join-Path $fixture 'capture-target.exe'
     $object = Join-Path $fixture 'capture-target.obj'
     $compileStdout = Join-Path $fixture 'compile-stdout.log'
@@ -1025,6 +1023,9 @@ int wmain(int argc, wchar_t **argv) {
     $compileStdoutRaw = Join-Path $fixture 'compile-stdout.raw.log'
     $compileStderrRaw = Join-Path $fixture 'compile-stderr.raw.log'
     $command = 'call "{0}" -vcvars_ver={1} >nul && "{2}" /nologo /W4 /WX /O2 /utf-8 /Fe:"{3}" /Fo:"{5}" "{4}" /link /SUBSYSTEM:CONSOLE' -f $vcvars, $version, $compiler, $exe, $sourcePath, $object
+    if ($selection.mode -ceq 'explicit') {
+        $command = $command.Replace(" -vcvars_ver=$version >nul &&", " $($selection.sdkVersion) -vcvars_ver=$version >nul && set VCToolsVersion && set VCToolsInstallDir && set WindowsSdkDir && set WindowsSDKVersion && set INCLUDE && set LIB &&")
+    }
     # Redirect the whole compile group's stdout/stderr to owned files so the real
     # compiler and any toolchain telemetry helpers it spawns inherit file handles,
     # never the module's redirected pipe. Only the short-lived cmd.exe then holds
@@ -1032,7 +1033,7 @@ int wmain(int argc, wchar_t **argv) {
     # robustness fix; it does not touch any runtime/kernel/EOF/release guard.
     $redirectedCommand = '({0}) > "{1}" 2> "{2}"' -f $command, $compileStdoutRaw, $compileStderrRaw
     [IO.File]::WriteAllText((Join-Path $fixture 'compile.cmd'), "@echo off`r`n$redirectedCommand`r`nexit /b %errorlevel%`r`n", [Text.UTF8Encoding]::new($false))
-    $compilerEnvironment = @{ PATH = (Split-Path -Parent $vswhere) + ';' + $env:PATH; VSCMD_SKIP_SENDTELEMETRY = '1' }
+    $compilerEnvironment = @{ PATH = $selection.discoveryDirectory + ';' + $env:PATH; VSCMD_SKIP_SENDTELEMETRY = '1' }
     foreach ($key in @('VSCMD_VER', '__VSCMD_PREINIT_PATH', 'VSINSTALLDIR', 'VCINSTALLDIR',
         'VCToolsInstallDir', 'VCToolsVersion', 'WindowsSdkDir', 'WindowsSDKVersion', 'INCLUDE', 'LIB', 'LIBPATH')) {
         $compilerEnvironment[$key] = ''
@@ -1049,7 +1050,9 @@ int wmain(int argc, wchar_t **argv) {
     $compileStderrText = $compileStderrSnapshot.Text
     Assert-CapTest ($compilerExitCode -eq 0 -and (Test-Path -LiteralPath $exe -PathType Leaf)) `
         "Harmless target compilation failed (not launch evidence): $compileStdoutText $compileStderrText"
+    Assert-CapFixtureCompilerEnvironment $selection $compileStdoutText
     $provenance = [ordered]@{
+        compilerSelection = $selection
         compiler = $compiler; compilerVersion = (Get-Item -LiteralPath $compiler).VersionInfo.FileVersion
         compilerSha256 = (Get-FileHash -LiteralPath $compiler -Algorithm SHA256).Hash
         compilerCommand = $command; compilerExitCode = $compilerExitCode
@@ -1111,19 +1114,10 @@ int wmain(void) {
 '@
     $sourcePath = Join-Path $fixture 'cim-race-target.c'
     [IO.File]::WriteAllText($sourcePath, $source, [Text.UTF8Encoding]::new($false))
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
-        throw 'Existing MSVC discovery is unavailable; this offline suite does not install a compiler.'
-    }
-    $discovery = Invoke-CapBoundedChild -FilePath $vswhere -Arguments @(
-        '-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-        '-property', 'installationPath'
-    ) -Directory $fixture -Role 'cim-race-compiler-discovery'
-    Assert-CapTest ($discovery.exitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($discovery.stdout)) 'Existing MSVC was not found.'
-    $installation = $discovery.stdout.Trim()
-    $vcvars = Join-Path $installation 'VC\Auxiliary\Build\vcvars64.bat'
-    $version = [IO.File]::ReadAllText((Join-Path $installation 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt')).Trim()
-    $compiler = Join-Path $installation "VC\Tools\MSVC\$version\bin\Hostx64\x64\cl.exe"
+    $selection = Resolve-CapFixtureCompiler $FixtureCompilerInput $FixtureCompilerInputSha256 $fixture 'cim-race-compiler-discovery'
+    $vcvars = $selection.vcvars
+    $version = $selection.msvcVersion
+    $compiler = $selection.compiler
     $exe = Join-Path $fixture 'cim-race-target.exe'
     $object = Join-Path $fixture 'cim-race-target.obj'
     $compileStdout = Join-Path $fixture 'compile-stdout.log'
@@ -1131,12 +1125,15 @@ int wmain(void) {
     $compileStdoutRaw = Join-Path $fixture 'compile-stdout.raw.log'
     $compileStderrRaw = Join-Path $fixture 'compile-stderr.raw.log'
     $command = 'call "{0}" -vcvars_ver={1} >nul && "{2}" /nologo /W3 /O2 /utf-8 /Fe:"{3}" /Fo:"{5}" "{4}" /link /SUBSYSTEM:CONSOLE' -f $vcvars, $version, $compiler, $exe, $sourcePath, $object
+    if ($selection.mode -ceq 'explicit') {
+        $command = $command.Replace(" -vcvars_ver=$version >nul &&", " $($selection.sdkVersion) -vcvars_ver=$version >nul && set VCToolsVersion && set VCToolsInstallDir && set WindowsSdkDir && set WindowsSDKVersion && set INCLUDE && set LIB &&")
+    }
     # Same owned-file redirection as New-CapHarmlessTarget: the compiler and any
     # telemetry helpers inherit file handles, so only the short-lived cmd.exe holds
     # the module's redirected pipe and it reaches bounded EOF on exit.
     $redirectedCommand = '({0}) > "{1}" 2> "{2}"' -f $command, $compileStdoutRaw, $compileStderrRaw
     [IO.File]::WriteAllText((Join-Path $fixture 'compile.cmd'), "@echo off`r`n$redirectedCommand`r`nexit /b %errorlevel%`r`n", [Text.UTF8Encoding]::new($false))
-    $compilerEnvironment = @{ PATH = (Split-Path -Parent $vswhere) + ';' + $env:PATH; VSCMD_SKIP_SENDTELEMETRY = '1' }
+    $compilerEnvironment = @{ PATH = $selection.discoveryDirectory + ';' + $env:PATH; VSCMD_SKIP_SENDTELEMETRY = '1' }
     foreach ($key in @('VSCMD_VER', '__VSCMD_PREINIT_PATH', 'VSINSTALLDIR', 'VCINSTALLDIR',
         'VCToolsInstallDir', 'VCToolsVersion', 'WindowsSdkDir', 'WindowsSDKVersion', 'INCLUDE', 'LIB', 'LIBPATH')) {
         $compilerEnvironment[$key] = ''
@@ -1153,7 +1150,9 @@ int wmain(void) {
     $compileStderrText = $compileStderrSnapshot.Text
     Assert-CapTest ($compilerExitCode -eq 0 -and (Test-Path -LiteralPath $exe -PathType Leaf)) `
         "CIM race target compilation failed (not launch evidence): $compileStdoutText $compileStderrText"
+    Assert-CapFixtureCompilerEnvironment $selection $compileStdoutText
     $provenance = [pscustomobject]@{
+        compilerSelection = $selection
         executable = $exe
         source = $sourcePath
         sourceSha256 = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
@@ -7872,6 +7871,10 @@ if ($PrepareFixturesOnly) {
     }
     $null = New-CapHarmlessTarget
     $null = New-CapCimRaceTarget
+    foreach ($path in $sourceHashesBefore.Keys) {
+        Assert-CapTest ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ceq $sourceHashesBefore[$path]) `
+            "Source changed during fixture preparation: $path"
+    }
     $reference = Write-CapPrebuiltFixtureManifest
     $null = Read-CapPrebuiltFixtures $reference.path $reference.sha256
     $reference | ConvertTo-Json -Depth 8 -Compress
