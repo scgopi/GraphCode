@@ -862,34 +862,83 @@ in the existing `Tests\TerminalGate.Tests.ps1` entry point (20 executed cases).
 They reject absent, duplicate, foreign, background, stale, or nonexclusive focus,
 require a nonzero selected pane in a **persisted-layout-ordered** roster, and
 reject stale nonces, command echoes, duplicate output, wrong arithmetic, invalid
-shell PIDs, or nonce output on another pane. These are assertion primitives, not
-a native qualification route; no existing gate calls them to inject input.
+shell PIDs, or nonce output on another pane. The opt-in
+`-RestoredTerminalInputOnly` route now calls these guards, with 25 additional
+mock/source/managed-file adapter cases in that same headless entry point.
 
-**Unsupported prerequisite:** the normal UIA gate sets synthetic fixture and
+**Preflight remains refused:** `Assert-UiaRestorationPeerCapability` has no
+qualified source hash until coordinated intake of the shared read-only pipe-peer
+helper after its native contracts pass. There is no command-line waiver.
+Intake must set the hash of the qualified `UiCaptureDriver.psm1`; the route then
+checks those source bytes, requires a fresh helper load, and requires the actual
+`PipeServerProcessId(SafePipeHandle)` method. Headless orchestration mocks that
+boundary only in tests. No native restoration result is claimed.
+
+The normal default UIA gate sets synthetic fixture and
 connection-failure flags and uses its identity-file/PID-reopen launcher. It
-cannot establish real-daemon/session restoration. A future opt-in route must use
-`ShellProcessOwnership.psm1` suspended launches and retained jobs, its own
-profile/support/temp, and no UIA fixture flags. It must bind the production
-daemon peer and current provider roster to the persisted pane/session before
-using these assertions. This does not require a new product UIA schema: launch
-two real pinned zmx sessions with distinct fresh shell-computed nonce/PID/arithmetic
-markers, map each owned provider's actual TextPattern readback to its unique
-session marker, and correlate the normally persisted selected pane ID with its
-actual seed session name. Geometry order and generic provider IDs are not that
-mapping. The printed shell PID is a data witness, never process-control authority.
-A separate observer pipe connection's server PID does
-not attest the shell's connection. The shared read-only pipe-peer helper must
-be natively qualified before intake; these guards do not substitute for it.
+does not establish real-daemon/session restoration and is unchanged. The new
+route returns before that default path and uses `ShellProcessOwnership.psm1`
+suspended original launches and retained jobs, private profile/support/temp,
+explicit child environments with no inherited UIA or synthetic workspace flags,
+and normal production CLI commands. Since Swift's zmx locator ignores `PATH`,
+the route stages the admitted provider bytes in its private support `bin` and
+rejects a different provider beside either Swift executable.
 
-There is **no canonical native M2 command yet**. The missing adapter must perform
-normal first-window selection/persistence, real close/reopen without destroying
-the session, fresh provider/session binding, then read actual focus before any
-input. It must use existing guarded native input APIs without SetFocus, pane
-clicks, focus setters, or forced foreground recovery; respect the original
-20-minute case budget and 90-second cleanup reserve; retain independent raw
-stdout/stderr; and prove zero owned survivors or retain UNKNOWN lifetime
-authority. The shell-computed nonce/PID/arithmetic line must appear only in the
-expected pane. A headless contract pass establishes none of those native facts.
+It registers its own project, obtains the canonical project path using
+`projects --json`, creates/stops one attended main loop, then starts two real
+pinned-zmx `--daemon` roots with separate held launch jobs and distinct
+shell-computed nonce/PID/arithmetic markers. Stopping the loop prevents opening
+it from launching an agent backend. The test prepares the existing schema-v2
+layout and shell ownership record with **pane zero initially selected**; this
+setup is not evidence that the product created a split. Only the first window
+uses the normal pane-focus action to select pane one and waits for the product
+to persist it. The original shell exits through its normal tray Exit command;
+its original root and attach job are finalized before a new held shell is
+launched. Both separately owned seed roots must remain alive.
+
+Each opening uses normal project/loop UIA actions. Every current owned
+Winghostty provider is mapped to its session by actual TextPattern marker
+content, never screen order or a generic ID. The persisted pane/session order
+then identifies the expected selected provider. After reopen, actual UIA and
+native keyboard focus must already match it exclusively. There are no pane
+SetFocus calls, pane clicks, setters, or forced foreground recovery after
+reopen. Guarded `SendUnicodeInput`/`SendKeyInput` require the retained shell,
+foreground HWND and exact current pane HWND; a fresh shell-computed response
+must appear on that provider and not the other one. Printed PIDs are data
+witnesses, never process-control authority. The read-only peer query proves
+only the observer connection's server, not the shell's separate pipe handle.
+
+Coordinator/executor invocation **after** qualified source intake, source/binary
+admission and a serialized native lane (do not run while preflight is refused):
+
+```powershell
+pwsh -NoProfile -File Tools\windows\uia-live-gate.ps1 `
+  -RestoredTerminalInputOnly `
+  -Shell (Join-Path $PWD 'graphcode-windows\zig-out\bin\graphcode-windows.exe') `
+  -Daemon (Join-Path $daemonRuntime 'graphcoded.exe') `
+  -Cli (Join-Path $daemonRuntime 'graphcode.exe') `
+  -Zmx (Join-Path $env:GRAPHCODE_ZMX_ROOT 'zig-out\bin\zmx.exe') `
+  -RestorationRoot D:\gc-m2-restore
+```
+
+`$daemonRuntime` is the current worktree's staged Swift release runtime returned
+by the existing canonical build, with its matching runtime DLLs. The restoration
+root must be a new, short, private absolute path. The executor must establish
+binary provenance against the admitted source and provider pins; recorded input
+hashes alone do not prove which source compiled a binary.
+
+Work shares the original 20-minute case clock and protects a 90-second cleanup
+reserve. Existing bounded waits are clamped to that clock; UIA/OS calls do not
+acquire a kernel scheduling guarantee from a stopwatch. Cleanup uses the
+original scope/job API to require zero owned survivors and pipe EOF, retains
+independent stdout/stderr logs for each original launch, and holds lifetime
+authority indefinitely on UNKNOWN instead of discovering/killing by PID or
+name. On incomplete teardown, buffered output is retained as separate
+`.stdout.partial.log` and `.stderr.partial.log` files, without an EOF claim.
+Success evidence is emitted only after cleanup completes. Failures and setup
+artifacts remain in the owned root. Headless passing
+cases are not native input, persistence, provider, glyph, agent-backend, or
+whole-parity qualification; the native result remains pending.
 
 ## Winghostty fork
 

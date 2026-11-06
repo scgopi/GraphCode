@@ -6,6 +6,10 @@ param(
   [switch]$SidebarParityOnly,
   [switch]$UnwiredRecoveryOnly,
   [switch]$CycleHierarchyOnly,
+  [switch]$RestoredTerminalInputOnly,
+  [string] $Daemon = "",
+  [string] $Cli = "",
+  [string] $RestorationRoot = "",
   [string] $DeleteSelectFailureReceipt = $env:GRAPHCODE_UIA_DELETE_SELECT_FAILURE_RECEIPT
 )
 
@@ -207,7 +211,13 @@ function Assert-UiaTerminalChallengeOutput(
       Require (-not $after[$index].Contains($prefix)) "Terminal challenge reached a nonselected pane"
     }
   }
-  $matches = [regex]::Matches($after[$selectedIndex],
+  return Read-UiaTerminalComputedMarker $after[$selectedIndex] $nonce $expectedArithmetic
+}
+
+function Read-UiaTerminalComputedMarker([string] $text, [string] $nonce, [long] $expectedArithmetic) {
+  Require ($nonce -cmatch '^[0-9a-f]{24}$') "Terminal challenge requires a fresh nonce"
+  $prefix = "GC_${nonce}_"
+  $matches = [regex]::Matches($text,
     '(?m)^' + [regex]::Escape($prefix) + '(?<pid>[1-9][0-9]*)_(?<value>[0-9]+)\s*$')
   Require ($matches.Count -eq 1) "Terminal challenge did not publish exactly one shell-computed output line"
   $shellProcessId = 0L
@@ -216,6 +226,463 @@ function Assert-UiaTerminalChallengeOutput(
     [long]::TryParse($matches[0].Groups["value"].Value, [ref]$arithmetic) -and
     $arithmetic -eq $expectedArithmetic) "Terminal challenge shell PID or arithmetic is invalid"
   return $shellProcessId
+}
+
+function Assert-UiaRestorationPeerCapability {
+  # Filled only during coordinated intake of the natively qualified shared source.
+  $qualifiedPeerSourceSha256 = ""
+  Require ($qualifiedPeerSourceSha256 -cmatch '^[0-9A-F]{64}$') `
+    "M2 preflight refused before launch: qualified shared pipe-peer source intake is pending"
+  $module = Join-Path $PSScriptRoot "UiCaptureDriver.psm1"
+  Require ((Get-FileHash -LiteralPath $module -Algorithm SHA256).Hash -ceq $qualifiedPeerSourceSha256) `
+    "M2 shared pipe-peer source differs from its qualified intake"
+  Require (-not ("CapNative" -as [type])) "M2 requires a fresh process, not a previously loaded native helper"
+  Import-Module $module -ErrorAction Stop
+  $peerType = "CapNative" -as [type]
+  Require ($null -ne $peerType -and $null -ne $peerType.GetMethod("PipeServerProcessId",
+    [type[]]@([Microsoft.Win32.SafeHandles.SafePipeHandle]))) `
+    "M2 requires the qualified shared PipeServerProcessId(SafePipeHandle) method"
+}
+
+function Get-UiaRestorationRemaining($state, [int] $maximumMilliseconds = 5000) {
+  $remaining = 1200000L - 90000L - $state.clock.ElapsedMilliseconds
+  Require ($remaining -gt 0) "M2 work budget exhausted; the 90-second cleanup reserve is protected"
+  return [int][Math]::Min($maximumMilliseconds, $remaining)
+}
+
+function New-UiaRestorationState([string] $root, [string] $shell, [string] $daemon, [string] $cli, [string] $zmx) {
+  Require ([IO.Path]::IsPathFullyQualified($root)) "M2 requires an absolute, new owned restoration root"
+  foreach ($path in @($shell, $daemon, $cli, $zmx)) {
+    Require ([IO.Path]::IsPathFullyQualified($path) -and (Test-Path -LiteralPath $path -PathType Leaf)) `
+      "M2 requires explicit existing shell, daemon, CLI and pinned zmx executable paths"
+  }
+  $null = Assert-UiaProviderPathBudget $root (Join-Path $root "local") "graphcode" $null $null
+  & (Join-Path $PSScriptRoot "Import-CompiledValidationAssembly.ps1") `
+    -AssemblyPath (Join-Path ([IO.Path]::GetDirectoryName($validationAssemblyPath)) "ValidationFixtureBindings.dll") `
+    -RequiredType "GraphCode.ValidationFixtureDirectoryNative" | Out-Null
+  [GraphCode.ValidationFixtureDirectoryNative]::Create($root)
+  $state = [pscustomobject]@{
+    root = $root; clock = [Diagnostics.Stopwatch]::StartNew(); scope = $null
+    launches = [Collections.Generic.List[object]]::new()
+    project = Join-Path $root "M2Project"; projectDirectory = Join-Path $root "M2Project"
+    support = Join-Path $root "support"
+    shell = $shell; daemon = $daemon; cli = $cli; zmx = $zmx
+    pipe = "graphcode-m2-" + [guid]::NewGuid().ToString("N")
+    environment = @{}; nodeId = ""; paneIds = @(); sessions = @(); seeds = @()
+    layoutPath = ""; failure = $null
+  }
+  foreach ($name in @("profile", "local", "roaming", "temp", "support", "zmx", "M2Project", "logs")) {
+    $null = New-Item -ItemType Directory -Path (Join-Path $root $name) -ErrorAction Stop
+  }
+  Write-Host "M2_OWNED_ROOT=$root"
+  $identities = [ordered]@{
+    gateSourceSha256 = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot "uia-live-gate.ps1") -Algorithm SHA256).Hash
+    binaries = @($shell, $daemon, $cli, $zmx | ForEach-Object {
+      [ordered]@{ path = $_; sha256 = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash }
+    })
+    limit = "Observed hashes only; the executor must independently bind these binaries to its admitted source/build."
+  }
+  [IO.File]::WriteAllText((Join-Path $root "logs\input-identities.json"), ($identities | ConvertTo-Json -Depth 4))
+  $state.environment = @{
+    SystemRoot = $env:SystemRoot; WINDIR = $env:WINDIR; USERPROFILE = Join-Path $root "profile"
+    HOME = Join-Path $root "profile"; LOCALAPPDATA = Join-Path $root "local"
+    APPDATA = Join-Path $root "roaming"; TEMP = Join-Path $root "temp"; TMP = Join-Path $root "temp"
+    PATH = "$([Environment]::SystemDirectory);$([Environment]::SystemDirectory)\WindowsPowerShell\v1.0;$PSHOME;$(Split-Path $daemon);$(Split-Path $shell);$(Split-Path $zmx)"
+    GRAPHCODE_SUPPORT_DIR = $state.support; GRAPHCODE_ZMX = $zmx; ZMX_DIR = Join-Path $root "zmx"
+    GRAPHCODE_DAEMON_PIPE = "\\.\pipe\$($state.pipe)"; GRAPHCODE_SOCKET = "\\.\pipe\$($state.pipe)"
+  }
+  [IO.File]::WriteAllText((Join-Path $state.support "onboarding-seen"), "seen")
+  Initialize-UiaRestorationProviderBinary $state
+  $state.scope = New-ShellProcessScope
+  return $state
+}
+
+function Initialize-UiaRestorationProviderBinary($state) {
+  # Swift's ZmxLocator prefers an adjacent binary, then support\bin; it ignores PATH.
+  $expectedHash = (Get-FileHash -LiteralPath $state.zmx -Algorithm SHA256).Hash
+  foreach ($executable in @($state.daemon, $state.cli)) {
+    $adjacent = Join-Path (Split-Path -Parent $executable) "zmx.exe"
+    if (Test-Path -LiteralPath $adjacent -PathType Leaf) {
+      Require ((Get-FileHash -LiteralPath $adjacent -Algorithm SHA256).Hash -ceq $expectedHash) `
+        "M2 adjacent Swift provider differs from the admitted pinned zmx bytes"
+    }
+  }
+  $directory = Join-Path $state.support "bin"
+  $null = New-Item -ItemType Directory -Path $directory -ErrorAction Stop
+  $destination = Join-Path $directory "zmx.exe"
+  [IO.File]::Copy($state.zmx, $destination, $false)
+  Require ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ceq $expectedHash) `
+    "M2 private Swift provider copy differs from the admitted pinned zmx bytes"
+}
+
+function Start-UiaRestorationProcess($state, [string] $file, [string[]] $arguments, [string] $stem) {
+  $null = Get-UiaRestorationRemaining $state
+  $info = [Diagnostics.ProcessStartInfo]::new($file)
+  $info.UseShellExecute = $false
+  $info.CreateNoWindow = $true
+  $info.RedirectStandardOutput = $true
+  $info.RedirectStandardError = $true
+  $info.WorkingDirectory = $state.projectDirectory
+  $info.Environment.Clear()
+  foreach ($name in $state.environment.Keys) { $info.Environment[$name] = [string]$state.environment[$name] }
+  foreach ($argument in $arguments) { $info.ArgumentList.Add($argument) }
+  $process = Start-ShellOwnedProcess $state.scope $info
+  $state.launches.Add([pscustomobject]@{ process = $process; stem = $stem })
+  [GraphCodeUiaGateState]::RetainProcess($process)
+  return $process
+}
+
+function Assert-UiaRestorationHeldRoot($state, $process) {
+  $runs = @($state.scope.Runs | Where-Object { [Object]::ReferenceEquals($_.Process, $process) })
+  Require ($runs.Count -eq 1 -and -not $state.scope.Closed -and
+    $runs[0].ScopeAssigned -and $runs[0].LaunchAssigned -and -not $runs[0].Finalized -and
+    -not $process.HasExited -and
+    [GraphCode.Validation.Ownership.StandaloneProcessJob]::Contains($state.scope.Job, $runs[0].Handle) -and
+    [GraphCode.Validation.Ownership.StandaloneProcessJob]::Contains($runs[0].LaunchJob, $runs[0].Handle)) `
+    "M2 original launch authority is no longer live in both retained jobs"
+}
+
+function Confirm-UiaRestorationDaemonPeer($state, $daemonProcess) {
+  Assert-UiaRestorationHeldRoot $state $daemonProcess
+  $pipe = [IO.Pipes.NamedPipeClientStream]::new(".", $state.pipe, [IO.Pipes.PipeDirection]::InOut)
+  try {
+    $pipe.Connect((Get-UiaRestorationRemaining $state 15000))
+    $observed = [CapNative]::PipeServerProcessId($pipe.SafePipeHandle)
+    Assert-UiaRestorationHeldRoot $state $daemonProcess
+    Require ($observed -eq $daemonProcess.Id) "M2 observer connected to a foreign daemon server"
+    return [ordered]@{ observedServerProcessId = $observed; scope = "observer connection only, not the app connection" }
+  } finally { $pipe.Dispose() }
+}
+
+function Invoke-UiaRestorationCli($state, [string[]] $arguments, [string] $stem) {
+  return Invoke-UiaRestorationCommand $state $state.cli $arguments $stem
+}
+
+function Invoke-UiaRestorationCommand($state, [string] $file, [string[]] $arguments, [string] $stem) {
+  $process = Start-UiaRestorationProcess $state $file $arguments $stem
+  Require ($process.WaitForExit((Get-UiaRestorationRemaining $state 15000))) "M2 CLI timed out: $stem"
+  Require ((Get-UiaRestorationRemaining $state 10000) -eq 10000) "M2 launch finalization would consume the cleanup reserve"
+  Complete-ShellOwnedProcess $state.scope $process
+  $output = Read-ShellOwnedOutput $state.scope $process
+  $errorText = Read-ShellOwnedOutput $state.scope $process -StandardError
+  Require ($process.ExitCode -eq 0) "M2 CLI failed: $stem exit=$($process.ExitCode) stderr=$errorText"
+  return [string]$output
+}
+
+function Initialize-UiaRestorationSessions($state) {
+  $null = Invoke-UiaRestorationCli $state @("status", $state.project) "register-project"
+  $projects = @(Invoke-UiaRestorationCli $state @("projects", "--json") "canonical-project" | ConvertFrom-Json)
+  $project = @($projects | Where-Object { $_.name -ceq "M2Project" })
+  Require ($project.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace($project[0].path) -and
+    [IO.Path]::GetFullPath($project[0].path.Replace('/', '\')) -ieq $state.projectDirectory) `
+    "M2 daemon did not return the exact owned project's canonical path"
+  $state.project = [string]$project[0].path
+  $created = Invoke-UiaRestorationCli $state @("node", "create", $state.project,
+    "--title", "M2Restore", "--type", "main") "create-loop"
+  $ids = [regex]::Matches($created, '(?m)^\s+([0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12})\s+.*\sM2Restore\s*$')
+  Require ($ids.Count -eq 1) "M2 CLI did not return exactly one real M2Restore node"
+  $state.nodeId = $ids[0].Groups[1].Value.ToUpperInvariant()
+  # A stopped attended node cannot launch an external agent if its seed disappears.
+  $stopped = Invoke-UiaRestorationCli $state @("node", "stop", $state.project, $state.nodeId) "stop-loop"
+  Require ([regex]::Matches($stopped, '(?m)^\s+' + [regex]::Escape($state.nodeId) +
+    '\s+stopped\s+.*\sM2Restore\s*$').Count -eq 1) "M2 daemon did not confirm the real loop stopped before seeding"
+  $state.paneIds = @($state.nodeId, [guid]::NewGuid().ToString("D"))
+  $state.sessions = @($state.paneIds | ForEach-Object { "graphcode-$_" })
+  $state.seeds = @(for ($index = 0; $index -lt 2; $index++) {
+    $nonce = [guid]::NewGuid().ToString("N").Substring(0, 24)
+    $seedScript = Join-Path $state.root "seed-$index.cmd"
+    [IO.File]::WriteAllText($seedScript,
+      "@echo off`r`npowershell.exe -NoProfile -NonInteractive -Command `"`$v=17*19;Write-Output ('GC_${nonce}_'+`$PID+'_'+`$v)`"`r`n")
+    $process = Start-UiaRestorationProcess $state $state.zmx @("--daemon", $state.sessions[$index],
+      (Join-Path ([Environment]::SystemDirectory) "cmd.exe"), "/Q", "/K", $seedScript) "seed-$index"
+    [pscustomobject]@{ session = $state.sessions[$index]; nonce = $nonce; process = $process }
+  })
+  $readyClock = [Diagnostics.Stopwatch]::StartNew()
+  $probe = 0
+  do {
+    foreach ($seed in $state.seeds) { Assert-UiaRestorationHeldRoot $state $seed.process }
+    $probe++
+    $listing = Invoke-UiaRestorationCommand $state $state.zmx @("ls") "seed-list-$probe"
+    $ready = $true
+    foreach ($session in $state.sessions) {
+      $rows = @($listing -split "`n" | Where-Object { ($_ -split '\s+') -ccontains "name=$session" })
+      if ($rows.Count -ne 1 -or $rows[0] -match '(?:^|\s)(?:err|ended|exit_code)=') { $ready = $false }
+    }
+    if ($ready) { break }
+    Require ($readyClock.ElapsedMilliseconds -lt 15000) "M2 exact seeded sessions did not become live"
+    Start-Sleep -Milliseconds 100
+  } while ($true)
+  $layouts = Join-Path $state.support "terminal-layouts"
+  $null = New-Item -ItemType Directory -Path (Join-Path $layouts "shell-sessions") -Force
+  $state.layoutPath = Join-Path $layouts "$($state.nodeId).json"
+  $layout = [ordered]@{ schemaVersion = 2; project = $state.project; loop = $state.nodeId
+    selectedTab = 0; tabs = @(@{ id = 1; direction = "horizontal"; focused = 0
+      panes = @(@{ id = $state.paneIds[0]; agent = $true }, @{ id = $state.paneIds[1]; agent = $false }) }) }
+  [IO.File]::WriteAllText($state.layoutPath, ($layout | ConvertTo-Json -Depth 8 -Compress))
+  [IO.File]::WriteAllText((Join-Path $layouts "shell-sessions\$($state.sessions[1])"), $state.nodeId)
+}
+
+function Open-UiaRestorationWorkspace($state, [string] $stem) {
+  $process = Start-UiaRestorationProcess $state $state.shell @() $stem
+  $attempts = [Math]::Max(1, [Math]::Min(40, [Math]::Floor((Get-UiaRestorationRemaining $state 10000) / 250)))
+  $root = Wait-ForRootReconnect $process @([System.Windows.Automation.TreeWalker]::RawViewWalker) $attempts
+  $window = $process.MainWindowHandle
+  Require (Ensure-ShellForeground $window "M2 normal workspace activation" (Get-UiaRestorationRemaining $state)) `
+    "M2 normal foreground activation was refused"
+  $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+  foreach ($identity in @(
+      (Get-MultiProjectAutomationId "open-project" $state.project),
+      (Get-MultiProjectAutomationId "loop" $state.project $state.nodeId)
+    )) {
+    $attempts = [Math]::Max(1, [Math]::Min(40, [Math]::Floor((Get-UiaRestorationRemaining $state 10000) / 250)))
+    $root = Wait-ForRootReconnect $process @($walker) $attempts
+    $element = Find-FragmentByIdWithRetry $root $identity $walker
+    Require ($null -ne $element -and $element.Current.ProcessId -eq $process.Id -and
+      $element.Current.IsEnabled -and -not $element.Current.IsOffscreen) "M2 normal workspace action is unavailable: $identity"
+    $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  }
+  return [pscustomobject]@{ process = $process; window = $window }
+}
+
+function Read-UiaRestorationPanes($state, $app) {
+  Assert-UiaRestorationHeldRoot $state $app.process
+  foreach ($seed in $state.seeds) { Assert-UiaRestorationHeldRoot $state $seed.process }
+  $null = Get-UiaRestorationRemaining $state
+  $root = [System.Windows.Automation.AutomationElement]::FromHandle($app.window)
+  $condition = [System.Windows.Automation.PropertyCondition]::new(
+    [System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty, $true)
+  $elements = @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition) |
+    Where-Object { -not $_.Current.IsOffscreen -and $_.Current.BoundingRectangle.Width -gt 0 -and
+      $_.Current.BoundingRectangle.Height -gt 0 })
+  Require ($elements.Count -eq 2) "M2 requires exactly two visible real terminal Text providers"
+  $snapshots = @(foreach ($element in $elements) {
+    $current = $element.Current
+    $parent = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($element)
+    $text = [string]$element.GetCurrentPattern(
+      [System.Windows.Automation.TextPattern]::Pattern).DocumentRange.GetText(-1)
+    [pscustomobject]@{
+      element = $element; text = $text; identity = Get-RuntimeIdentity $element
+      processId = $current.ProcessId; parentProcessId = if ($parent) { $parent.Current.ProcessId } else { 0 }
+      visible = $true; focused = $current.HasKeyboardFocus
+      window = [IntPtr]$current.NativeWindowHandle
+      windowClass = [GraphCodeUiaGateState]::WindowClass([IntPtr]$current.NativeWindowHandle)
+    }
+  })
+  return @(Resolve-UiaRestorationSessionMarkers $state $snapshots $app.process.Id)
+}
+
+function Resolve-UiaRestorationSessionMarkers($state, [object[]] $snapshots, [int] $processId) {
+  Require ($processId -gt 0 -and $snapshots.Count -eq 2 -and @($state.sessions).Count -eq 2 -and
+    @($state.seeds).Count -eq 2 -and
+    @($state.sessions | Sort-Object -Unique -CaseSensitive).Count -eq 2 -and
+    @($state.seeds.nonce | Sort-Object -Unique -CaseSensitive).Count -eq 2) `
+    "M2 content binding requires two distinct seeded sessions, nonces and providers"
+  $mapped = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+  $identities = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  $windows = [Collections.Generic.HashSet[long]]::new()
+  foreach ($snapshot in $snapshots) {
+    Require ($snapshot.processId -eq $processId -and $snapshot.parentProcessId -eq $processId -and
+      $snapshot.window -ne [IntPtr]::Zero -and $snapshot.windowClass -ceq "WinghosttyEmbeddableSurface" -and
+      -not [string]::IsNullOrWhiteSpace($snapshot.identity) -and $identities.Add($snapshot.identity) -and
+      $windows.Add($snapshot.window.ToInt64())) "M2 terminal provider is foreign, duplicated or not a real Winghostty HWND"
+    $matches = @($state.seeds | Where-Object { $snapshot.text.Contains("GC_$($_.nonce)_") })
+    Require ($matches.Count -gt 0) "M2 provider/session marker is not published yet"
+    Require ($matches.Count -eq 1 -and -not $mapped.ContainsKey($matches[0].session)) `
+      "M2 provider/session content binding is ambiguous or duplicated"
+    $seed = $matches[0]
+    $witness = Read-UiaTerminalComputedMarker $snapshot.text $seed.nonce 323
+    $mapped[$seed.session] = [pscustomobject]@{
+      element = $snapshot.element; text = $snapshot.text; identity = $snapshot.identity
+      processId = $snapshot.processId; parentProcessId = $snapshot.parentProcessId
+      visible = $snapshot.visible; focused = $snapshot.focused
+      window = $snapshot.window; session = $seed.session; seedWitnessPid = $witness
+    }
+  }
+  return @($state.sessions | ForEach-Object {
+    Require ($mapped.ContainsKey($_)) "M2 expected session has no unique current provider"
+    $mapped[$_]
+  })
+}
+
+function Wait-UiaRestorationPanes($state, $app) {
+  $watch = [Diagnostics.Stopwatch]::StartNew()
+  do {
+    $null = Get-UiaRestorationRemaining $state
+    try { return @(Read-UiaRestorationPanes $state $app) } catch {
+      if ($_.Exception.Message -cnotin @(
+          "M2 requires exactly two visible real terminal Text providers",
+          "M2 provider/session marker is not published yet",
+          "Terminal challenge did not publish exactly one shell-computed output line"
+        ) -and -not (Test-RetryableUiaError $_)) { throw }
+      Write-Host "M2_PROVIDER_WAIT_REFUSAL=$($_.Exception.Message)"
+      if ($watch.ElapsedMilliseconds -ge 15000) { throw }
+    }
+    Start-Sleep -Milliseconds 100
+  } while ($true)
+}
+
+function Assert-UiaRestorationSavedSelection($state) {
+  $layout = Get-Content -LiteralPath $state.layoutPath -Raw | ConvertFrom-Json
+  Require ($layout.schemaVersion -eq 2 -and $layout.project -ceq $state.project -and
+    $layout.loop -ceq $state.nodeId -and $layout.selectedTab -eq 0 -and
+    @($layout.tabs).Count -eq 1 -and $layout.tabs[0].focused -eq 1 -and
+    @($layout.tabs[0].panes).Count -eq 2 -and
+    $layout.tabs[0].panes[0].id -ceq $state.paneIds[0] -and
+    $layout.tabs[0].panes[1].id -ceq $state.paneIds[1] -and
+    $layout.tabs[0].panes[0].agent -is [bool] -and $layout.tabs[0].panes[0].agent -and
+    $layout.tabs[0].panes[1].agent -is [bool] -and -not $layout.tabs[0].panes[1].agent) `
+    "M2 normal first-window selection was not persisted to the expected pane/session layout"
+}
+
+function Select-UiaRestorationInitialPane($state, $app) {
+  $panes = @(Wait-UiaRestorationPanes $state $app)
+  $panes[1].element.SetFocus()
+  $watch = [Diagnostics.Stopwatch]::StartNew()
+  do {
+    $null = Get-UiaRestorationRemaining $state
+    $layout = Get-Content -LiteralPath $state.layoutPath -Raw | ConvertFrom-Json
+    if ($layout.tabs[0].focused -eq 1) { break }
+    Require ($watch.ElapsedMilliseconds -lt 5000) "M2 initial UI selection did not persist"
+    Start-Sleep -Milliseconds 50
+  } while ($true)
+  Assert-UiaRestorationSavedSelection $state
+}
+
+function Close-UiaRestorationWindow($state, $app) {
+  Assert-UiaRestorationHeldRoot $state $app.process
+  Require ([GraphCodeUiaGateState]::PostCommand($app.window, 0x5002)) "M2 normal tray Exit command was rejected"
+  Require ($app.process.WaitForExit((Get-UiaRestorationRemaining $state))) "M2 original shell did not exit"
+  Require ($app.process.ExitCode -eq 0) "M2 original shell failed during normal close"
+  Require ((Get-UiaRestorationRemaining $state 10000) -eq 10000) "M2 shell finalization would consume the cleanup reserve"
+  Complete-ShellOwnedProcess $state.scope $app.process
+  Assert-UiaRestorationSavedSelection $state
+  foreach ($seed in $state.seeds) { Assert-UiaRestorationHeldRoot $state $seed.process }
+}
+
+function Assert-UiaRestorationObservedFocus($state, $app, $panes, [string] $expectedIdentity) {
+  $null = Get-UiaRestorationRemaining $state
+  $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+  $snapshot = [pscustomobject]@{
+    foreground = [GraphCodeUiaGateState]::IsForegroundWindow($app.window)
+    focusedProcessId = if ($focused) { $focused.Current.ProcessId } else { 0 }
+    focusedIdentity = if ($focused) { Get-RuntimeIdentity $focused } else { "" }
+    panes = $panes
+  }
+  Assert-UiaUnrepairedTerminalFocus $snapshot $app.process.Id $expectedIdentity
+  [GraphCodeUiaGateState]::RequireOwnedKeyboardInput($app.window, $app.process.Id, $panes[1].window)
+}
+
+function Invoke-UiaRestorationFreshInput($state, $app) {
+  Assert-UiaRestorationSavedSelection $state
+  $panes = @(Wait-UiaRestorationPanes $state $app)
+  $identity = $panes[1].identity
+  Assert-UiaRestorationObservedFocus $state $app $panes $identity
+  $before = @($panes | ForEach-Object { $_.text })
+  $nonce = [guid]::NewGuid().ToString("N").Substring(0, 24)
+  $command = "powershell.exe -NoProfile -NonInteractive -Command `"`$v=17*19;Write-Output ('GC_${nonce}_'+`$PID+'_'+`$v)`""
+  $counts = [GraphCodeUiaGateState]::SendUnicodeInput($app.window, $app.process.Id, $panes[1].window, $command)
+  Require ($counts.Count -eq 2 -and $counts[0] -eq 2 * $command.Length -and $counts[1] -eq $counts[0]) `
+    "M2 guarded Unicode SendInput count differs"
+  $panes = @(Read-UiaRestorationPanes $state $app)
+  Assert-UiaRestorationObservedFocus $state $app $panes $identity
+  Require ([GraphCodeUiaGateState]::SendKeyInput($app.window, $app.process.Id, $panes[1].window, 0x0D, 1) -eq 1) `
+    "M2 guarded Enter SendInput count differs"
+  $watch = [Diagnostics.Stopwatch]::StartNew()
+  do {
+    $panes = @(Read-UiaRestorationPanes $state $app)
+    Assert-UiaRestorationObservedFocus $state $app $panes $identity
+    if ($panes[1].text -match ('(?m)^GC_' + $nonce + '_[1-9][0-9]*_[0-9]+\s*$')) {
+      $witness = Assert-UiaTerminalChallengeOutput $before @($panes | ForEach-Object { $_.text }) 1 $nonce 323
+      return [ordered]@{ session = $state.sessions[1]; paneId = $state.paneIds[1]
+        providerIdentity = $identity; providerHwnd = $panes[1].window.ToInt64()
+        nonce = $nonce; computedPidDataWitness = $witness; arithmetic = 323; focusRepaired = $false }
+    }
+    Require ($watch.ElapsedMilliseconds -lt 5000) "M2 fresh shell-computed selected-pane output did not arrive"
+    Start-Sleep -Milliseconds 50
+  } while ($true)
+}
+
+function Close-UiaRestorationState($state) {
+  if ($null -eq $state) { return }
+  $cleanupClock = [Diagnostics.Stopwatch]::StartNew()
+  try {
+    Close-ShellProcessScope $state.scope
+    foreach ($launch in $state.launches) {
+      foreach ($stream in @("stdout", "stderr")) {
+        $text = Read-ShellOwnedOutput $state.scope $launch.process -StandardError:($stream -ceq "stderr")
+        [IO.File]::WriteAllText((Join-Path $state.root "logs\$($launch.stem).$stream.log"), $text)
+      }
+    }
+    Require ($cleanupClock.ElapsedMilliseconds -lt 90000) "M2 cleanup exceeded its 90-second reserve"
+  } catch {
+    $cleanupFailure = $_
+    if ($state.failure) { $state.failure.Exception.Data["M2CleanupFailure"] = $cleanupFailure.Exception }
+    $partialFailure = $null
+    if (-not $state.scope.Closed) {
+      try { Save-UiaRestorationPartialOutput $state $cleanupClock } catch {
+        $partialFailure = $_
+        $cleanupFailure.Exception.Data["M2PartialCaptureFailure"] = $_.Exception
+        Write-Host "M2_PARTIAL_CAPTURE_FAILURE=$($_.Exception.Message)"
+      }
+    }
+    if ((ShellProcessOwnership\Test-ShellOwnershipUnproven $cleanupFailure) -or
+        ($partialFailure -and (ShellProcessOwnership\Test-ShellOwnershipUnproven $partialFailure)) -or
+        ($state.failure -and (ShellProcessOwnership\Test-ShellOwnershipUnproven $state.failure))) {
+      Wait-UiaRestorationUnknown $state
+    }
+    if ($state.failure) {
+      Write-Host "M2_CLEANUP_FAILURE_RETAINED=$($cleanupFailure.Exception.Message)"
+      return
+    }
+    throw $cleanupFailure
+  }
+  if ($state.failure -and (ShellProcessOwnership\Test-ShellOwnershipUnproven $state.failure)) {
+    Wait-UiaRestorationUnknown $state
+  }
+}
+
+function Save-UiaRestorationPartialOutput($state, $cleanupClock) {
+  foreach ($launch in $state.launches) {
+    do {
+      Require ($cleanupClock.ElapsedMilliseconds -lt 90000) "M2 partial capture exhausted the cleanup reserve"
+      $batch = Receive-ShellOwnedOutput $state.scope $launch.process -MaximumCharacters 65536
+      [IO.File]::AppendAllText((Join-Path $state.root "logs\$($launch.stem).stdout.partial.log"), $batch.Output)
+      [IO.File]::AppendAllText((Join-Path $state.root "logs\$($launch.stem).stderr.partial.log"), $batch.Error)
+    } while ($batch.Output.Length -ge 65536 -or $batch.Error.Length -ge 65536)
+  }
+}
+
+function Wait-UiaRestorationUnknown($state) {
+  Write-Host "GRAPHCODE_VALIDATION_ROOT_RETENTION_REQUIRED=ownership_unproven"
+  Write-Host "M2_UNKNOWN_LIFETIME_HOLD root=$($state.root)"
+  [Console]::Out.Flush()
+  [Threading.Thread]::Sleep([Threading.Timeout]::Infinite)
+}
+
+function Invoke-UiaRestoredTerminalRoute([string] $shell, [string] $daemon, [string] $cli, [string] $zmx, [string] $root) {
+  Assert-UiaRestorationPeerCapability
+  $state = $null
+  $result = $null
+  try {
+    $state = New-UiaRestorationState $root $shell $daemon $cli $zmx
+    $daemonProcess = Start-UiaRestorationProcess $state $state.daemon @() "daemon"
+    $observer = Confirm-UiaRestorationDaemonPeer $state $daemonProcess
+    Initialize-UiaRestorationSessions $state
+    $first = Open-UiaRestorationWorkspace $state "first-shell"
+    Select-UiaRestorationInitialPane $state $first
+    Close-UiaRestorationWindow $state $first
+    $reopened = Open-UiaRestorationWorkspace $state "reopened-shell"
+    $input = Invoke-UiaRestorationFreshInput $state $reopened
+    $null = Confirm-UiaRestorationDaemonPeer $state $daemonProcess
+    Close-UiaRestorationWindow $state $reopened
+    $result = [ordered]@{ evidence = "M2_REAL_CLOSE_REOPEN_UNREPAIRED_SELECTED_PANE_INPUT"
+      observer = $observer; input = $input; root = $state.root
+      limit = "Functional only; observer connection is not the app pipe handle; no agent-backend, glyph or whole-parity claim." }
+  } catch {
+    if ($state) { $state.failure = $_ }
+    throw
+  } finally { Close-UiaRestorationState $state }
+  return $result
 }
 
 function Wait-UiaUnwiredRecoveryVisibility($root, $rawWalker, $process, $wire, $mark) {
@@ -5482,6 +5949,13 @@ if ($cardsPilotEnvironment.Contains("GRAPHCODE_CARDS_NATIVE_ACCEPTANCE_PLAN")) {
     "Cards native acceptance requires the explicit owned plan path"
   . (Join-Path $PSScriptRoot "CardsAcceptance.Live.ps1")
   Invoke-CardsNativePilot $cardsPilotEnvironment["GRAPHCODE_CARDS_NATIVE_ACCEPTANCE_PLAN"]
+  return
+}
+
+if ($RestoredTerminalInputOnly) {
+  Require (-not $SidebarParityOnly -and -not $UnwiredRecoveryOnly -and -not $CycleHierarchyOnly -and
+    $ArgumentList.Count -eq 0) "M2 real route cannot combine synthetic cases or arbitrary shell arguments"
+  Invoke-UiaRestoredTerminalRoute $Shell $Daemon $Cli $Zmx $RestorationRoot | ConvertTo-Json -Depth 8 -Compress
   return
 }
 
