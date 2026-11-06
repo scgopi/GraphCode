@@ -7784,11 +7784,11 @@ if ($NativePipePeerContractOnly) {
     $passed = @($results | Where-Object passed -EQ $true).Count
     $failed = @($results | Where-Object passed -EQ $false).Count
     $report = [pscustomobject]@{ suite = 'UiCaptureNativePipePeerContracts'; executed = $results.Count
-        passed = $passed; failed = $failed; cases = @($results); sourceHashesBeforeImport = $sourceHashesBefore
+        passed = $passed; failed = $failed; skipped = 0; cases = @($results); sourceHashesBeforeImport = $sourceHashesBefore
         mode = if ($NativePipePeerCase -ceq 'SourceOnly') { 'PURE_SOURCE_AND_MANAGED_GUARDS_NO_KERNEL_PIPE_QUERY' }
             else { 'OWNED_SAME_PROCESS_PIPE_NO_GUI_NO_PROCESS_CONTROL' } }
     $report | ConvertTo-Json -Depth 25 | Set-Content -LiteralPath (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
-    $report | Select-Object suite,executed,passed,failed | ConvertTo-Json -Compress
+    $report | Select-Object suite,executed,passed,failed,skipped | ConvertTo-Json -Compress
     if ($results.Count -ne $expectedNames.Count -or $passed -ne $expectedNames.Count -or $failed -ne 0) { exit 1 }
     exit 0
 }
