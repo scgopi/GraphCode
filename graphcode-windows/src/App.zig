@@ -11191,7 +11191,15 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
-        c.WM_CAPTURECHANGED, c.WM_CANCELMODE => {
+        c.WM_CAPTURECHANGED => {
+            const recipient = Win32.messagePointer(c.HWND, lparam);
+            // SetCapture can synchronously notify a window that already owns capture.
+            if (hwnd == null or recipient != hwnd or c.GetCapture() != hwnd)
+                app.cancelCanvasInteraction();
+            result.* = 0;
+            return true;
+        },
+        c.WM_CANCELMODE => {
             app.cancelCanvasInteraction();
             result.* = 0;
             return true;
@@ -23729,6 +23737,68 @@ fn wireRouteTitlePoint(app: *App, index: usize) c.POINT {
         .x = @divTrunc(actions.wire.left + actions.mark_entry.right, 2),
         .y = @divTrunc(card.top + actions.wire.top, 2),
     };
+}
+
+test "wire capture real window procedure preserves reentrant same-window SetCapture on connector down" {
+    var app = try wireRouteTestApp(96);
+    defer deinitOverviewTestApp(&app);
+    defer app.cancelCanvasInteraction();
+    const original = app.window.hwnd;
+    const instance = c.GetModuleHandleW(null);
+    try MainWindow.registerClass(instance);
+    app.window.hwnd = null;
+    app.window.context = &app;
+    const hwnd = c.CreateWindowExW(0, app.window.class_name, app.window.class_name,
+        c.WS_POPUP, 0, 0, 1200, 700, null, null, instance, &app.window) orelse {
+        app.window.hwnd = original;
+        return error.WindowCreationFailed;
+    };
+    defer {
+        app.window.callback = null;
+        if (c.GetCapture() == hwnd) _ = c.ReleaseCapture();
+        _ = c.DestroyWindow(hwnd);
+        app.window.hwnd = original;
+    }
+    app.window.callback = &onWindowMessage;
+    try std.testing.expect(c.IsWindowVisible(hwnd) == 0);
+    const foreground = c.GetForegroundWindow();
+    app.beginWireSelectedNode(0);
+    try std.testing.expectEqual(hwnd, c.GetCapture());
+    try std.testing.expect(app.canvas.edge_dragging);
+    const source = GraphCanvas.nodeBounds(0, &app.canvas);
+    const position: c.LPARAM = @intCast(source.right | (@divTrunc(source.top + source.bottom, 2) << 16));
+    _ = c.SendMessageW(hwnd, c.WM_LBUTTONDOWN, c.MK_LBUTTON, position);
+    try std.testing.expect(app.canvas.edge_dragging);
+    try std.testing.expectEqualStrings(WireRouteSheet.source_id, app.edge_drag_source_id);
+    try std.testing.expectEqual(hwnd, c.GetCapture());
+    try std.testing.expectEqual(foreground, c.GetForegroundWindow());
+    _ = c.ReleaseCapture();
+    try std.testing.expect(!app.canvas.edge_dragging);
+    try std.testing.expectEqual(@as(usize, 0), app.edge_drag_source_id.len);
+    app.beginWireSelectedNode(0);
+    _ = c.SendMessageW(hwnd, c.WM_CANCELMODE, 0, @intCast(@intFromPtr(hwnd)));
+    try std.testing.expect(!app.canvas.edge_dragging);
+    try std.testing.expectEqual(@as(usize, 0), app.edge_drag_source_id.len);
+    app.beginWireSelectedNode(0);
+    _ = c.SendMessageW(hwnd, c.WM_ACTIVATEAPP, 0, 0);
+    try std.testing.expect(!app.canvas.edge_dragging);
+    try std.testing.expectEqual(@as(usize, 0), app.edge_drag_source_id.len);
+    const foreign = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
+        std.unicode.utf8ToUtf16LeStringLiteral("Capture peer"), c.WS_POPUP,
+        0, 0, 100, 100, null, null, instance, null) orelse return error.WindowCreationFailed;
+    defer _ = c.DestroyWindow(foreign);
+    app.beginWireSelectedNode(0);
+    _ = c.SetCapture(foreign);
+    try std.testing.expect(!app.canvas.edge_dragging);
+    try std.testing.expectEqual(@as(usize, 0), app.edge_drag_source_id.len);
+    try std.testing.expect(c.GetCapture() != hwnd);
+    app.edge_drag_source_id = try app.allocator.dupe(u8, WireRouteSheet.source_id);
+    app.canvas.beginEdgeDrag(app.edge_drag_source_id, 10, 10);
+    _ = c.SendMessageW(hwnd, c.WM_CAPTURECHANGED, 0, @intCast(@intFromPtr(hwnd)));
+    try std.testing.expect(!app.canvas.edge_dragging);
+    try std.testing.expectEqual(@as(usize, 0), app.edge_drag_source_id.len);
+    try std.testing.expect(c.IsWindowVisible(hwnd) == 0 and c.IsWindowVisible(foreign) == 0);
+    try std.testing.expectEqual(foreground, c.GetForegroundWindow());
 }
 
 test "wire completion target press is node activation while connector drag owns edge completion" {

@@ -3252,7 +3252,7 @@ fn windowFromHandle(hwnd: c.HWND) ?*Window {
     return @ptrFromInt(@as(usize, @bitCast(raw)));
 }
 
-fn registerClass(instance: c.HINSTANCE) !void {
+pub fn registerClass(instance: c.HINSTANCE) !void {
     var window_class: c.WNDCLASSW = std.mem.zeroes(c.WNDCLASSW);
     window_class.lpfnWndProc = @ptrCast(&windowProc);
     window_class.hInstance = instance;
