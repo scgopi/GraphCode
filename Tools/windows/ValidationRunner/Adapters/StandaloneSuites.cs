@@ -113,6 +113,11 @@ public static class StandaloneSuites
                 ["-ScratchRoot", Path.Combine(captureRoot, "compiler-contracts")], cancellationToken);
             if (EvidenceParser.Structured(Id, "FixtureCompiler", compilerContracts.Output, 27, 27).Status != UnitStatus.Passed)
                 throw new InvalidDataException("Fixture compiler input contracts failed");
+            var hierarchyContracts = await PowerShellPayload.RunAsync(context, Id + ".window-hierarchy-diagnostic",
+                "Tools\\windows\\Tests\\WindowHierarchyDiagnostic.Tests.ps1",
+                ["-ScratchRoot", Path.Combine(captureRoot, "window-hierarchy-contracts")], cancellationToken);
+            if (EvidenceParser.Structured(Id, "WindowHierarchyDiagnostic", hierarchyContracts.Output, 5, 5).Status != UnitStatus.Passed)
+                throw new InvalidDataException("Window hierarchy diagnostic contracts failed");
             string[] compilerArguments = context.FixtureCompilerInput is null ? [] :
                 ["-FixtureCompilerInput", context.FixtureCompilerInput,
                  "-FixtureCompilerInputSha256", context.FixtureCompilerInputSha256!];

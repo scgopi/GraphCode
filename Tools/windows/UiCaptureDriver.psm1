@@ -298,7 +298,8 @@ public static class CapNative {
        try {
         if (clock.ElapsedMilliseconds > 2000) throw new InvalidOperationException("Owned window census exceeded 2000ms.");
         uint pid;
-        if (GetWindowThreadProcessId(window, out pid) == 0)
+        uint thread = GetWindowThreadProcessId(window, out pid);
+        if (thread == 0)
           throw new InvalidOperationException("Window census process query failed.");
         if (pid != expectedPid) return true;
         var cls = new StringBuilder(256);
@@ -306,8 +307,13 @@ public static class CapNative {
         if (GetClassName(window, cls, cls.Capacity) == 0)
           throw new InvalidOperationException("Window census class query failed.");
         UIntPtr textResult;
-        if (SendMessageTimeoutW(window, 0x000D, (UIntPtr)name.Capacity, name, 2, 50, out textResult) == IntPtr.Zero)
-          throw new InvalidOperationException("Window census text query failed/timed out for HWND " + window);
+        if (SendMessageTimeoutW(window, 0x000D, (UIntPtr)name.Capacity, name, 2, 50, out textResult) == IntPtr.Zero) {
+          int nativeError = Marshal.GetLastWin32Error();
+          var error = new InvalidOperationException("Window census text query failed/timed out for HWND " + window);
+          error.Data["WindowTextQueryFailure"] = new { Handle=window.ToInt64(), ClassName=cls.ToString(),
+            ProcessId=pid, ThreadId=thread, Win32Error=nativeError };
+          throw error;
+        }
         NativeRect bounds;
         if (!GetWindowRect(window, out bounds))
           throw new InvalidOperationException("Window census bounds query failed.");
@@ -2249,7 +2255,8 @@ function Get-CapOwnedWindowHierarchy {
         while ($cause.InnerException) {$cause=$cause.InnerException}
         Write-CapTrace -Command 'OwnedWindowCensusFailure' -Parameters @{
             root=[long]$RootHandle;error=$cause.Message
-            observedRows=($cause.Data['ObservedRows']|ConvertTo-Json -Depth 10 -Compress)}
+            observedRows=($cause.Data['ObservedRows']|ConvertTo-Json -Depth 10 -Compress)
+            failedWindow=($cause.Data['WindowTextQueryFailure']|ConvertTo-Json -Depth 3 -Compress)}
         throw
     }
     $null=Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity

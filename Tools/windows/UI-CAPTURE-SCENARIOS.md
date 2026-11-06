@@ -238,6 +238,15 @@ alongside the correlated applied-edge request IDs. The trace retains pre/post hi
 censuses and observed modal controls, including on timeout. Missing hosts or
 not-yet-created content are polled within the clipped action deadline;
 ambiguity, foreign identity, replacement, or native query errors refuse.
+On a native text-query failure, the error trace also retains the already-read
+HWND, class, process/thread IDs and cached Win32 error; it adds no title/text
+payload or native query. The original 50ms query, PID filter, refusal and rethrow
+remain unchanged. A zero native error is recorded as zero, not diagnosed as a
+specific timeout cause.
+The canonical capture suite runs five managed-construction/source contracts
+for this metadata as an owned prerequisite before fresh fixture preparation.
+They are not added to the 182/185 capture-driver case inventory and do not
+invoke the native text-query failure path.
 The original action exception is retained if cleanup also fails; launcher EOF
 is never relabeled target-private pipe EOF.
 
