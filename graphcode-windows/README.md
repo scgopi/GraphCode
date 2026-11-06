@@ -1,5 +1,13 @@
 # GraphCode Windows shell
 
+For a separately admitted receiver diagnostic, build with
+`-Dwire-receiver-trace=true`. The default is false. This uses the existing stderr
+logger for at most 64 received mouse move/down/up, capture-change, cancel-mode,
+and activation events, recording before/after scalar state with monotonic
+sequence/event numbers. Source IDs are hex-encoded and capped at 36 bytes.
+It adds no input, retry, wait, foreground or capture action. Retain output privately;
+this diagnostic build is not qualified functional or visual parity evidence.
+
 This is the production Zig/Win32 shell scaffold. It owns the top-level `HWND`,
 the single Win32 message loop, sidebar/project chrome, graph surface, workspace
 layout, and focus policy. GraphcodeKit and `graphcoded` remain the only owners of

@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const build_options = if (builtin.is_test)
     struct {
         pub const version = "dev";
+        pub const wire_receiver_trace = false;
     }
 else
     @import("build_options");
@@ -1609,6 +1610,7 @@ pub const App = struct {
     selected_edge_project_path: []u8 = &.{},
     selected_edge_id: []u8 = &.{},
     edge_drag_source_id: []u8 = &.{},
+    wire_receiver_trace: Diagnostics.WireReceiverTrace = .{},
     selection_initialized: bool = false,
     worktree_inspection: ?WorktreeStatus.Inspection = null,
     worktree_inspection_attempt_count: usize = 0,
@@ -10507,6 +10509,23 @@ fn onContextAction(context: ?*anyopaque, action: GraphContextMenu.Action, target
     app.handleContextAction(action, target);
 }
 
+fn logWireReceiver(app: *App, event: u32, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM, after: bool) void {
+    const point = if (message == c.WM_MOUSEMOVE or message == c.WM_LBUTTONDOWN or message == c.WM_LBUTTONUP)
+        CanvasInput.decodeMouseMessage(lparam)
+    else
+        CanvasInput.decodeMouseMessage(0);
+    var buffer: [512]u8 = undefined;
+    const line = app.wire_receiver_trace.project(&buffer, event, message, after, .{
+        .x = point.x, .y = point.y, .buttons = wparam, .raw_lparam = lparam, .source = app.edge_drag_source_id,
+        .edge_dragging = app.canvas.edge_dragging, .node_dragging = app.canvas.node_dragging,
+        .panning = app.canvas.dragging, .surface = @tagName(app.surface),
+    }) catch |err| {
+        std.log.err("Wire receiver diagnostic projection failed: {s}", .{@errorName(err)});
+        return;
+    };
+    std.log.warn("{s}", .{line});
+}
+
 fn onWindowMessage(
     context: ?*anyopaque,
     hwnd: c.HWND,
@@ -10516,12 +10535,19 @@ fn onWindowMessage(
     result: *c.LRESULT,
 ) callconv(.c) bool {
     const app: *App = @ptrCast(@alignCast(context.?));
+    const trace_event = if (build_options.wire_receiver_trace and Diagnostics.WireReceiverTrace.relevant(message))
+        app.wire_receiver_trace.begin()
+    else
+        null;
+    if (trace_event) |event| logWireReceiver(app, event, message, wparam, lparam, false);
+    defer if (trace_event) |event| logWireReceiver(app, event, message, wparam, lparam, true);
     if (TrayModule.taskbar_created != 0 and message == TrayModule.taskbar_created) {
         app.tray.readd();
         if (!app.tray.added) app.setStatus("System tray unavailable; retrying");
         result.* = 0;
         return true;
     }
+
     if (MainWindow.restore_message != 0 and message == MainWindow.restore_message) {
         if (app.ensureWorkspaceIdentity()) restoreShellWindow(hwnd);
         result.* = 0;
