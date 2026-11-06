@@ -141,6 +141,7 @@ const Dialog = struct {
     root: c.HWND = null,
     title: c.HWND = null,
     name: c.HWND = null,
+    name_binding: NameEditBinding = .{},
     detail: c.HWND = null,
     bullets: [3]c.HWND = .{null} ** 3,
     preview_title: c.HWND = null,
@@ -162,6 +163,51 @@ const Dialog = struct {
 };
 
 var active: ?*Dialog = null;
+
+const NameKeyAction = enum { forward, select_all, consume };
+
+fn nameKeyAction(message: c.UINT, key: c.WPARAM, ctrl: bool, alt: bool, focused: bool) NameKeyAction {
+    if (!focused or !ctrl or alt) return .forward;
+    if (message == c.WM_KEYDOWN and key == 'A') return .select_all;
+    if (message == c.WM_CHAR and key == 1) return .consume;
+    return .forward;
+}
+
+const NameEditBinding = struct {
+    hwnd: c.HWND = null,
+    original: c.WNDPROC = null,
+
+    fn owns(self: NameEditBinding, hwnd: c.HWND) bool {
+        return hwnd != null and self.hwnd == hwnd and self.original != null;
+    }
+
+    fn destroyed(self: *NameEditBinding, hwnd: c.HWND) void {
+        if (self.hwnd == hwnd) self.* = .{};
+    }
+};
+
+fn nameEditProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
+    const dialog = active orelse return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    if (!dialog.name_binding.owns(hwnd)) return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    const original = dialog.name_binding.original;
+    if (message == c.WM_NCDESTROY) {
+        // Host teardown runs before the stack-owned dialog and modal lease expire.
+        dialog.name_binding.destroyed(hwnd);
+        dialog.name = null;
+        return c.CallWindowProcW(original, hwnd, message, wparam, lparam);
+    }
+    if (message == c.WM_KEYDOWN or message == c.WM_CHAR) {
+        switch (nameKeyAction(message, wparam, c.GetKeyState(c.VK_CONTROL) < 0, c.GetKeyState(c.VK_MENU) < 0, c.GetFocus() == hwnd)) {
+            .select_all => {
+                _ = c.SendMessageW(hwnd, c.EM_SETSEL, 0, -1);
+                return 0;
+            },
+            .consume => return 0,
+            .forward => {},
+        }
+    }
+    return c.CallWindowProcW(original, hwnd, message, wparam, lparam);
+}
 
 /// Returns an owned typed name only. App retains identity checks, creation and launch.
 pub fn show(parent: c.HWND, allocator: std.mem.Allocator, options: Options) !?Result {
@@ -203,6 +249,12 @@ pub fn show(parent: c.HWND, allocator: std.mem.Allocator, options: Options) !?Re
     dialog.root = c.CreateWindowExW(c.WS_EX_CONTROLPARENT, class_name.ptr, null, c.WS_CHILD | c.WS_VISIBLE, 0, 0, 0, 0, host.viewport, null, c.GetModuleHandleW(null), null) orelse return error.NewWorkspaceControlFailed;
     dialog.title = try control(&dialog, "STATIC", "New Workspace", 0, 0);
     dialog.name = try control(&dialog, "EDIT", "", name_id, c.WS_TABSTOP | c.ES_AUTOHSCROLL);
+    const previous = c.SetWindowLongPtrW(dialog.name, c.GWLP_WNDPROC, @bitCast(@intFromPtr(&nameEditProc)));
+    if (previous == 0) return error.NewWorkspaceNameSubclassFailed;
+    dialog.name_binding = .{
+        .hwnd = dialog.name,
+        .original = Win32.opaquePointerFromInt(c.WNDPROC, @bitCast(previous)),
+    };
     _ = c.SendMessageW(dialog.name, 0x1501, 1, @bitCast(@intFromPtr(std.unicode.utf8ToUtf16LeStringLiteral("Client Work").ptr)));
     dialog.detail = try control(&dialog, "STATIC", "", 0, c.SS_PATHELLIPSIS);
     dialog.bullets[0] = try control(&dialog, "STATIC", "+  Its own projects and loops", 0, 0);
@@ -613,4 +665,44 @@ test "new workspace long isolation text grows content and keeps the stacked prev
             try std.testing.expect(grown.preview.bottom() + Dpi.scale(24, dpi) <= grown.extent);
         }
     }
+}
+
+test "new workspace Ctrl A policy selects all only in its focused name edit" {
+    try std.testing.expectEqual(NameKeyAction.select_all, nameKeyAction(c.WM_KEYDOWN, 'A', true, false, true));
+    try std.testing.expectEqual(NameKeyAction.consume, nameKeyAction(c.WM_CHAR, 1, true, false, true));
+    for ([_]c.UINT{ c.WM_KEYDOWN, c.WM_SYSKEYDOWN, c.WM_KEYUP, c.WM_CHAR }) |message| {
+        try std.testing.expectEqual(NameKeyAction.forward, nameKeyAction(message, 'A', false, false, true));
+        try std.testing.expectEqual(NameKeyAction.forward, nameKeyAction(message, 'A', true, true, true));
+        try std.testing.expectEqual(NameKeyAction.forward, nameKeyAction(message, 'A', true, false, false));
+    }
+    for ([_]c.WPARAM{ 'B', c.VK_DELETE, c.VK_BACK, c.VK_RETURN, c.VK_ESCAPE }) |key|
+        try std.testing.expectEqual(NameKeyAction.forward, nameKeyAction(c.WM_KEYDOWN, key, true, false, true));
+    try std.testing.expectEqual(NameKeyAction.forward, nameKeyAction(c.WM_CHAR, 'a', false, false, true));
+    try std.testing.expectEqual(NameKeyAction.forward, nameKeyAction(c.WM_CHAR, 1, true, true, true));
+    try std.testing.expectEqual(NameKeyAction.forward, nameKeyAction(c.WM_CHAR, 3, true, false, true));
+    try std.testing.expectEqual(NameKeyAction.forward, nameKeyAction(c.WM_KEYUP, 'A', true, false, true));
+    try std.testing.expectEqual(NameKeyAction.forward, nameKeyAction(c.WM_SYSKEYDOWN, 'A', true, false, true));
+}
+
+test "new workspace edit subclass binding ends with its exact control lifetime" {
+    const Probe = struct {
+        fn original(_: c.HWND, _: c.UINT, _: c.WPARAM, _: c.LPARAM) callconv(.winapi) c.LRESULT {
+            return 0;
+        }
+    };
+    const owned = Win32.opaquePointerFromInt(c.HWND, 9751);
+    const foreign = Win32.opaquePointerFromInt(c.HWND, 9752);
+    var binding = NameEditBinding{ .hwnd = owned, .original = &Probe.original };
+    try std.testing.expect(binding.owns(owned));
+    try std.testing.expect(!binding.owns(foreign));
+    try std.testing.expect(!binding.owns(null));
+    binding.destroyed(foreign);
+    try std.testing.expect(binding.owns(owned));
+    binding.destroyed(owned);
+    try std.testing.expect(!binding.owns(owned));
+    try std.testing.expect(binding.hwnd == null and binding.original == null);
+    binding.destroyed(owned);
+    try std.testing.expect(!binding.owns(owned));
+    binding.hwnd = owned;
+    try std.testing.expect(!binding.owns(owned));
 }
