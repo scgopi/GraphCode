@@ -175,6 +175,14 @@ campaign. Prepare canonical owned offline backend/peer inputs and a fresh
 current-controls 185-case report as usual; fixture compilation, injected DPI
 component models, and harmless dry-run custody are not live W1 acceptance.
 
+Advisory descendant exclusions retain the original native failure/ErrorRecord
+in memory for eligibility and refusal checks. Their diagnostic output is a
+bounded scalar projection: native/CIM facts, error type, FQID, message and
+script-stack text, with explicit graph omissions and per-field truncation
+metadata. Logging never recursively serializes the retained ErrorRecord,
+InvocationInfo, module, or process graphs. This changes observability only,
+not access-denied eligibility, held-generation checks, ownership or cleanup.
+
 The prepared action plan includes `wireTargetBinding` for WireCompletion and
 FinalBoundedActions. It binds the owned project path, exact source and target
 UUIDs and stable UIA IDs, source-derived title-band geometry, and hashes of

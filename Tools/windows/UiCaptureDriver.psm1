@@ -3807,6 +3807,49 @@ function Get-CapAdvisoryOlderExclusion {
     }
 }
 
+function Get-CapAdvisoryExclusionDiagnostic {
+    param([Parameter(Mandatory)]$Exclusion)
+    $errorRecord=$Exclusion.OriginalErrorRecord
+    $facts=[ordered]@{
+        Pid=$Exclusion.Pid;ParentPid=$Exclusion.ParentPid
+        ParentCreationFileTimeUtc=$Exclusion.ParentCreationFileTimeUtc
+        ParentExitFileTimeUtc=$Exclusion.ParentExitFileTimeUtc
+        CandidateCreationFileTimeUtc=$Exclusion.CandidateCreationFileTimeUtc
+        CandidateCreationSource=$Exclusion.CandidateCreationSource
+        ParentCreationSource=$Exclusion.ParentCreationSource
+        NativeWin32Error=$Exclusion.NativeWin32Error;NativeFailure=$Exclusion.NativeFailure
+        Reason=$Exclusion.Reason;Disposition=$Exclusion.Disposition
+        CimProcessId=$Exclusion.RawCimRow.ProcessId;CimParentProcessId=$Exclusion.RawCimRow.ParentProcessId
+        CimSessionId=$Exclusion.RawCimRow.SessionId;CimCreationDate=$Exclusion.RawCimRow.CreationDate
+        CimExecutablePath=$Exclusion.RawCimRow.ExecutablePath;CimCommandLine=$Exclusion.RawCimRow.CommandLine
+        errorType=$errorRecord.Exception.GetType().FullName
+        fullyQualifiedErrorId=$errorRecord.FullyQualifiedErrorId
+        message=$errorRecord.Exception.Message;scriptStackTrace=$errorRecord.ScriptStackTrace
+    }
+    $truncated=[Collections.Generic.List[object]]::new()
+    $omitted=[Collections.Generic.List[object]]::new()
+    foreach ($name in @($facts.Keys)) {
+        $value=$facts[$name]
+        if ($value -is [DateTime] -or $value -is [DateTimeOffset]) {$facts[$name]=$value.ToString('o')}
+        elseif ($value -is [string]) {
+            if ($value.Length -gt 2048) {
+                $facts[$name]=$value.Substring(0,2048)
+                $truncated.Add([pscustomobject]@{field=$name;originalCharacters=$value.Length;retainedCharacters=2048})
+            }
+        } elseif ($null -ne $value -and $value -isnot [int] -and $value -isnot [long] -and
+            $value -isnot [uint32] -and $value -isnot [uint64] -and $value -isnot [bool]) {
+            $omitted.Add([pscustomobject]@{field=$name;reason='NON_SCALAR_VALUE_NOT_TRAVERSED';type=$value.GetType().FullName})
+            $facts[$name]=$null
+        }
+    }
+    $facts.diagnosticCompleteness='BOUNDED_SCALARS_WITH_EXPLICIT_GRAPH_OMISSIONS'
+    $facts.omittedGraphs=@('OriginalErrorRecord','OriginalErrorRecord.TargetObject',
+        'OriginalErrorRecord.InvocationInfo','OriginalErrorRecord.Exception.Data','Module','Process')
+    $facts.omittedFields=@($omitted.ToArray())
+    $facts.truncatedFields=@($truncated.ToArray())
+    return [pscustomobject]$facts
+}
+
 function Get-CapOwnedDescendants {
     [CmdletBinding()]
     param(
@@ -3872,7 +3915,7 @@ function Get-CapOwnedDescendants {
                     if (-not $alreadyRecorded) {
                         $script:CapExcludedDescendants.Add($exclusion)
                         Write-CapTrace -Command 'CapDescendantAdvisoryExcluded' -Parameters @{
-                            diagnosticJson = ($exclusion | ConvertTo-Json -Depth 12 -Compress)
+                            diagnosticJson = (Get-CapAdvisoryExclusionDiagnostic -Exclusion $exclusion | ConvertTo-Json -Depth 6 -Compress)
                         }
                     }
                     continue
@@ -6745,6 +6788,7 @@ function Assert-CapNoWorkerTransientArtifacts {
 }
 
 Export-ModuleMember -Function @(
+    'Get-CapAdvisoryExclusionDiagnostic',
     'Test-CapFunctionalWireJob','Get-CapFunctionalWireStatePlan','Get-CapFunctionalWirePlacement',
     'Get-UiaReadonlyEndpointsDecision','Read-UiaReadonlyEdgeEndpoints',
     'Get-CapWireTargetBinding','Assert-CapWireTargetBinding','Get-CapWireTargetObservation',
