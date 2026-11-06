@@ -1202,9 +1202,10 @@ Invoke-Native "Workspace manager form data executable tests" {
   } finally { Pop-Location }
 }
 Invoke-Native "New workspace form data executable tests" {
-  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
-  if (-not $winghosttyRoot) { $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration" }
+  if ([string]::IsNullOrWhiteSpace($winghosttyRoot)) {
+    throw "New workspace form tests require GRAPHCODE_WINGHOSTTY_ROOT from Tools\windows\bootstrap.ps1."
+  }
   $include = Join-Path $winghosttyRoot "include"
   Push-Location $shellRoot
   try {
