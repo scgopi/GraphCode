@@ -4,9 +4,13 @@ param(
     [Parameter(Mandatory)][string]$ActionPlanPath,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ActionPlanSha256,
     [switch]$DryRun,
-    [switch]$FunctionalWireOnly
+    [switch]$FunctionalWireOnly,
+    [switch]$WireCensusDiagnostic
 )
 $ErrorActionPreference='Stop'
+if ($WireCensusDiagnostic -and (-not $FunctionalWireOnly -or $DryRun)) {
+    throw 'Wire census diagnostic requires FunctionalWireOnly and refuses DryRun.'
+}
 $root=[IO.Path]::GetFullPath($OwnedRoot).TrimEnd('\')
 $repositoryRoot=[IO.Path]::GetFullPath($Repository).TrimEnd('\')
 $planPath=[IO.Path]::GetFullPath($ActionPlanPath)
@@ -115,6 +119,7 @@ $leaseWindow=$authorizationHandle.Window
 $leaseDeadlineUtc=$leaseWindow.WorkerDeadlineUtc
 $focusedCapture=$true
 $actionSupplementMode=$true
+$wireCensusDiagnosticMode=$WireCensusDiagnostic.IsPresent
 $rehearsal=$false
 $transitionRehearsal=$false
 $fixtureHash=(Get-FileHash $fixturePath -Algorithm SHA256).Hash
@@ -226,13 +231,20 @@ try {
             throw 'Terminal action supplement receipt or provider count differs.'
         }
     } elseif ($plan.group -ceq 'WireCompletion') {
-        $receipt=Invoke-CapWireCompletionSupplement -StubDaemonPath $stubPath
-        $receipt | Add-Member -NotePropertyName actionIds -NotePropertyValue @('W1')
-        if (-not $functional) {
-            $receipt | Add-Member -NotePropertyName imageBindingSha256 `
-                -NotePropertyValue ([string]$plan.imageBindings.'s-goal-unwired-unselected')
+        $receipt=Invoke-CapWireCompletionSupplement -StubDaemonPath $stubPath `
+            -FirstCensusDiagnostic:$WireCensusDiagnostic
+        if ($WireCensusDiagnostic) {
+            if ($null -ne $receipt -or $actionSupplementReceipts.Count -ne 0 -or $images.Count -ne 0) {
+                throw 'Wire census diagnostic produced an action receipt or image.'
+            }
+        } else {
+            $receipt | Add-Member -NotePropertyName actionIds -NotePropertyValue @('W1')
+            if (-not $functional) {
+                $receipt | Add-Member -NotePropertyName imageBindingSha256 `
+                    -NotePropertyValue ([string]$plan.imageBindings.'s-goal-unwired-unselected')
+            }
+            $actionSupplementReceipts.Add($receipt)
         }
-        $actionSupplementReceipts.Add($receipt)
     } else {
         $wireReceipt=Invoke-CapWireCompletionSupplement -StubDaemonPath $stubPath
         $wireReceipt | Add-Member -NotePropertyName actionIds -NotePropertyValue @('W1')
@@ -286,8 +298,9 @@ try {
             [StringComparison]::OrdinalIgnoreCase)
     } | Select-Object ProcessId,Name,ExecutablePath)
 }
+$successfulStatus=if ($WireCensusDiagnostic) {'DIAGNOSTIC_NOT_W1_ACCEPTANCE'} else {'COMPLETE'}
 $terminalOutcome=if (-not $primaryFailure -and $cleanupFailures.Count -eq 0 -and
-    $independent.Count -eq 0) {'COMPLETE'} else {'FAILED'}
+    $independent.Count -eq 0) {$successfulStatus} else {'FAILED'}
 try {
     Write-CapWorkerJournalSnapshot -Kind 'Terminal' -Outcome $terminalOutcome
 } catch {
@@ -297,13 +310,14 @@ try {
 $manifest=[ordered]@{
     schemaVersion=1L
     status=$(if (-not $primaryFailure -and $cleanupFailures.Count -eq 0 -and
-        $independent.Count -eq 0) {'COMPLETE'} else {'FAILED'})
+        $independent.Count -eq 0) {$successfulStatus} else {'FAILED'})
     group=$plan.group
     sourceHead=$head
     sourceTree=$tree
     actionPlanSha256=$ActionPlanSha256.ToUpperInvariant()
     authorizationSha256=$authorizationHandle.Sha256
     executionMode=$(if ($DryRun) {'DRY_RUN_NO_AUTHORITY'}
+        elseif ($WireCensusDiagnostic) {'DIAGNOSTIC_NOT_W1_ACCEPTANCE'}
         elseif ($functional) {'FUNCTIONAL_W1_STATE_ONLY_NOT_VISUAL_PARITY'} else {'MATCHED_ACTION_SUPPLEMENT'})
     dryRun=$dryRunProof
     startedUtc=$startedUtc.ToString('o')
@@ -331,7 +345,7 @@ $manifestPath=Join-Path $output 'action-manifest.json'
     [Text.UTF8Encoding]::new($false))
 $release=[ordered]@{
     schemaVersion=1L
-    status=$(if ($manifest.status -ceq 'COMPLETE') {'RELEASED_ZERO_SURVIVORS'}
+    status=$(if ($manifest.status -ceq $successfulStatus) {'RELEASED_ZERO_SURVIVORS'}
         elseif ($independent.Count -eq 0) {'FAILED_ZERO_SURVIVORS'} else {'CLEANUP_UNPROVEN'})
     cleanupState=$(if ($runs.Count -eq 0 -and $independent.Count -eq 0 -and $cleanupFailures.Count -eq 0) {
         'NO_PROCESS_LAUNCHES'
@@ -350,7 +364,7 @@ $release=[ordered]@{
 $releasePath=Join-Path $output 'action-release.json'
 [IO.File]::WriteAllText($releasePath,($release|ConvertTo-Json -Depth 20),
     [Text.UTF8Encoding]::new($false))
-if ($manifest.status -cne 'COMPLETE' -or $release.status -cne 'RELEASED_ZERO_SURVIVORS') {
+if ($manifest.status -cne $successfulStatus -or $release.status -cne 'RELEASED_ZERO_SURVIVORS') {
     throw "Action supplement failed: $($manifest.failures -join '; ') cleanup=$($cleanupFailures -join '; ') survivors=$($independent.Count)"
 }
 if ($manifest.pngCount -ne $(if ($DryRun) {0L} else {[long]$plan.maximumResultPngs})) {

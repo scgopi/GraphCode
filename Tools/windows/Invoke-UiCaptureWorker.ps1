@@ -14,6 +14,7 @@ $rehearsal = $false
 $transitionRehearsal = $false
 $focusedCapture = $false
 $actionSupplementMode = $false
+$wireCensusDiagnosticMode = $false
 $matchedCapturePlan = $null
 $rehearsalLaunches = [Collections.Generic.List[object]]::new()
 $rehearsalActions = [Collections.Generic.List[object]]::new()
@@ -322,8 +323,8 @@ function Write-CapWorkerJournalSnapshot {
     $progressManifest=if ($actionSupplementMode) {
         [pscustomobject][ordered]@{
             schemaVersion=1L
-            executionMode='MATCHED_ACTION_SUPPLEMENT'
-            evidenceClassification='BOUNDED_ACTION_EVIDENCE_NOT_STATIC_CAPTURE'
+            executionMode=$(if ($wireCensusDiagnosticMode) {'DIAGNOSTIC_NOT_W1_ACCEPTANCE'} else {'MATCHED_ACTION_SUPPLEMENT'})
+            evidenceClassification=$(if ($wireCensusDiagnosticMode) {'DIAGNOSTIC_NOT_W1_ACCEPTANCE'} else {'BOUNDED_ACTION_EVIDENCE_NOT_STATIC_CAPTURE'})
             status=$Outcome
             actionReceiptCount=[long]$actionSupplementReceipts.Count
             providerReceiptCount=[long]$zmxSeedReceipts.Count
@@ -2573,7 +2574,10 @@ function Read-CapWireWindowObservation {
 }
 
 function Invoke-CapWireCompletionSupplement {
-    param([Parameter(Mandatory)][string]$StubDaemonPath)
+    param([Parameter(Mandatory)][string]$StubDaemonPath,[switch]$FirstCensusDiagnostic)
+    if ($FirstCensusDiagnostic -and -not (Test-CapFunctionalWireJob -Job $job -Group $plan.group)) {
+        throw 'First census diagnostic requires the functional Wire job.'
+    }
     $phase='wire-completion'
     $null=Get-CapWorkerWindowIdentity -Phase $phase -SceneName 's-goal-unwired-unselected'
     $binding=Get-CapWorkerWireBinding
@@ -2633,6 +2637,12 @@ function Invoke-CapWireCompletionSupplement {
             receipt=($dispatch|ConvertTo-Json -Depth 10 -Compress)}
         $sheet=$null
         $deadline=Get-CapActionDeadline -WorkerDeadlineUtc $leaseDeadlineUtc -MaximumWaitSeconds 5
+        if ($FirstCensusDiagnostic) {
+            $hierarchy=@(Read-CapWireWindowObservation -AppRun $app -Stage 'after-posted-target')
+            Write-CapTrace -Command 'WireCensusDiagnostic' -Parameters @{
+                status='DIAGNOSTIC_NOT_W1_ACCEPTANCE';rows=($hierarchy|ConvertTo-Json -Depth 10 -Compress)}
+            return
+        }
         do {
             $hierarchy=@(Read-CapWireWindowObservation -AppRun $app -Stage 'after-posted-target')
             $sheet=Resolve-CapOwnedSheet -Rows $hierarchy -RootHandle $app.Window `

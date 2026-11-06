@@ -239,14 +239,25 @@ censuses and observed modal controls, including on timeout. Missing hosts or
 not-yet-created content are polled within the clipped action deadline;
 ambiguity, foreign identity, replacement, or native query errors refuse.
 On a native text-query failure, the error trace also retains the already-read
-HWND, class, process/thread IDs and cached Win32 error; it adds no title/text
-payload or native query. The original 50ms query, PID filter, refusal and rethrow
+HWND, class, process/thread IDs, bounds, parent/owner, visibility/enabled state
+and cached Win32 error. These existing structural reads precede the text query
+and are reused on success; no title/text payload or native query is added.
+The original 50ms query, PID filter, refusal and rethrow
 remain unchanged. A zero native error is recorded as zero, not diagnosed as a
 specific timeout cause.
 The canonical capture suite runs five managed-construction/source contracts
 for this metadata as an owned prerequisite before fresh fixture preparation.
 They are not added to the 182/185 capture-driver case inventory and do not
 invoke the native text-query failure path.
+For a separately authorized first-census diagnostic, the existing
+`Invoke-MatchedActionSupplement.ps1` entry accepts `-WireCensusDiagnostic`
+only with `-FunctionalWireOnly` and without `-DryRun`. It performs the normal
+owned dispatch, then one post-dispatch window observation and stops before
+sheet resolution, endpoint reads or Create. Query failures propagate unchanged;
+success is labeled `DIAGNOSTIC_NOT_W1_ACCEPTANCE`, with zero action receipts
+and no images. Both outcomes use the existing cleanup path. The default W1
+route is unchanged. Current source/control bindings and fresh capture preflight
+remain mandatory; neither this diagnostic nor its clean release accepts W1.
 The original action exception is retained if cleanup also fails; launcher EOF
 is never relabeled target-private pipe EOF.
 

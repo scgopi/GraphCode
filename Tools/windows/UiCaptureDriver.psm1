@@ -306,20 +306,22 @@ public static class CapNative {
         var name = new StringBuilder(512);
         if (GetClassName(window, cls, cls.Capacity) == 0)
           throw new InvalidOperationException("Window census class query failed.");
+        NativeRect bounds;
+        if (!GetWindowRect(window, out bounds))
+          throw new InvalidOperationException("Window census bounds query failed.");
+        long parent = GetAncestor(window, 1).ToInt64(), owner = GetWindow(window, 4).ToInt64();
+        bool visible = IsWindowVisible(window), enabled = IsWindowEnabled(window);
         UIntPtr textResult;
         if (SendMessageTimeoutW(window, 0x000D, (UIntPtr)name.Capacity, name, 2, 50, out textResult) == IntPtr.Zero) {
           int nativeError = Marshal.GetLastWin32Error();
           var error = new InvalidOperationException("Window census text query failed/timed out for HWND " + window);
           error.Data["WindowTextQueryFailure"] = new { Handle=window.ToInt64(), ClassName=cls.ToString(),
-            ProcessId=pid, ThreadId=thread, Win32Error=nativeError };
+            ProcessId=pid, ThreadId=thread, Win32Error=nativeError, Parent=parent, Owner=owner,
+            Visible=visible, Enabled=enabled, Left=bounds.Left, Top=bounds.Top, Right=bounds.Right, Bottom=bounds.Bottom };
           throw error;
         }
-        NativeRect bounds;
-        if (!GetWindowRect(window, out bounds))
-          throw new InvalidOperationException("Window census bounds query failed.");
-        rows.Add(new CapWindowNode { Handle=window.ToInt64(), Parent=GetAncestor(window, 1).ToInt64(),
-          Owner=GetWindow(window, 4).ToInt64(), ProcessId=(int)pid, ClassName=cls.ToString(), Name=name.ToString(),
-          Visible=IsWindowVisible(window), Enabled=IsWindowEnabled(window),
+        rows.Add(new CapWindowNode { Handle=window.ToInt64(), Parent=parent, Owner=owner,
+          ProcessId=(int)pid, ClassName=cls.ToString(), Name=name.ToString(), Visible=visible, Enabled=enabled,
           Bounds=new int[] {bounds.Left,bounds.Top,bounds.Right,bounds.Bottom} });
         return true;
        } catch (Exception error) { failure=error; return false; }
