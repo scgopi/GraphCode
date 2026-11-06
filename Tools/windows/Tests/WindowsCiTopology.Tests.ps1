@@ -69,6 +69,18 @@ function Assert-CompleteProof([string] $Text) {
     "normal execution must require exactly one full PASS marker and one positive execution marker"
 }
 
+function Test-CompiledCompatibilityWrapper([string] $Text) {
+  $withoutCompilerFlags = $Text.Replace('"--fixture-compiler-input"', '""').
+    Replace('"--fixture-compiler-input-sha256"', '""')
+  return $Text.Contains('Build-CompiledValidationRunner.ps1') -and
+    $Text.Contains('ValidationRunner.exe') -and
+    $Text -match '(?m)^\s*& \$runner --repository-root \$repoRoot --artifact-root \$artifactRoot @compilerArguments 2>&1 \| ForEach-Object \{' -and
+    $Text -match '(?m)^\$compilerArguments = @\(\)\s*$' -and
+    $Text.Contains('if ($FixtureCompilerInput -or $FixtureCompilerInputSha256)') -and
+    $Text -match '\$compilerArguments = @\("--fixture-compiler-input", \$FixtureCompilerInput,\s*"--fixture-compiler-input-sha256", \$FixtureCompilerInputSha256\)' -and
+    $withoutCompilerFlags -notmatch 'ValidationRunner\.Tests\.ps1|--suite\b|--self-test\b|--fixture\b'
+}
+
 $portJobs = Get-WorkflowJobs $portWorkflow
 $hardeningJobs = Get-WorkflowJobs $hardeningWorkflow
 
@@ -140,11 +152,19 @@ Assert-Contract ($runnerJob.Contains('path: .ci-validation-runner') -and
 
 $wrapper = Get-Content `
   (Join-Path $repoRoot "Tools\windows\Invoke-ValidationRunnerContract.ps1") -Raw
-Assert-Contract ($wrapper.Contains('Build-CompiledValidationRunner.ps1') -and
-  $wrapper.Contains('ValidationRunner.exe') -and
-  $wrapper -match '(?m)^\s*& \$runner --repository-root \$repoRoot --artifact-root \$artifactRoot 2>&1 \| ForEach-Object \{' -and
-  $wrapper -notmatch 'ValidationRunner\.Tests\.ps1|--suite\b|--self-test\b|--fixture\b') `
+Assert-Contract (Test-CompiledCompatibilityWrapper $wrapper) `
   "the compatibility wrapper must build and execute only the normal compiled host"
+foreach ($mutation in @(
+    $wrapper.Replace(' @compilerArguments 2>&1', ' 2>&1'),
+    $wrapper.Replace('"--fixture-compiler-input"', '"--fixture"'),
+    $wrapper.Replace('"--fixture-compiler-input"', '"--suite"'),
+    $wrapper.Replace('"--fixture-compiler-input"', '"--fixture-compiler-input-extra"'),
+    $wrapper.Replace('"--fixture-compiler-input-sha256"', '"--other-sha256"'),
+    $wrapper.Replace('if ($FixtureCompilerInput -or $FixtureCompilerInputSha256)', 'if ($true)')
+  )) {
+  Assert-Contract ($mutation -cne $wrapper -and -not (Test-CompiledCompatibilityWrapper $mutation)) `
+    "the wrapper must reject missing forwarding, selectors, legacy/foreign fixture flags or unguarded compiler arguments"
+}
 Assert-CompleteProof $wrapper
 
 $privateSdkArtifacts = Join-Path $repoRoot (".build\private-sdk-caller-" + [guid]::NewGuid().ToString("N"))
