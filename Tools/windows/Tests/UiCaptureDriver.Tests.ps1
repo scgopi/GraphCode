@@ -7667,6 +7667,32 @@ if ($NativePipePeerContractOnly) {
             'Pipe peer query lost guard ordering, kernel error, zero refusal or read-only handle ownership.'
         Assert-CapTest ($source.Contains('[Microsoft.Win32.SafeHandles.SafePipeHandle].Assembly.Location')) `
             'Native helper compilation must reference the actual SafePipeHandle assembly.'
+        $tokens = $null
+        $parseErrors = $null
+        $testAst = [Management.Automation.Language.Parser]::ParseFile($PSCommandPath, [ref]$tokens, [ref]$parseErrors)
+        $pipeCases = @($testAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -ceq 'Invoke-CapTest' -and
+                $node.CommandElements.Count -ge 3 -and
+                $node.CommandElements[1] -is [Management.Automation.Language.StringConstantExpressionAst] -and
+                $node.CommandElements[1].Value -ceq 'pipe peer identifies the actual connected owned server within one deadline'
+        }, $true))
+        Assert-CapTest ($parseErrors.Count -eq 0 -and $pipeCases.Count -eq 1) 'Owned pipe case must parse exactly once.'
+        $testSource = $pipeCases[0].CommandElements[2].Extent.Text
+        $posted = $testSource.IndexOf('$pendingRead = $server.ReadAsync($read, 0, $read.Length, $limit.Token)', [StringComparison]::Ordinal)
+        $write = $testSource.IndexOf('$pendingWrite = $client.WriteAsync($payload, 0, $payload.Length, $limit.Token)', [StringComparison]::Ordinal)
+        $writeWait = $testSource.IndexOf('$null = $pendingWrite.GetAwaiter().GetResult()', [StringComparison]::Ordinal)
+        Assert-CapTest ($posted -ge 0 -and $write -gt $posted -and $writeWait -gt $write) `
+            'Owned same-process pipe must post its reader before waiting for writer completion.'
+        Assert-CapTest ([regex]::Matches($testSource, '\[Threading\.CancellationTokenSource\]::new\(5000\)').Count -eq 1 -and
+            -not $testSource.Contains('CancelAfter(') -and -not $testSource.Contains('Start-Sleep') -and
+            $testSource.Contains('$primary.Data[''CapTestDetail''] = [pscustomobject]$observation') -and
+            $testSource.Contains('beforePid = $null; afterPid = $null') -and
+            $testSource.Contains('$observation.payloadBytes = $offset') -and
+            $testSource.Contains("@{ name = 'read'; task = `$pendingRead }") -and
+            $testSource.Contains("@{ name = 'write'; task = `$pendingWrite }")) `
+            'Owned pipe case must preserve one original deadline, partial observations and pending-task cleanup.'
         return @{ declarations = 1; nativeCalls = 0; processControlCalls = 0 }
     }
 
@@ -7708,7 +7734,14 @@ if ($NativePipePeerContractOnly) {
             $server = $null
             $client = $null
             $waiting = $null
+            $pendingRead = $null
+            $pendingWrite = $null
             $primary = $null
+            $observation = [ordered]@{
+                stage = 'starting'; connected = $false; beforePid = $null; afterPid = $null
+                readPosted = $false; writePosted = $false; writeCompleted = $false
+                payloadBytes = 0; payloadMatched = $null; deadlineMilliseconds = 5000
+            }
             try {
                 $server = [IO.Pipes.NamedPipeServerStream]::new($pipeName, [IO.Pipes.PipeDirection]::InOut,
                     1, [IO.Pipes.PipeTransmissionMode]::Byte,
@@ -7716,42 +7749,72 @@ if ($NativePipePeerContractOnly) {
                 $client = [IO.Pipes.NamedPipeClientStream]::new('.', $pipeName,
                     [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
                 $waiting = $server.WaitForConnectionAsync($limit.Token)
+                $observation.stage = 'connecting'
                 $null = $client.ConnectAsync($limit.Token).GetAwaiter().GetResult()
                 $null = $waiting.GetAwaiter().GetResult()
+                $observation.connected = $true
+                $observation.stage = 'query-before'
                 $before = [CapNative]::PipeServerProcessId($client.SafePipeHandle)
+                $observation.beforePid = $before
                 Assert-CapTest ($before -gt 0 -and $before -eq [Environment]::ProcessId) `
                     'Kernel peer differs from the known owned same-process server.'
                 $payload = [byte[]]@(11, 22, 33)
-                $null = $client.WriteAsync($payload, 0, $payload.Length, $limit.Token).GetAwaiter().GetResult()
                 $read = [byte[]]::new($payload.Length)
+                # Neither pipe endpoint may wait for its peer before that peer has posted I/O.
+                $observation.stage = 'posting-read'
+                $pendingRead = $server.ReadAsync($read, 0, $read.Length, $limit.Token)
+                $observation.readPosted = $true
+                $observation.stage = 'posting-write'
+                $pendingWrite = $client.WriteAsync($payload, 0, $payload.Length, $limit.Token)
+                $observation.writePosted = $true
                 $offset = 0
                 while ($offset -lt $read.Length) {
-                    $count = $server.ReadAsync($read, $offset, ($read.Length - $offset), $limit.Token).GetAwaiter().GetResult()
+                    $observation.stage = 'waiting-read'
+                    $count = $pendingRead.GetAwaiter().GetResult()
+                    $pendingRead = $null
                     Assert-CapTest ($count -gt 0) 'Owned pipe ended before its complete payload.'
                     $offset += $count
+                    $observation.payloadBytes = $offset
+                    if ($offset -lt $read.Length) {
+                        $pendingRead = $server.ReadAsync($read, $offset, ($read.Length - $offset), $limit.Token)
+                    }
                 }
+                $observation.stage = 'waiting-write'
+                $null = $pendingWrite.GetAwaiter().GetResult()
+                $observation.writeCompleted = $true
+                $observation.stage = 'query-after'
                 $after = [CapNative]::PipeServerProcessId($client.SafePipeHandle)
+                $observation.afterPid = $after
+                $observation.payloadMatched = ($read -join ',') -ceq ($payload -join ',')
                 Assert-CapTest ($after -eq $before -and ($read -join ',') -ceq ($payload -join ',')) `
                     'Kernel peer or actual owned pipe payload changed during the live connection.'
-                return @{ before = $before; after = $after; payloadBytes = $offset
+                $observation.stage = 'complete'
+                return @{ before = $before; after = $after; payloadBytes = $offset; observation = $observation
                     scope = 'ACTUAL_OBSERVER_CONNECTION_ONLY_NOT_ANOTHER_APP_CONNECTION' }
             } catch {
                 $primary = $_.Exception
+                $primary.Data['CapTestDetail'] = [pscustomobject]$observation
                 throw
             } finally {
                 $limit.Cancel()
                 if ($null -ne $client) { $client.Dispose() }
                 if ($null -ne $server) { $server.Dispose() }
                 try {
-                    if ($null -ne $waiting) {
-                        try { $null = $waiting.GetAwaiter().GetResult() } catch {
+                    foreach ($entry in @(
+                        @{ name = 'connection'; task = $waiting },
+                        @{ name = 'read'; task = $pendingRead },
+                        @{ name = 'write'; task = $pendingWrite }
+                    )) {
+                      if ($null -ne $entry.task) {
+                        try { $null = $entry.task.GetAwaiter().GetResult() } catch {
                             $cause = $_.Exception
                             while ($cause.InnerException) { $cause = $cause.InnerException }
                             if ($cause -isnot [OperationCanceledException] -or -not $limit.IsCancellationRequested) {
                                 if ($null -eq $primary) { throw }
-                                $primary.Data['CapPipeWaitCleanupFailure'] = $cause.ToString()
+                                $primary.Data["CapPipeCleanupFailure.$($entry.name)"] = $cause.ToString()
                             }
                         }
+                      }
                     }
                 } finally { $limit.Dispose() }
             }
