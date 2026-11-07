@@ -13,6 +13,7 @@ param(
     [switch]$ActionBudgetContractOnly,
     [switch]$PreflightReportContractOnly,
     [switch]$NativeBindingsContractOnly,
+    [switch]$StaticNativeExportsContractOnly,
     [switch]$NativePipePeerContractOnly,
     [ValidateSet('All','SourceOnly')][string]$NativePipePeerCase = 'All',
     [ValidateSet('All','Accepted')][string]$NativeBindingCase = 'All',
@@ -777,6 +778,7 @@ function Assert-CapRejects {
                 'CapNative|WaitForSingleObject|kernel32.dll|WaitForSingleObject',
                 'CapNative|TerminateProcess|kernel32.dll|TerminateProcess',
                 'CapNative|WaitNamedPipeW|kernel32.dll|WaitNamedPipeW',
+                'CapNative|GetNamedPipeServerProcessId|kernel32.dll|GetNamedPipeServerProcessId',
                 'CapNative|GetWindowThreadProcessId|user32.dll|GetWindowThreadProcessId',
                 'CapNative|GetWindowRect|user32.dll|GetWindowRect',
                 'CapNative|GetClientRect|user32.dll|GetClientRect',
@@ -814,9 +816,24 @@ function Assert-CapRejects {
                 'CapProcessJob|GetStdHandle|kernel32.dll|GetStdHandle',
                 'CapProcessJob|SetHandleInformation|kernel32.dll|SetHandleInformation'
             )
-            $actual = @(Test-CapNativeBindings | ForEach-Object { "$($_.Type)|$($_.Method)|$($_.Library)|$($_.EntryPoint)" })
-            Assert-CapTest ($actual.Count -eq 56 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static56 export contract differs.'
-            return @{ subcases = 39; evidence = 'API export resolution only, no native window or GUI action.' }
+            $bindings = @(Test-CapNativeBindings)
+            $actual = @($bindings | ForEach-Object { "$($_.Type)|$($_.Method)|$($_.Library)|$($_.EntryPoint)" })
+            Assert-CapTest ($expected.Count -eq 57 -and $actual.Count -eq $expected.Count -and
+                @(Compare-Object $expected $actual -CaseSensitive).Count -eq 0) 'Exact static57 export contract differs.'
+            $peer = @([CapNative].GetMethods([Reflection.BindingFlags]'Static,NonPublic') |
+                Where-Object Name -CEQ 'GetNamedPipeServerProcessId')
+            Assert-CapTest ($peer.Count -eq 1) 'Exact safe-handle pipe peer declaration differs.'
+            $parameters = @($peer[0].GetParameters())
+            $imports = @($peer[0].GetCustomAttributes([Runtime.InteropServices.DllImportAttribute], $false))
+            Assert-CapTest ($peer[0].ReturnType -eq [bool] -and $parameters.Count -eq 2 -and
+                $parameters[0].ParameterType -eq [Microsoft.Win32.SafeHandles.SafePipeHandle] -and
+                $parameters[1].ParameterType.FullName -ceq 'System.UInt32&' -and $parameters[1].IsOut -and
+                $imports.Count -eq 1 -and $imports[0].Value -ceq 'kernel32.dll' -and
+                $imports[0].EntryPoint -ceq 'GetNamedPipeServerProcessId' -and
+                $imports[0].SetLastError -and $imports[0].CharSet -eq [Runtime.InteropServices.CharSet]::None -and
+                -not $imports[0].ExactSpelling) 'Exact safe-handle pipe peer declaration differs.'
+            return @{ exports = $actual.Count; pipePeerDeclarations = $peer.Count
+                evidence = 'Exact declaration and API export resolution only; no native function, window or GUI action.' }
         }
         Invoke-CapTest 'legacy mutable seed journal proof is refused and exact numbered terminal proof is accepted' {
             $f = New-JournalTerminalFixture 'seed-reference'
@@ -7952,6 +7969,48 @@ if ($SelectorRefusalContractOnly) {
     $report | ConvertTo-Json -Depth 25 | Set-Content -LiteralPath (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
     $report | Select-Object suite,executed,passed,failed | ConvertTo-Json -Compress
     if ($results.Count -ne 16 -or $passed -ne 16 -or $failed -ne 0) { exit 1 }
+    exit 0
+}
+
+if ($StaticNativeExportsContractOnly) {
+    $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($PSCommandPath, [ref]$null, [ref]$parseErrors)
+    Assert-CapTest ($parseErrors.Count -eq 0) 'Static export source must parse without errors.'
+    $cases = @($ast.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -ceq 'Invoke-CapTest' -and $node.CommandElements.Count -ge 3 -and
+            $node.CommandElements[1].Extent.Text -ceq "'journal native bindings match the exact job-ownership declaration contract'"
+    }, $true))
+    Assert-CapTest ($cases.Count -eq 1) 'Expected one canonical static export contract.'
+    $contract = [scriptblock]::Create($cases[0].CommandElements[2].ScriptBlock.EndBlock.Extent.Text)
+    $resolved = @(Test-CapNativeBindings)
+    Invoke-CapTest 'actual exact static exports and safe-handle peer declaration' { & $contract }
+    foreach ($scenario in @('missing','extra','duplicate','wrong-library','wrong-case')) {
+        Invoke-CapTest "static exports refuse $scenario without relaxing the allowlist" {
+            $bindings = @($resolved | ForEach-Object {
+                [pscustomobject]@{ Name = $_.Name; Type = $_.Type; Method = $_.Method
+                    Library = $_.Library; EntryPoint = $_.EntryPoint }
+            })
+            switch ($scenario) {
+                'missing' { $bindings = @($bindings | Where-Object Method -CNE 'GetNamedPipeServerProcessId') }
+                'extra' { $bindings += [pscustomobject]@{ Type='CapNative'; Method='UnknownExport'; Library='kernel32.dll'; EntryPoint='UnknownExport' } }
+                'duplicate' { $bindings[0] = $bindings[-1] }
+                'wrong-library' { $bindings[0].Library = 'foreign.dll' }
+                'wrong-case' { $bindings[0].Method = $bindings[0].Method.ToLowerInvariant() }
+            }
+            function Test-CapNativeBindings { return $bindings }
+            $null = Assert-CapRejects { & $contract } 'Exact static57 export contract differs.'
+            return @{ nativeFunctionCalls = 0; mutation = $scenario }
+        }
+    }
+    $passed = @($results | Where-Object passed -EQ $true).Count
+    $failed = @($results | Where-Object passed -EQ $false).Count
+    $report = [pscustomobject]@{ suite='UiCaptureStaticNativeExports'; executed=$results.Count
+        passed=$passed; failed=$failed; skipped=0; cases=@($results); mode='DECLARATION_EXPORT_RESOLUTION_NO_NATIVE_FUNCTION_CALLS' }
+    $report | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
+    $report | Select-Object suite,executed,passed,failed,skipped | ConvertTo-Json -Compress
+    if ($results.Count -ne 6 -or $passed -ne 6 -or $failed -ne 0) { exit 1 }
     exit 0
 }
 
