@@ -19,6 +19,8 @@ static async Task<int> RunAsync(string[] args)
 
     string? repositoryRoot = null;
     string? artifactRoot = null;
+    string? fixtureCompilerInput = null;
+    string? fixtureCompilerInputSha256 = null;
     var selectedSuites = new HashSet<string>(StringComparer.Ordinal);
     for (var index = 0; index < args.Length; index++)
     {
@@ -28,6 +30,12 @@ static async Task<int> RunAsync(string[] args)
         {
             case "--repository-root": repositoryRoot = Path.GetFullPath(value); break;
             case "--artifact-root": artifactRoot = Path.GetFullPath(value); break;
+            case "--fixture-compiler-input":
+                if (!Path.IsPathFullyQualified(value))
+                    throw new ArgumentException("Fixture compiler input requires an absolute JSON path");
+                fixtureCompilerInput = Path.GetFullPath(value);
+                break;
+            case "--fixture-compiler-input-sha256": fixtureCompilerInputSha256 = value; break;
             case "--suite":
                 if (!selectedSuites.Add(value)) throw new ArgumentException($"Duplicate suite selector: {value}");
                 break;
@@ -36,6 +44,10 @@ static async Task<int> RunAsync(string[] args)
     }
     if (repositoryRoot is null || artifactRoot is null)
         throw new ArgumentException("--repository-root and --artifact-root are required");
+    if ((fixtureCompilerInput is null) != (fixtureCompilerInputSha256 is null) ||
+        (fixtureCompilerInputSha256 is not null &&
+         !System.Text.RegularExpressions.Regex.IsMatch(fixtureCompilerInputSha256, "\\A[A-F0-9]{64}\\z")))
+        throw new ArgumentException("Fixture compiler input requires both a JSON path and uppercase SHA256");
     if (!File.Exists(Path.Combine(repositoryRoot, "Tools", "windows", "validate.ps1")))
         throw new ArgumentException("Repository root must contain Tools\\windows\\validate.ps1");
     Directory.CreateDirectory(artifactRoot);
@@ -71,7 +83,7 @@ static async Task<int> RunAsync(string[] args)
         var registryErrors = Coverage.RegistryErrors(required, suites);
         if (registryErrors.Count != 0)
             throw new InvalidDataException("Registry admission failed: " + string.Join("; ", registryErrors));
-        var context = new ValidationContext(repositoryRoot, artifactRoot);
+        var context = new ValidationContext(repositoryRoot, artifactRoot, fixtureCompilerInput, fixtureCompilerInputSha256);
         foreach (var suite in suites.Where(suite => selectedSuites.Count == 0 || selectedSuites.Contains(suite.Id)))
         {
             try

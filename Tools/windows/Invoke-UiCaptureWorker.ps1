@@ -14,6 +14,7 @@ $rehearsal = $false
 $transitionRehearsal = $false
 $focusedCapture = $false
 $actionSupplementMode = $false
+$wireCensusDiagnosticMode = $false
 $matchedCapturePlan = $null
 $rehearsalLaunches = [Collections.Generic.List[object]]::new()
 $rehearsalActions = [Collections.Generic.List[object]]::new()
@@ -145,6 +146,19 @@ function Assert-CapActionWindowContext {
                 throw 'Action window binding in-memory plan/job differs from bound bytes.'
             }
         }
+        if (Test-CapFunctionalWireJob -Job $job -Group $plan.group) {
+            $repositoryRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+            $contract=$job.functionalWireContract
+            if ($contract.windowSourcePath -cne (Join-Path $repositoryRoot 'graphcode-windows\src\MainWindow.zig')) {
+                throw 'Functional Wire requires the current owned repository window source.'
+            }
+            foreach ($revision in @('HEAD',$job.binaries.after.binaryBuiltAtSource)) {
+                $appTree=(& git -C $repositoryRoot rev-parse ($revision+':graphcode-windows')).Trim()
+                if ($LASTEXITCODE -ne 0 -or $appTree -cne $contract.applicationSourceTree) {
+                    throw 'Functional Wire binary/application input equivalence changed.'
+                }
+            }
+        }
         return @(Assert-CapActionWindowBindings -Job $job -Plan $plan)
     } finally {$held.Pin.Dispose()}
 }
@@ -152,8 +166,19 @@ function Assert-CapActionWindowContext {
 function Get-CapWorkerWireBinding {
     $null=Assert-CapActionWindowContext
     $binding=if ($plan.PSObject.Properties['wireTargetBinding']) {$plan.wireTargetBinding} else {$null}
-    return Assert-CapWireTargetBinding -Binding $binding `
+    $bound=Assert-CapWireTargetBinding -Binding $binding `
         -Repository ([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))) -OwnedRoot $root
+    if (Test-CapFunctionalWireJob -Job $job -Group $plan.group) {
+        $state=Read-CapBoundJson -Root $root -Reference $plan.functionalWireState
+        $expected=Get-CapFunctionalWireStatePlan -WireBinding $bound -SourceHead $plan.sourceHead `
+            -WorkerSha256 $plan.workerSha256 -StubSha256 $plan.stubDaemonSha256
+        if (-not [Text.Json.Nodes.JsonNode]::DeepEquals(
+            [Text.Json.Nodes.JsonNode]::Parse(($state|ConvertTo-Json -Depth 30 -Compress)),
+            [Text.Json.Nodes.JsonNode]::Parse(($expected|ConvertTo-Json -Depth 30 -Compress)))) {
+            throw 'Functional Wire fresh state provenance differs.'
+        }
+    }
+    return $bound
 }
 
 function Get-CapWorkerWindowIdentity {
@@ -177,6 +202,14 @@ function Get-CapMatchedWindowGeometry {
     param([Parameter(Mandatory)][string]$Phase,[string]$SceneName='')
     $identity=Get-CapWorkerWindowIdentity -Phase $Phase -SceneName $SceneName
     $area=Get-CapPrimaryPhysicalWorkArea
+    if (Test-CapFunctionalWireJob -Job $job) {
+        if ((Get-FileHash -LiteralPath $identity.sourcePath).Hash -cne $identity.sourceSha256) {
+            throw 'Functional Wire window source changed.'
+        }
+        return [pscustomobject]@{kind='OWNED_WINDOW_MEASUREMENT_REQUIRED'
+            WorkArea=@($area.Left,$area.Top,$area.Right,$area.Bottom)
+            actualDpi=$null;runtimeWindowEvaluated=$false;visualParityClaimed=$false}
+    }
     $contract = $job.captureContract
     return Get-CapDpiGeometry -LogicalClientWH @($contract.logicalClientWH) `
         -ExpectedDpi ([uint32]$contract.expectedWindowDpi) `
@@ -290,8 +323,8 @@ function Write-CapWorkerJournalSnapshot {
     $progressManifest=if ($actionSupplementMode) {
         [pscustomobject][ordered]@{
             schemaVersion=1L
-            executionMode='MATCHED_ACTION_SUPPLEMENT'
-            evidenceClassification='BOUNDED_ACTION_EVIDENCE_NOT_STATIC_CAPTURE'
+            executionMode=$(if ($wireCensusDiagnosticMode) {'DIAGNOSTIC_NOT_W1_ACCEPTANCE'} else {'MATCHED_ACTION_SUPPLEMENT'})
+            evidenceClassification=$(if ($wireCensusDiagnosticMode) {'DIAGNOSTIC_NOT_W1_ACCEPTANCE'} else {'BOUNDED_ACTION_EVIDENCE_NOT_STATIC_CAPTURE'})
             status=$Outcome
             actionReceiptCount=[long]$actionSupplementReceipts.Count
             providerReceiptCount=[long]$zmxSeedReceipts.Count
@@ -532,7 +565,7 @@ function Get-CapBaseEnvironment {
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
-    if (Test-CapMatchedAdapter) {
+    if ((Test-CapMatchedAdapter) -or (Test-CapFunctionalWireJob -Job $job)) {
         $project=Assert-CapOwnedPath (Join-Path $root 'fixtures\projects\Matched')
         $null=New-Item -ItemType Directory -Path $project -Force
         return @{
@@ -1030,7 +1063,7 @@ function Send-CapMatchedEscape {
     $foreground=if ($ForegroundProbe) {
         [bool](& $ForegroundProbe $AppRun.Window)
     } else {
-        [GraphCodeUiaGateState]::IsForegroundWindow($AppRun.Window)
+        [CapUiaGateState]::IsForegroundWindow($AppRun.Window)
     }
     if (-not $foreground) {
         throw 'Wire cancellation requires the owned GraphCode shell foreground.'
@@ -1038,7 +1071,7 @@ function Send-CapMatchedEscape {
     $dialog=if ($DialogProbe) {
         [IntPtr](& $DialogProbe $AppRun.Run.Identity.Pid)
     } else {
-        [GraphCodeUiaGateState]::FindTopLevel('GraphCodeNativeForm',[uint32]$AppRun.Run.Identity.Pid)
+        [CapUiaGateState]::FindTopLevel('GraphCodeNativeForm',[uint32]$AppRun.Run.Identity.Pid)
     }
     if ($dialog -ne [IntPtr]::Zero) {
         throw 'Wire cancellation refuses to inject Escape while an owned native dialog is present.'
@@ -1046,7 +1079,7 @@ function Send-CapMatchedEscape {
     $sent=if ($KeyboardSender) {
         [bool](& $KeyboardSender $AppRun.Window 0x1B)
     } else {
-        [GraphCodeUiaGateState]::PostKeyboard($AppRun.Window,0x1B)
+        [CapUiaGateState]::PostKeyboard($AppRun.Window,0x1B)
     }
     if (-not $sent) {
         throw 'Wire cancellation Escape injection was rejected.'
@@ -1170,6 +1203,7 @@ function Save-CapSceneImage {
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
     Assert-CapWorkerDeadline "before image $Phase/$SceneName"
+    if (Test-CapFunctionalWireJob -Job $job) {throw 'Functional Wire does not authorize screenshots.'}
     $metrics = Get-CapWindowMetrics -Window $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
     $expectedOuter = @(30, 30, 1486, 989)
     $isD=$job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'D_QUICK_CHAT_V1'
@@ -1413,7 +1447,7 @@ function Start-CapGraphCodeApp {
     $arguments = if ($rehearsal) { [string[]]@($job.rehearsalTarget.arguments) } else { [string[]]@() }
     if ($rehearsal) { $role = 'rehearsal-target' }
     $isD=$job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'D_QUICK_CHAT_V1'
-    $isS=Test-CapMatchedAdapter
+    $isS=(Test-CapMatchedAdapter) -or (Test-CapFunctionalWireJob -Job $job)
     $workingDirectory = if ($rehearsal) {$Roots.Peer} elseif ($isS) {Join-Path $root 'fixtures\projects\Matched'} elseif ($isD) {Join-Path $root 'fixtures\projects\D Offline Capture Fixture'} else {Join-Path $root 'fixtures\projects\Alpha'}
     if (-not $rehearsal) {
         $shellSession = 'graphcode-' + $SessionPrefix + '-' + [guid]::Empty.ToString('D')
@@ -1463,6 +1497,18 @@ function Start-CapGraphCodeApp {
         Set-CapWindowPosition -Window $window -ProcessIdentity $run.Identity -X $placement.x -Y $placement.y -Width $placement.width -Height $placement.height
         $appRun | Add-Member -NotePropertyName Placement -NotePropertyValue $placement
         $appRun | Add-Member -NotePropertyName Roots -NotePropertyValue $Roots
+    } elseif (Test-CapFunctionalWireJob -Job $job) {
+        $beforeMetrics=Get-CapWindowMetrics -Window $window -ProcessIdentity $run.Identity
+        $identity=Get-CapWorkerWindowIdentity -Phase $Phase -SceneName $SceneName
+        $area=Get-CapPrimaryPhysicalWorkArea
+        $placement=Get-CapFunctionalWirePlacement -Identity $identity -Metrics $beforeMetrics `
+            -WorkArea @($area.Left,$area.Top,$area.Right,$area.Bottom)
+        $geometry=$placement.Geometry
+        Set-CapWindowPosition -Window $window -ProcessIdentity $run.Identity `
+            -X $geometry.OuterBounds[0] -Y $geometry.OuterBounds[1] `
+            -Width $geometry.OuterWH[0] -Height $geometry.OuterWH[1]
+        $appRun | Add-Member -NotePropertyName FunctionalPlacement -NotePropertyValue $placement
+        $appRun | Add-Member -NotePropertyName Roots -NotePropertyValue $Roots
     } elseif (Test-CapMatchedDpiAdapter) {
         $beforeMetrics=Get-CapWindowMetrics -Window $window -ProcessIdentity $run.Identity
         $contract=$job.captureContract
@@ -1477,7 +1523,9 @@ function Start-CapGraphCodeApp {
     } else {Set-CapWindowPosition -Window $window -ProcessIdentity $run.Identity}
     Start-Sleep -Milliseconds 500
     $metrics = Get-CapWindowMetrics -Window $window -ProcessIdentity $run.Identity
-    if (Test-CapMatchedDpiAdapter) {
+    if (Test-CapFunctionalWireJob -Job $job) {
+        $null=Assert-CapFunctionalWireWindow -AppRun $appRun
+    } elseif (Test-CapMatchedDpiAdapter) {
         $geometry=$appRun.Placement
         $identity=Get-CapWorkerWindowIdentity -Phase $Phase -SceneName $SceneName
         $null=Assert-CapDpiWindowIdentity -Metrics $metrics -Identity $identity `
@@ -2274,7 +2322,7 @@ function Invoke-CapMatchedTerminalInputChallenge {
     $pane=$panes[$FocusedIndex]
     $pane.SetFocus()
     Start-Sleep -Milliseconds 100
-    if (-not [GraphCodeUiaGateState]::IsForegroundWindow($AppRun.Window) -or
+    if (-not [CapUiaGateState]::IsForegroundWindow($AppRun.Window) -or
         -not $pane.Current.HasKeyboardFocus) {
         throw 'Terminal input challenge requires the owned shell and pane focus.'
     }
@@ -2285,8 +2333,8 @@ function Invoke-CapMatchedTerminalInputChallenge {
     $prefix="GC_${nonce}_"
     $expectedArithmetic=323L
     $command="powershell.exe -NoProfile -NonInteractive -Command `"`$v=17*19;Write-Output ('$prefix'+`$PID+'_'+`$v)`""
-    $characters=[GraphCodeUiaGateState]::SendUnicodeText($command)
-    $enter=[GraphCodeUiaGateState]::SendKeyInput(0x0D,1)
+    $characters=[CapUiaGateState]::SendUnicodeText($command)
+    $enter=[CapUiaGateState]::SendKeyInput(0x0D,1)
     if ($characters -ne $command.Length -or $enter -ne 1) {
         throw 'Terminal input challenge native SendInput count differs.'
     }
@@ -2393,7 +2441,7 @@ function Invoke-CapMatchedTerminalSceneSupplement {
             $bounds=@($alternate[0].closeBounds)
             $x=[int](($bounds[0]+$bounds[2])/2)
             $y=[int](($bounds[1]+$bounds[3])/2)
-            $pointer=@([GraphCodeUiaGateState]::MovePointerScreen($x,$y))
+            $pointer=@([CapUiaGateState]::MovePointerScreen($x,$y))
             Start-Sleep -Milliseconds 250
             if ($pointer.Count -ne 4 -or $pointer[0] -ne $x -or $pointer[1] -ne $y -or
                 $pointer[3] -ne $AppRun.Run.Identity.Pid) {
@@ -2422,7 +2470,7 @@ function Invoke-CapMatchedTerminalSceneSupplement {
             $before=& $observeTabs 1 0
             $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-close-tab' -SubjectId '0'
             Start-Sleep -Milliseconds 250
-            $form=[GraphCodeUiaGateState]::FindTopLevel('GraphCodeNativeForm',[uint32]$AppRun.Run.Identity.Pid)
+            $form=[CapUiaGateState]::FindTopLevel('GraphCodeNativeForm',[uint32]$AppRun.Run.Identity.Pid)
             $result='REFUSED_TAB_RETAINED'
             $confirmation=$null
             if ($form -ne [IntPtr]::Zero) {
@@ -2461,6 +2509,22 @@ function Invoke-CapMatchedTerminalSceneSupplement {
     return [pscustomobject]$receipt
 }
 
+function Assert-CapFunctionalWireWindow {
+    param([Parameter(Mandatory)]$AppRun)
+    $descriptor=Get-CapWorkerWindowIdentity -Phase 'wire-completion' -SceneName 's-goal-unwired-unselected'
+    if ((Get-FileHash -LiteralPath $descriptor.sourcePath).Hash -cne $descriptor.sourceSha256) {
+        throw 'Functional Wire source changed after startup.'
+    }
+    $area=Get-CapPrimaryPhysicalWorkArea
+    $placement=$AppRun.FunctionalPlacement
+    if ((@($area.Left,$area.Top,$area.Right,$area.Bottom) -join ',') -cne ($placement.WorkArea -join ',')) {
+        throw 'Functional Wire measured work area changed.'
+    }
+    $metrics=Get-CapWindowMetrics -Window $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
+    return Assert-CapDpiWindowIdentity -Metrics $metrics -Identity $placement.Identity `
+        -ExpectedOuterBounds $placement.Geometry.OuterBounds
+}
+
 function Read-CapWireTargetObservation {
     param([Parameter(Mandatory)]$AppRun,[Parameter(Mandatory)]$Binding)
     $null=Assert-CapRootProcess -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
@@ -2476,9 +2540,13 @@ function Read-CapWireTargetObservation {
             RuntimeId=@($_.GetRuntimeId());Bounds=@($b.Left,$b.Top,$b.Right,$b.Bottom)}
     })
     $metrics=Get-CapWindowMetrics -Window $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
-    $identity=Get-CapWorkerWindowIdentity -Phase 'wire-completion' -SceneName $Binding.scene
-    $geometry=Get-CapMatchedWindowGeometry -Phase 'wire-completion' -SceneName $Binding.scene
-    $null=Assert-CapDpiWindowIdentity -Metrics $metrics -Identity $identity -ExpectedOuterBounds $geometry.OuterBounds
+    if (Test-CapFunctionalWireJob -Job $job) {
+        $metrics=Assert-CapFunctionalWireWindow -AppRun $AppRun
+    } else {
+        $identity=Get-CapWorkerWindowIdentity -Phase 'wire-completion' -SceneName $Binding.scene
+        $geometry=Get-CapMatchedWindowGeometry -Phase 'wire-completion' -SceneName $Binding.scene
+        $null=Assert-CapDpiWindowIdentity -Metrics $metrics -Identity $identity -ExpectedOuterBounds $geometry.OuterBounds
+    }
     $observation=Get-CapWireTargetObservation -Binding $Binding -Rows $rows `
         -ExpectedProcessId $AppRun.Run.Identity.Pid -Dpi $metrics.Dpi
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters @{
@@ -2505,8 +2573,79 @@ function Read-CapWireWindowObservation {
     return $hierarchy
 }
 
+function Read-CapReadyWireWindowObservation {
+    param([Parameter(Mandatory)]$AppRun,[Parameter(Mandatory)][DateTime]$DeadlineUtc,
+        [scriptblock]$NowProvider,[scriptblock]$SleepAction)
+    $now={if ($NowProvider) {return & $NowProvider};return [DateTime]::UtcNow}
+    while ((& $now) -lt $DeadlineUtc) {
+        Assert-CapWorkerDeadline 'Wire completion native form'
+        $structure=@(Get-CapOwnedWindowStructure -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity)
+        $ready=Resolve-CapOwnedSheet -Rows $structure -RootHandle $AppRun.Window `
+            -ExpectedProcessId $AppRun.Run.Identity.Pid
+        if ((& $now) -ge $DeadlineUtc) {break}
+        if ($null -ne $ready) {
+            Assert-CapWorkerDeadline 'Wire completion native form'
+            $hierarchy=@(Read-CapWireWindowObservation -AppRun $AppRun -Stage 'after-posted-target')
+            Assert-CapWorkerDeadline 'Wire completion native form'
+            if ((& $now) -ge $DeadlineUtc) {break}
+            $sheet=Resolve-CapOwnedSheet -Rows $hierarchy -RootHandle $AppRun.Window `
+                -ExpectedProcessId $AppRun.Run.Identity.Pid
+            if ($null -eq $sheet -or $sheet.host.Handle -ne $ready.host.Handle -or
+                $sheet.content.Handle -ne $ready.content.Handle) {
+                throw 'Owned wire sheet changed between structural readiness and full observation.'
+            }
+            return [pscustomobject]@{sheet=$sheet;hierarchy=$hierarchy}
+        }
+        $remaining=($DeadlineUtc-(& $now)).TotalMilliseconds
+        if ($remaining -le 0) {break}
+        $milliseconds=[int][Math]::Min(100,[Math]::Ceiling($remaining))
+        if ($SleepAction) {& $SleepAction $milliseconds}
+        else {Start-Sleep -Milliseconds $milliseconds}
+    }
+    throw 'Wire supplement target did not expose an owned sheet and native edge child before its action deadline.'
+}
+
+function Assert-CapWireCreateAction {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Creates)
+    $observedUtc=[DateTime]::UtcNow.ToString('o')
+    $candidates=[Collections.Generic.List[object]]::new()
+    $enabled='UNAVAILABLE_NOT_READ'
+    $offscreen='UNAVAILABLE_NOT_READ'
+    try {
+        foreach ($element in $Creates) {
+            $current=$element.get_Current()
+            $type=$current.get_ControlType()
+            $candidates.Add([pscustomobject]@{name=$current.get_Name();processId=$current.get_ProcessId()
+                controlTypeId=$type.Id;controlTypeName=$type.ProgrammaticName
+                nativeHandle=$current.get_NativeWindowHandle();runtimeId=@($element.GetRuntimeId())})
+        }
+        if ($Creates.Count -eq 1) {
+            $enabled=$Creates[0].get_Current().get_IsEnabled()
+            if ($enabled) {$offscreen=$Creates[0].get_Current().get_IsOffscreen()}
+        }
+        Write-CapTrace -Command 'WireCreatePredicateObservation' -Parameters @{
+            stage='FILTERED_SECOND_READ';observedUtc=$observedUtc;count=$Creates.Count
+            candidates=($candidates|ConvertTo-Json -Depth 5 -Compress);enabled=$enabled;offscreen=$offscreen}
+        if ($Creates.Count -ne 1 -or -not $enabled -or $offscreen) {
+            throw 'Wire supplement native edge form omitted its enabled Create action.'
+        }
+    } catch {
+        $primary=$_
+        try {
+            Write-CapTrace -Command 'WireCreatePredicateFailure' -Parameters @{
+                stage='FILTERED_SECOND_READ';observedUtc=$observedUtc;count=$Creates.Count
+                candidates=($candidates|ConvertTo-Json -Depth 5 -Compress);enabled=$enabled;offscreen=$offscreen
+                propertyEvidence='INCOMPLETE_ON_ERROR_NOT_DEFAULTED';error=$primary.Exception.ToString()}
+        } catch {$primary.Exception.Data['WireCreateTraceFailure']=$_}
+        throw $primary
+    }
+}
+
 function Invoke-CapWireCompletionSupplement {
-    param([Parameter(Mandatory)][string]$StubDaemonPath)
+    param([Parameter(Mandatory)][string]$StubDaemonPath,[switch]$FirstCensusDiagnostic)
+    if ($FirstCensusDiagnostic -and -not (Test-CapFunctionalWireJob -Job $job -Group $plan.group)) {
+        throw 'First census diagnostic requires the functional Wire job.'
+    }
     $phase='wire-completion'
     $null=Get-CapWorkerWindowIdentity -Phase $phase -SceneName 's-goal-unwired-unselected'
     $binding=Get-CapWorkerWireBinding
@@ -2555,33 +2694,50 @@ function Invoke-CapWireCompletionSupplement {
             -ObservedProcessIds @($heldRootElement.Current.ProcessId)
         $null=Assert-CapRootProcess -RootHandle $app.Window -ProcessIdentity $app.Run.Identity
         $targetX=$reacquired.screenPoint[0];$targetY=$reacquired.screenPoint[1]
+        $sourceX=$reacquired.sourceScreenPoint[0];$sourceY=$reacquired.sourceScreenPoint[1]
         Write-CapTrace -Command 'WirePointerDispatchIntent' -Parameters @{
             root=[long]$app.Window;process=$app.Run.Identity.Pid;generation=$app.Run.Identity.CreationFileTimeUtc
             target=($reacquired|ConvertTo-Json -Depth 20 -Compress)
             beforeHierarchy=($beforeHierarchy|ConvertTo-Json -Depth 10 -Compress)
             rootRuntimeId=($rootRuntime|ConvertTo-Json -Compress)}
-        $dispatch=[CapNative]::PostPointerClickScreen($app.Window,$targetX,$targetY)
+        $dispatch=[CapNative]::PostPointerDragScreen($app.Window,$sourceX,$sourceY,$targetX,$targetY)
         Write-CapTrace -Command 'WirePointerDispatchResult' -Parameters @{
             receipt=($dispatch|ConvertTo-Json -Depth 10 -Compress)}
         $sheet=$null
         $deadline=Get-CapActionDeadline -WorkerDeadlineUtc $leaseDeadlineUtc -MaximumWaitSeconds 5
-        do {
+        if ($FirstCensusDiagnostic) {
             $hierarchy=@(Read-CapWireWindowObservation -AppRun $app -Stage 'after-posted-target')
-            $sheet=Resolve-CapOwnedSheet -Rows $hierarchy -RootHandle $app.Window `
-                -ExpectedProcessId $app.Run.Identity.Pid
-            if ($null -ne $sheet) {break}
-            Assert-CapWorkerDeadline 'Wire completion native form';Start-Sleep -Milliseconds 100
-        } while ([DateTime]::UtcNow -lt $deadline)
-        if ($null -eq $sheet) {throw 'Wire supplement target did not expose an owned sheet and native edge child; see hierarchy census.'}
+            Write-CapTrace -Command 'WireCensusDiagnostic' -Parameters @{
+                status='DIAGNOSTIC_NOT_W1_ACCEPTANCE';rows=($hierarchy|ConvertTo-Json -Depth 10 -Compress)}
+            return
+        }
+        $observation=Read-CapReadyWireWindowObservation -AppRun $app -DeadlineUtc $deadline
+        $hierarchy=@($observation.hierarchy)
+        $sheet=$observation.sheet
         $formElement=[Windows.Automation.AutomationElement]::FromHandle([IntPtr]$sheet.host.Handle)
         $modalRuntime=@($formElement.GetRuntimeId())
+        $modalObservedUtc=[DateTime]::UtcNow.ToString('o')
         $modalControls=@($formElement.FindAll([Windows.Automation.TreeScope]::Descendants,
             [Windows.Automation.Condition]::TrueCondition)|ForEach-Object {
-                $c=$_.Current
-                [pscustomobject]@{name=$c.Name;id=$c.AutomationId;processId=$c.ProcessId
-                    class=$c.ClassName;enabled=$c.IsEnabled;offscreen=$c.IsOffscreen}
+                try {
+                    $c=$_.get_Current()
+                    $type=$c.get_ControlType()
+                    [pscustomobject]@{name=$c.get_Name();id=$c.get_AutomationId();processId=$c.get_ProcessId()
+                        class=$c.get_ClassName();enabled=$c.get_IsEnabled();offscreen=$c.get_IsOffscreen()
+                        controlTypeId=$type.Id;controlTypeName=$type.ProgrammaticName
+                        nativeHandle=$c.get_NativeWindowHandle();runtimeId=@($_.GetRuntimeId())}
+                } catch {
+                    $primary=$_
+                    try {
+                        Write-CapTrace -Command 'WireOwnedModalPropertyFailure' -Parameters @{
+                            stage='UNFILTERED_FIRST_READ';observedUtc=$modalObservedUtc
+                            propertyEvidence='UNAVAILABLE_ON_ERROR';error=$primary.Exception.ToString()}
+                    } catch {$primary.Exception.Data['WireCreateTraceFailure']=$_}
+                    throw $primary
+                }
             })
         Write-CapTrace -Command 'WireOwnedModalControls' -Parameters @{
+            stage='UNFILTERED_FIRST_READ';observedUtc=$modalObservedUtc
             sheet=($sheet|ConvertTo-Json -Depth 10 -Compress)
             controls=($modalControls|ConvertTo-Json -Depth 10 -Compress)}
         $null=Assert-CapUiaProcessIds -ExpectedProcessId $app.Run.Identity.Pid `
@@ -2593,9 +2749,7 @@ function Invoke-CapWireCompletionSupplement {
             [Windows.Automation.PropertyCondition]::new(
                 [Windows.Automation.AutomationElement]::NameProperty,'Create'))
         $creates=@($formElement.FindAll([Windows.Automation.TreeScope]::Descendants,$buttonCondition))
-        if ($creates.Count -ne 1 -or -not $creates[0].Current.IsEnabled -or $creates[0].Current.IsOffscreen) {
-            throw 'Wire supplement native edge form omitted its enabled Create action.'
-        }
+        Assert-CapWireCreateAction -Creates $creates
         $latest=Resolve-CapOwnedSheet -Rows @(
             Get-CapOwnedWindowHierarchy -RootHandle $app.Window -ProcessIdentity $app.Run.Identity) `
             -RootHandle $app.Window -ExpectedProcessId $app.Run.Identity.Pid
@@ -2603,6 +2757,11 @@ function Invoke-CapWireCompletionSupplement {
             $latest.content.Handle -ne $sheet.content.Handle -or ($modalRuntime -join ',') -cne
             (@([Windows.Automation.AutomationElement]::FromHandle([IntPtr]$latest.host.Handle).GetRuntimeId()) -join ',')) {
             throw 'Owned wire sheet was replaced before Create.'
+        }
+        $endpoints=Read-UiaReadonlyEdgeEndpoints -Dialog $formElement -ProcessId $app.Run.Identity.Pid `
+            -Owner $app.Window -Title 'Create or edit edge' -ExpectedSource $sourceId -ExpectedTarget $targetId
+        if ($endpoints.source -cne $sourceId -or $endpoints.target -cne $targetId) {
+            throw 'Owned wire endpoint values differ from the bound source and target before Create.'
         }
         $creates[0].GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
         $stubResult=$null
@@ -2651,11 +2810,13 @@ function Invoke-CapWireCompletionSupplement {
             wireAutomationId=$wireId
             armedStatus=$reacquired.mode
             targetScreenPoint=@($targetX,$targetY)
+            sourceConnectorScreenPoint=@($sourceX,$sourceY)
             targetObservation=$reacquired
             pointerDispatch=$dispatch
             windowHierarchyBefore=$beforeHierarchy
             windowHierarchyAfter=$hierarchy
             modalControls=$modalControls
+            readonlyEndpoints=$endpoints.snapshot
             edgeId=$edge.id
             edgeSpec=[pscustomobject]@{
                 kind=$edge.kind;condition=$edge.condition
@@ -2673,10 +2834,24 @@ function Invoke-CapWireCompletionSupplement {
             requestIds=@($stubResult.appliedEdgeCreateRequests)
             correlated=$stubResult.unansweredRequests.Count -eq 0
         }
+        if (Test-CapFunctionalWireJob -Job $job) {
+            $receipt | Add-Member -NotePropertyName sceneState -NotePropertyValue ([pscustomobject]@{
+                evidenceMode='FRESH_OWNED_UIA_STATE_AND_CORRELATED_EDGE_NOT_VISUAL_PARITY'
+                plan=$plan.functionalWireState
+                processId=$app.Run.Identity.Pid;creationFileTimeUtc=$app.Run.Identity.CreationFileTimeUtc
+                stubProcessId=$stub.Identity.Pid;stubCreationFileTimeUtc=$stub.Identity.CreationFileTimeUtc
+                rootRuntimeId=$rootRuntime;beforeArmHierarchy=$beforeHierarchy;armedCards=$reacquired
+                placement=$app.FunctionalPlacement;finalMetrics=(Assert-CapFunctionalWireWindow -AppRun $app)
+                imageEvidence=$false;visualParityClaimed=$false
+            })
+        }
         return $receipt
     } catch {
         $primary=$_
-        Write-CapTrace -Command 'WireSupplementPrimaryFailure' -Parameters @{error=$_.Exception.ToString()}
+        $cause=$_.Exception
+        while ($cause.InnerException) {$cause=$cause.InnerException}
+        Write-CapTrace -Command 'WireSupplementPrimaryFailure' -Parameters @{error=$_.Exception.ToString()
+            pointerDragReceipt=($cause.Data['PointerDragReceipt']|ConvertTo-Json -Depth 10 -Compress)}
         throw
     } finally {
         $wireCleanupErrors=[Collections.Generic.List[object]]::new()
@@ -3246,7 +3421,7 @@ function Set-CapMatchedTabHover {
     $x=[int](($Bounds[0]+$Bounds[2])/2-$metrics.OuterBounds[0]-$border)
     $y=[int](($Bounds[1]+$Bounds[3])/2-$metrics.OuterBounds[1]-$topFrame)
     if ($x -lt 0 -or $y -lt 0 -or $x -ge $metrics.ClientBounds[2] -or $y -ge $metrics.ClientBounds[3]) {throw 'Matched hover escaped the owned client area.'}
-    if (-not [GraphCodeUiaGateState]::PostHover($AppRun.Window,$x,$y)) {throw 'Posting owned tab hover failed.'}
+    if (-not [CapUiaGateState]::PostHover($AppRun.Window,$x,$y)) {throw 'Posting owned tab hover failed.'}
     Start-Sleep -Milliseconds 150
 }
 
@@ -3450,6 +3625,7 @@ try {
     }
     $fixtureHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $fixturePath).Hash
     }
+    if (-not $rehearsal) {Initialize-CapUiaClient}
     if (Test-CapMatchedAdapter) {
         $matchedCapturePlan=Get-CapMatchedCapturePlan -Job $job
     }

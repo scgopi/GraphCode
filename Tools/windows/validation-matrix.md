@@ -8,6 +8,7 @@ The Windows port must have runnable commands before implementation fleets begin.
 |---|---|
 | Windows investigation spikes | `pwsh Tools/windows/validate.ps1 -Task all` |
 | Compiled validation runner contract | `pwsh -NoProfile -File Tools\windows\Invoke-ValidationRunnerContract.ps1` (builds and runs the normal full C# entry; see [runner documentation](ValidationRunner/README.md)) |
+| Explicit fixture compiler selection (controlled files and observations; no compiler/GUI execution) | `pwsh -NoProfile -File Tools\windows\Tests\FixtureCompiler.Tests.ps1 -ScratchRoot .build\fixture-compiler-contracts` (fresh directory required; 27 cases; also run by the canonical capture adapter before fresh preparation) |
 | Exclusive validation fixture directories (independent filesystem and static wiring contracts) | `pwsh -NoProfile -File Tools\windows\Tests\ValidationFixtureDirectory.Tests.ps1` |
 | Isolated 30-key process environment boundary | `pwsh -NoProfile -File Tools\windows\Tests\IsolatedProcessEnvironment.Contracts.Tests.ps1 -Phase REGRESSION` |
 | Deterministic visual baseline | `pwsh Tools/windows/validate.ps1 -Task visual-baseline` |

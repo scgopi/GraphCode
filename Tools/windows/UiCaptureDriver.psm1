@@ -19,7 +19,7 @@ $helperSource = @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
-public static class GraphCodeUiaGateState {
+public static class CapUiaGateState {
   [StructLayout(LayoutKind.Sequential)]
   private struct Point { public int X, Y; }
   [StructLayout(LayoutKind.Sequential)]
@@ -170,11 +170,26 @@ public sealed class CapWindowNode {
   public int[] Bounds;
 }
 
+public sealed class CapWindowStructure {
+  public long Handle, Parent, Owner;
+  public int ProcessId;
+  public string ClassName;
+  public bool Visible, Enabled;
+  public int[] Bounds;
+}
+
 public sealed class CapPointerReceipt {
   public long Window, Recipient, Foreground, PackedLParam, CursorWindow;
   public int ProcessId, RecipientProcessId, ScreenX, ScreenY, ClientX, ClientY, CursorX, CursorY;
   public long DpiContext;
   public bool MovePosted, DownPosted, UpPosted;
+  public string Delivery = "POSTED_WINDOW_MESSAGES_NOT_PHYSICAL_POINTER";
+}
+
+public sealed class CapPointerDragReceipt {
+  public CapPointerReceipt Start, End;
+  public bool HeldMovePosted;
+  public string Gesture = "SOURCE_CONNECTOR_DRAG_DROP";
   public string Delivery = "POSTED_WINDOW_MESSAGES_NOT_PHYSICAL_POINTER";
 }
 
@@ -280,54 +295,233 @@ public static class CapNative {
     }
   }
 
-  public static CapWindowNode[] WindowHierarchy(int expectedPid) {
+  public static void AssertWindowAncestry(CapWindowNode expected, CapWindowNode observed) {
+    if (expected == null || observed == null)
+      throw new InvalidOperationException("Window family: missing selected ancestry.");
+    if (expected.Handle != observed.Handle || expected.ProcessId != observed.ProcessId ||
+        expected.Parent != observed.Parent || expected.Owner != observed.Owner) {
+      var error = new InvalidOperationException("Window family: selected ancestry changed.");
+      error.Data["WindowAncestryFailure"] = new { Handle=observed.Handle, ProcessId=observed.ProcessId,
+        Parent=observed.Parent, Owner=observed.Owner, ExpectedHandle=expected.Handle,
+        ExpectedProcessId=expected.ProcessId, ExpectedParent=expected.Parent, ExpectedOwner=expected.Owner };
+      throw error;
+    }
+  }
+
+  public static CapWindowNode[] SelectWindowFamily(CapWindowNode[] topology, long[] topLevelHandles,
+    long rootHandle, int expectedPid) {
+    if (topology == null || topLevelHandles == null || rootHandle == 0 || expectedPid <= 0)
+      throw new InvalidOperationException("Window family: missing root or topology.");
+    var nodes = new System.Collections.Generic.Dictionary<long, CapWindowNode>();
+    var order = new System.Collections.Generic.List<CapWindowNode>();
+    foreach (var node in topology) {
+      if (node == null || node.Handle == 0)
+        throw new InvalidOperationException("Window family: invalid window.");
+      CapWindowNode prior;
+      if (nodes.TryGetValue(node.Handle, out prior)) {
+        if (node.Handle == rootHandle || prior.Parent != node.Parent || prior.Owner != node.Owner ||
+            prior.ProcessId != node.ProcessId)
+          throw new InvalidOperationException("Window family: ambiguous or conflicting duplicate window.");
+      } else { nodes.Add(node.Handle, node); order.Add(node); }
+    }
+    var tops = new System.Collections.Generic.HashSet<long>();
+    foreach (long handle in topLevelHandles)
+      if (!nodes.ContainsKey(handle) || !tops.Add(handle))
+        throw new InvalidOperationException("Window family: missing or duplicate top-level window.");
+    if (!tops.Contains(rootHandle) || nodes[rootHandle].ProcessId != expectedPid)
+      throw new InvalidOperationException("Window family: missing or foreign root.");
+    var included = new System.Collections.Generic.Dictionary<long, bool>();
+    foreach (long handle in topLevelHandles) {
+      var path = new System.Collections.Generic.List<long>();
+      var seen = new System.Collections.Generic.HashSet<long>();
+      long cursor = handle;
+      while (cursor != 0 && !included.ContainsKey(cursor)) {
+        if (!tops.Contains(cursor))
+          throw new InvalidOperationException("Window family: unresolved nonzero owner.");
+        if (!seen.Add(cursor))
+          throw new InvalidOperationException("Window family: cyclic ownership.");
+        if (nodes[cursor].ProcessId != expectedPid)
+          throw new InvalidOperationException("Window family: foreign top-level process.");
+        path.Add(cursor);
+        cursor = nodes[cursor].Owner;
+      }
+      bool member = cursor != 0 && included[cursor];
+      for (int index = path.Count - 1; index >= 0; index--) {
+        member = path[index] == rootHandle || member;
+        included.Add(path[index], member);
+      }
+    }
+    foreach (var node in order) {
+      if (!included.ContainsKey(node.Handle)) included.Add(node.Handle, false);
+      if (node.Owner != 0 && !tops.Contains(node.Owner))
+        throw new InvalidOperationException("Window family: unresolved nonzero owner.");
+      if (!tops.Contains(node.Handle) && (node.Parent == 0 || !nodes.ContainsKey(node.Parent)))
+        throw new InvalidOperationException("Window family: missing parent ancestry.");
+    }
+    var states = new System.Collections.Generic.Dictionary<long, int>();
+    foreach (var node in order) {
+      var stack = new System.Collections.Generic.Stack<(long Handle, bool Exit)>();
+      stack.Push((node.Handle, false));
+      while (stack.Count != 0) {
+        var next = stack.Pop();
+        if (next.Exit) { states[next.Handle] = 2; continue; }
+        int state;
+        if (states.TryGetValue(next.Handle, out state)) {
+          if (state == 1) throw new InvalidOperationException("Window family: cyclic ancestry.");
+          continue;
+        }
+        states.Add(next.Handle, 1);
+        stack.Push((next.Handle, true));
+        var current = nodes[next.Handle];
+        if (nodes.ContainsKey(current.Parent)) stack.Push((current.Parent, false));
+        if (current.Owner != 0) stack.Push((current.Owner, false));
+      }
+    }
+    bool changed;
+    do {
+      changed = false;
+      foreach (var node in order) {
+        bool parentIncluded, ownerIncluded;
+        if (!included[node.Handle] &&
+            ((included.TryGetValue(node.Parent, out parentIncluded) && parentIncluded) ||
+             (included.TryGetValue(node.Owner, out ownerIncluded) && ownerIncluded))) {
+          included[node.Handle] = true;
+          changed = true;
+        }
+      }
+    } while (changed);
+    var selected = new System.Collections.Generic.List<CapWindowNode>();
+    foreach (var node in order) {
+      if (!included[node.Handle]) continue;
+      if (node.ProcessId != expectedPid || (node.Owner != 0 && !included[node.Owner]))
+        throw new InvalidOperationException("Window family: foreign or conflicting selected window.");
+      selected.Add(node);
+    }
+    return selected.ToArray();
+  }
+
+  private static void CheckWindowCensusDeadline(System.Diagnostics.Stopwatch clock) {
+    if (clock.ElapsedMilliseconds > 2000) throw new InvalidOperationException("Owned window census exceeded 2000ms.");
+  }
+
+  private static CapWindowNode ReadTopology(IntPtr window, uint pid) {
+    return new CapWindowNode { Handle=window.ToInt64(), Parent=GetAncestor(window, 1).ToInt64(),
+      Owner=GetWindow(window, 4).ToInt64(), ProcessId=(int)pid };
+  }
+
+  private static CapWindowNode[] CollectWindowFamily(IntPtr rootWindow, int expectedPid,
+    System.Diagnostics.Stopwatch clock) {
+    if (rootWindow == IntPtr.Zero || expectedPid <= 0)
+      throw new InvalidOperationException("Window family: missing root or process.");
+    Exception failure = null;
+    var topology = new System.Collections.Generic.List<CapWindowNode>();
+    var topHandles = new System.Collections.Generic.List<long>();
+    bool complete = EnumWindows(delegate(IntPtr window, IntPtr value) {
+      try {
+        CheckWindowCensusDeadline(clock);
+        uint pid;
+        GetWindowThreadProcessId(window, out pid);
+        if (pid != expectedPid) return true;
+        topHandles.Add(window.ToInt64());
+        topology.Add(ReadTopology(window, pid));
+        return true;
+      } catch (Exception error) { failure=error; return false; }
+    }, IntPtr.Zero);
+    if (failure != null) throw failure;
+    if (!complete) throw new InvalidOperationException("Owned EnumWindows failed: " + Marshal.GetLastWin32Error());
+    var roots = SelectWindowFamily(topology.ToArray(), topHandles.ToArray(), rootWindow.ToInt64(), expectedPid);
+    CheckWindowCensusDeadline(clock);
+    foreach (var root in roots) {
+      EnumChildWindows(new IntPtr(root.Handle), delegate(IntPtr window, IntPtr value) {
+        try {
+          CheckWindowCensusDeadline(clock);
+          uint childPid;
+          if (GetWindowThreadProcessId(window, out childPid) == 0 || childPid != expectedPid)
+            throw new InvalidOperationException("Window family: missing or foreign descendant process.");
+          topology.Add(ReadTopology(window, childPid));
+          return true;
+        } catch (Exception error) { failure=error; return false; }
+      }, IntPtr.Zero);
+      if (failure != null) throw failure;
+    }
+    var family = SelectWindowFamily(topology.ToArray(), topHandles.ToArray(), rootWindow.ToInt64(), expectedPid);
+    CheckWindowCensusDeadline(clock);
+    return family;
+  }
+
+  public static CapWindowStructure[] WindowStructure(IntPtr rootWindow, int expectedPid) {
+    var rows = new System.Collections.Generic.List<CapWindowStructure>();
+    IntPtr previous = EnterPerMonitorV2();
+    Exception primary = null;
+    try {
+      var clock = System.Diagnostics.Stopwatch.StartNew();
+      foreach (var node in CollectWindowFamily(rootWindow, expectedPid, clock)) {
+        CheckWindowCensusDeadline(clock);
+        IntPtr window = new IntPtr(node.Handle);
+        uint pid;
+        if (GetWindowThreadProcessId(window, out pid) == 0 || pid != expectedPid)
+          throw new InvalidOperationException("Window family: selected process changed.");
+        var cls = new StringBuilder(256);
+        if (GetClassName(window, cls, cls.Capacity) == 0)
+          throw new InvalidOperationException("Window census class query failed.");
+        NativeRect bounds;
+        if (!GetWindowRect(window, out bounds))
+          throw new InvalidOperationException("Window census bounds query failed.");
+        bool visible = IsWindowVisible(window), enabled = IsWindowEnabled(window);
+        var liveTopology = ReadTopology(window, pid);
+        AssertWindowAncestry(node, liveTopology);
+        rows.Add(new CapWindowStructure { Handle=window.ToInt64(), Parent=liveTopology.Parent,
+          Owner=liveTopology.Owner, ProcessId=(int)pid, ClassName=cls.ToString(), Visible=visible, Enabled=enabled,
+          Bounds=new int[] {bounds.Left,bounds.Top,bounds.Right,bounds.Bottom} });
+      }
+      CheckWindowCensusDeadline(clock);
+      return rows.ToArray();
+    } catch (Exception error) { error.Data["ObservedRows"]=rows.ToArray(); primary=error; throw; }
+    finally { RestoreDpiAwareness(previous, primary); }
+  }
+
+  public static CapWindowNode[] WindowHierarchy(IntPtr rootWindow, int expectedPid) {
     var rows = new System.Collections.Generic.List<CapWindowNode>();
     IntPtr previous = EnterPerMonitorV2();
     Exception primary = null;
     try {
-      Exception failure = null;
       var clock = System.Diagnostics.Stopwatch.StartNew();
-      WindowCallback record = delegate(IntPtr window, IntPtr value) {
-       try {
-        if (clock.ElapsedMilliseconds > 2000) throw new InvalidOperationException("Owned window census exceeded 2000ms.");
+      var family = CollectWindowFamily(rootWindow, expectedPid, clock);
+      foreach (var node in family) {
+        IntPtr window = new IntPtr(node.Handle);
+        CheckWindowCensusDeadline(clock);
         uint pid;
-        if (GetWindowThreadProcessId(window, out pid) == 0)
+        uint thread = GetWindowThreadProcessId(window, out pid);
+        if (thread == 0)
           throw new InvalidOperationException("Window census process query failed.");
-        if (pid != expectedPid) return true;
+        if (pid != expectedPid) throw new InvalidOperationException("Window family: selected process changed.");
         var cls = new StringBuilder(256);
         var name = new StringBuilder(512);
         if (GetClassName(window, cls, cls.Capacity) == 0)
           throw new InvalidOperationException("Window census class query failed.");
-        UIntPtr textResult;
-        if (SendMessageTimeoutW(window, 0x000D, (UIntPtr)name.Capacity, name, 2, 50, out textResult) == IntPtr.Zero)
-          throw new InvalidOperationException("Window census text query failed/timed out for HWND " + window);
         NativeRect bounds;
         if (!GetWindowRect(window, out bounds))
           throw new InvalidOperationException("Window census bounds query failed.");
-        rows.Add(new CapWindowNode { Handle=window.ToInt64(), Parent=GetAncestor(window, 1).ToInt64(),
-          Owner=GetWindow(window, 4).ToInt64(), ProcessId=(int)pid, ClassName=cls.ToString(), Name=name.ToString(),
-          Visible=IsWindowVisible(window), Enabled=IsWindowEnabled(window),
-          Bounds=new int[] {bounds.Left,bounds.Top,bounds.Right,bounds.Bottom} });
-        return true;
-       } catch (Exception error) { failure=error; return false; }
-      };
-      bool complete = EnumWindows(delegate(IntPtr window, IntPtr value) {
-        if (failure != null) return false;
-        uint pid;
-        GetWindowThreadProcessId(window, out pid);
-        if (pid == expectedPid) {
-          if (!record(window, value)) return false;
-          EnumChildWindows(window, record, value);
+        bool visible = IsWindowVisible(window), enabled = IsWindowEnabled(window);
+        var liveTopology = ReadTopology(window, pid);
+        AssertWindowAncestry(node, liveTopology);
+        long parent = liveTopology.Parent, owner = liveTopology.Owner;
+        UIntPtr textResult;
+        if (SendMessageTimeoutW(window, 0x000D, (UIntPtr)name.Capacity, name, 2, 50, out textResult) == IntPtr.Zero) {
+          int nativeError = Marshal.GetLastWin32Error();
+          var error = new InvalidOperationException("Window census text query failed/timed out for HWND " + window);
+          error.Data["WindowTextQueryFailure"] = new { Handle=window.ToInt64(), ClassName=cls.ToString(),
+            ProcessId=pid, ThreadId=thread, Win32Error=nativeError, Parent=parent, Owner=owner,
+            Visible=visible, Enabled=enabled, Left=bounds.Left, Top=bounds.Top, Right=bounds.Right, Bottom=bounds.Bottom };
+          throw error;
         }
-        return failure == null;
-      }, IntPtr.Zero);
-      if (failure != null) {
-        failure.Data["ObservedRows"]=rows.ToArray();
-        throw failure;
+        rows.Add(new CapWindowNode { Handle=window.ToInt64(), Parent=parent, Owner=owner,
+          ProcessId=(int)pid, ClassName=cls.ToString(), Name=name.ToString(), Visible=visible, Enabled=enabled,
+          Bounds=new int[] {bounds.Left,bounds.Top,bounds.Right,bounds.Bottom} });
       }
-      if (!complete) throw new InvalidOperationException("Owned EnumWindows failed: " + Marshal.GetLastWin32Error());
+      CheckWindowCensusDeadline(clock);
       return rows.ToArray();
-    } catch (Exception error) { primary=error; throw; }
+    } catch (Exception error) { error.Data["ObservedRows"]=rows.ToArray(); primary=error; throw; }
     finally { RestoreDpiAwareness(previous, primary); }
   }
 
@@ -352,6 +546,16 @@ public static class CapNative {
     IntPtr previous = EnterPerMonitorV2();
     Exception primary=null;
     try {
+      var result=ObservePointer(window, screenX, screenY, requireRecipient);
+      DispatchPointerMessages(result, delegate(uint message, uint keys, long position) {
+        return PostMessage(window, message, (UIntPtr)keys, new IntPtr(position));
+      });
+      return result;
+    } catch (Exception error) { primary=error; throw; }
+    finally { RestoreDpiAwareness(previous, primary); }
+  }
+
+  private static CapPointerReceipt ObservePointer(IntPtr window, int screenX, int screenY, bool requireRecipient) {
       NativePoint cursor;
       if (!GetCursorPos(out cursor))
         throw new InvalidOperationException("Pointer cursor observation failed: " + Marshal.GetLastWin32Error());
@@ -369,17 +573,45 @@ public static class CapNative {
       var client=ConvertPointerScreen(window, screenX, screenY);
       point.X=client[0]; point.Y=client[1];
       long packed = (point.Y & 0xffff) << 16 | (point.X & 0xffff);
-      var result = new CapPointerReceipt { Window=window.ToInt64(), Recipient=recipient.ToInt64(),
+      return new CapPointerReceipt { Window=window.ToInt64(), Recipient=recipient.ToInt64(),
         Foreground=GetForegroundWindow().ToInt64(), ProcessId=(int)pid, RecipientProcessId=(int)recipientPid,
         ScreenX=screenX, ScreenY=screenY, ClientX=point.X, ClientY=point.Y, PackedLParam=packed,
         DpiContext=GetThreadDpiAwarenessContext().ToInt64(), CursorX=cursor.X, CursorY=cursor.Y,
         CursorWindow=WindowFromPoint(cursor).ToInt64() };
-      DispatchPointerMessages(result, delegate(uint message, uint keys, long position) {
-        return PostMessage(window, message, (UIntPtr)keys, new IntPtr(position));
+  }
+
+  public static CapPointerDragReceipt PostPointerDragScreen(IntPtr window, int startX, int startY, int endX, int endY) {
+    IntPtr previous=EnterPerMonitorV2();
+    Exception primary=null;
+    var result=new CapPointerDragReceipt();
+    try {
+      // Observe both actual recipients before posting any part of the gesture.
+      result.Start=ObservePointer(window,startX,startY,true);
+      result.End=ObservePointer(window,endX,endY,true);
+      DispatchPointerDragMessages(result, delegate(uint message,uint keys,long position) {
+        return PostMessage(window,message,(UIntPtr)keys,new IntPtr(position));
       });
       return result;
-    } catch (Exception error) { primary=error; throw; }
+    } catch (Exception error) {
+      error.Data["PointerDragReceipt"]=result;
+      primary=error;
+      throw;
+    }
     finally { RestoreDpiAwareness(previous, primary); }
+  }
+
+  public static void DispatchPointerDragMessages(CapPointerDragReceipt result, Func<uint,uint,long,bool> poster) {
+    try {
+      result.Start.MovePosted=poster(0x0200,0,result.Start.PackedLParam);
+      if (result.Start.MovePosted) result.Start.DownPosted=poster(0x0201,1,result.Start.PackedLParam);
+      if (result.Start.DownPosted) result.HeldMovePosted=poster(0x0200,1,result.End.PackedLParam);
+      if (result.HeldMovePosted) result.End.UpPosted=poster(0x0202,0,result.End.PackedLParam);
+      if (!result.Start.MovePosted || !result.Start.DownPosted || !result.HeldMovePosted || !result.End.UpPosted)
+        throw new InvalidOperationException("Native pointer drag dispatch failed; no retry or synthetic release.");
+    } catch (Exception error) {
+      error.Data["PointerDragReceipt"]=result;
+      throw;
+    }
   }
 
   public static void DispatchPointerMessages(CapPointerReceipt result, Func<uint,uint,long,bool> poster) {
@@ -1914,14 +2146,16 @@ function Get-CapWireTargetBinding {
         $sources['NativeForms.zig'] -notmatch 'c\.WS_CHILD \| c\.WS_VISIBLE \| c\.WS_CLIPCHILDREN' -or
         $sources['NativeForms.zig'] -notmatch 'sheet\.viewport,' -or
         $sources['NativeForms.zig'] -notmatch 'const class_name = .*"GraphCodeNativeForm"' -or
-        $sources['SheetFramework.zig'] -notmatch 'const host_class = .*"GraphCodeSheetHost"') {
+        $sources['SheetFramework.zig'] -notmatch 'const host_class = .*"GraphCodeSheetHost"' -or
+        $canvas -notmatch '(?s)fn connectorPositionForIndex\(.*?\.x = if \(outgoing\) bounds\.right else bounds\.left,.*?\.y = @divTrunc\(bounds\.top \+ bounds\.bottom, 2\),') {
         throw 'Wire target source geometry or sheet hierarchy changed; no guessed fallback.'
     }
     $project=Join-Path ([IO.Path]::GetFullPath($OwnedRoot).TrimEnd('\')) 'fixtures\wire-project'
     $source='60000000-0000-4000-8000-000000000001'
     $target='60000000-0000-4000-8000-000000000002'
     return [pscustomobject]@{
-        schemaVersion=1L;scene='s-goal-unwired-unselected';phase='wire-completion'
+        schemaVersion=2L;scene='s-goal-unwired-unselected';phase='wire-completion'
+        gesture='SOURCE_CONNECTOR_DRAG_DROP';sourceConnector='RIGHT_CENTRE'
         projectPath=$project;sourceNodeId=$source;targetNodeId=$target
         sourceCardId=(Get-CapMatchedAutomationId "project-card:$project`:$source")
         targetCardId=(Get-CapMatchedAutomationId "project-card:$project`:$target")
@@ -1985,6 +2219,11 @@ function Get-CapWireTargetObservation {
         ($bounds[0]+$Binding.safeLogicalBounds[2]*$scale),
         ($bounds[1]+$Binding.safeLogicalBounds[3]*$scale))
     $point=@([int][Math]::Floor(($safe[0]+$safe[2])/2),[int][Math]::Floor(($safe[1]+$safe[3])/2))
+    if ($Binding.gesture -cne 'SOURCE_CONNECTOR_DRAG_DROP' -or $Binding.sourceConnector -cne 'RIGHT_CENTRE') {
+        throw 'Unsupported wire gesture or source connector binding.'
+    }
+    $start=@([int][Math]::Floor($source[0].Bounds[2]),
+        [int][Math]::Floor(($source[0].Bounds[1]+$source[0].Bounds[3])/2))
     foreach ($row in $Rows) {
         if ($row.AutomationId -ceq $Binding.targetCardId -or $row.AutomationId -cin @('graph','status')) {continue}
         $b=@($row.Bounds)
@@ -1993,10 +2232,136 @@ function Get-CapWireTargetObservation {
             throw "Unsafe wire target point overlaps another card/control: $($row.AutomationId)"
         }
     }
+    foreach ($row in $Rows) {
+        if ($row.AutomationId -ceq $Binding.sourceCardId -or $row.AutomationId -cin @('graph','status')) {continue}
+        $b=@($row.Bounds)
+        if (-not $row.IsOffscreen -and $b.Count -eq 4 -and $start[0] -ge $b[0] -and
+            $start[0] -lt $b[2] -and $start[1] -ge $b[1] -and $start[1] -lt $b[3]) {
+            throw "Unsafe wire source connector overlaps another card/control: $($row.AutomationId)"
+        }
+    }
     if ($point[0] -le $bounds[0] -or $point[0] -ge $bounds[2] -or
         $point[1] -le $bounds[1] -or $point[1] -ge $bounds[3]) {throw 'Unsafe wire target point outside card.'}
     return [pscustomobject]@{binding=$Binding;source=$source[0];target=$target[0]
-        mode=$status[0].Name;safeBounds=$safe;screenPoint=$point;dpi=$Dpi}
+        mode=$status[0].Name;safeBounds=$safe;screenPoint=$point;sourceScreenPoint=$start;dpi=$Dpi}
+}
+
+function Get-UiaReadonlyEndpointsDecision($snapshot, [int] $processId, [long] $owner,
+    [string] $title, [string] $from, [string] $to) {
+    if ($null -eq $snapshot -or $processId -le 0 -or $owner -le 0 -or
+        $snapshot.handle -le 0 -or $snapshot.processId -ne $processId -or $snapshot.owner -ne $owner -or
+        $snapshot.class -cne 'GraphCodeSheetHost' -or $snapshot.title -cne $title -or
+        $snapshot.captionless -ne $true -or [string]::IsNullOrWhiteSpace($from) -or
+        [string]::IsNullOrWhiteSpace($to) -or $from -ieq $to) {return @{ready=$false}}
+    foreach ($child in @(
+        @{row=$snapshot.viewport;parent=$snapshot.handle;class='GraphCodeSheetViewport'},
+        @{row=$snapshot.content;parent=$snapshot.viewport.handle;class='GraphCodeNativeForm'})) {
+        $row=$child.row
+        if ($null -eq $row -or $row.handle -le 0 -or $row.parent -ne $child.parent -or
+            $row.processId -ne $processId -or $row.class -cne $child.class -or $row.matches -ne 1 -or
+            $row.stable -ne $true -or $row.owned -ne $true -or
+            [string]::IsNullOrWhiteSpace($row.runtime)) {return @{ready=$false}}
+    }
+    $fields=@($snapshot.fields)
+    if ($fields.Count -ne 2) {return @{ready=$false}}
+    for ($index=0;$index -lt 2;$index++) {
+        $row=$fields[$index]
+        $expected=@($from,$to)[$index]
+        if ($null -eq $row -or $row.handle -le 0 -or $row.parent -ne $snapshot.content.handle -or
+            $row.processId -ne $processId -or $row.semanticProcessId -ne $processId -or
+            $row.controlId -ne (9100+$index) -or $row.class -cne 'Edit' -or $row.matches -ne 1 -or
+            $row.stable -ne $true -or $row.owned -ne $true -or $row.readonly -ne $true -or
+            -not $row.Contains('nativeReadonly') -or $row.nativeReadonly -ne $true -or
+            [string]::IsNullOrWhiteSpace($row.runtime) -or $row.value -ine $expected -or
+            $row.semanticValue -cne $row.value) {return @{ready=$false}}
+    }
+    if ($fields[0].handle -eq $fields[1].handle) {return @{ready=$false}}
+    return @{ready=$true;source=$fields[0].value;target=$fields[1].value}
+}
+
+function Read-UiaReadonlyEdgeEndpoints {
+    param(
+        [Parameter(Mandatory)]$Dialog,
+        [Parameter(Mandatory)][int]$ProcessId,
+        [Parameter(Mandatory)][IntPtr]$Owner,
+        [Parameter(Mandatory)][string]$Title,
+        [string]$ExpectedSource='11111111-1111-4111-8111-111111111111',
+        [string]$ExpectedTarget='22222222-2222-4222-8222-222222222222',
+        [string]$AssemblyPath=$env:GRAPHCODE_VALIDATION_ASSEMBLY
+    )
+    if ([string]::IsNullOrWhiteSpace($AssemblyPath)) {
+        $AssemblyPath=& (Join-Path $PSScriptRoot 'Build-CompiledValidationRunner.ps1')
+    }
+    foreach ($requiredType in @('GraphCodeUiaGateState','GraphCodeMultiProjectEditNative')) {
+        & (Join-Path $PSScriptRoot 'Import-CompiledValidationAssembly.ps1') `
+            -AssemblyPath $AssemblyPath -RequiredType $requiredType | Out-Null
+    }
+    $sheet=[IntPtr]::new([long]$Dialog.Current.NativeWindowHandle)
+    $snapshot=@{
+        handle=$sheet.ToInt64();processId=[GraphCodeUiaGateState]::WindowProcessId($sheet)
+        owner=[GraphCodeUiaGateState]::WindowOwner($sheet).ToInt64()
+        class=[GraphCodeUiaGateState]::WindowClass($sheet);title=[GraphCodeUiaGateState]::WindowTitle($sheet)
+        captionless=[GraphCodeUiaGateState]::IsCaptionlessSheet($sheet)
+    }
+    if ($snapshot.processId -ne $ProcessId -or $snapshot.owner -ne $Owner.ToInt64() -or
+        $snapshot.class -cne 'GraphCodeSheetHost' -or $snapshot.title -cne $Title -or -not $snapshot.captionless) {
+        throw 'Readonly endpoint sheet identity changed before reads'
+    }
+    $raw=[Windows.Automation.TreeWalker]::RawViewWalker
+    function Read-EndpointChild([IntPtr]$parent,[string]$class,[int]$id) {
+        $handle=if ($id -eq 0) {[GraphCodeUiaGateState]::FindChild($parent,$class)}
+            else {[GraphCodeUiaGateState]::ControlById($parent,$id)}
+        if ($handle -eq [IntPtr]::Zero -or
+            [GraphCodeUiaGateState]::WindowProcessId($handle) -ne $ProcessId -or
+            [GraphCodeUiaGateState]::WindowClass($handle) -cne $class -or
+            -not [GraphCodeUiaGateState]::IsControlOwnedBy($sheet,$handle,$id)) {
+            throw 'Exact owned readonly endpoint child missing'
+        }
+        $element=[Windows.Automation.AutomationElement]::FromHandle($handle)
+        $runtime=$element.GetRuntimeId() -join ','
+        $sibling=$raw.GetFirstChild([Windows.Automation.AutomationElement]::FromHandle($parent))
+        $visited=0;$matches=0
+        while ($null -ne $sibling) {
+            if ($visited -ge 256 -or $sibling.Current.ProcessId -ne $ProcessId) {
+                throw 'Readonly endpoint children exceeded their owned bounded census'
+            }
+            $candidate=[IntPtr]::new([long]$sibling.Current.NativeWindowHandle)
+            if ($candidate -ne [IntPtr]::Zero -and
+                [GraphCodeUiaGateState]::WindowClass($candidate) -ceq $class -and
+                [GraphCodeUiaGateState]::ControlIdOf($candidate) -eq $id) {$matches++}
+            $visited++;$sibling=$raw.GetNextSibling($sibling)
+        }
+        $again=if ($id -eq 0) {[GraphCodeUiaGateState]::FindChild($parent,$class)}
+            else {[GraphCodeUiaGateState]::ControlById($parent,$id)}
+        $row=@{
+            handle=$handle.ToInt64();parent=[long]$raw.GetParent($element).Current.NativeWindowHandle
+            processId=[GraphCodeUiaGateState]::WindowProcessId($handle);semanticProcessId=$element.Current.ProcessId
+            class=[GraphCodeUiaGateState]::WindowClass($handle);controlId=[GraphCodeUiaGateState]::ControlIdOf($handle)
+            owned=[GraphCodeUiaGateState]::IsControlOwnedBy($sheet,$handle,$id)
+            runtime=$runtime;matches=$matches;stable=($again -eq $handle -and ($element.GetRuntimeId() -join ',') -ceq $runtime)
+        }
+        if ($row.parent -ne $parent.ToInt64() -or $row.matches -ne 1 -or -not $row.stable) {
+            throw 'Readonly endpoint child is duplicate, stale or not a direct owned descendant'
+        }
+        if ($id -ne 0) {
+            $pattern=$element.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
+            $row.readonly=$pattern.Current.IsReadOnly
+            $row.nativeReadonly=[GraphCodeUiaGateState]::IsReadonlyEdit($handle)
+            $row.semanticValue=$pattern.Current.Value
+            $row.value=[GraphCodeMultiProjectEditNative]::Buffer($handle,100)
+            $row.stable=$row.stable -and [GraphCodeUiaGateState]::ControlById($parent,$id) -eq $handle -and
+                ($element.GetRuntimeId() -join ',') -ceq $runtime
+        }
+        return $row
+    }
+    $snapshot.viewport=Read-EndpointChild $sheet 'GraphCodeSheetViewport' 0
+    $snapshot.content=Read-EndpointChild ([IntPtr]::new($snapshot.viewport.handle)) 'GraphCodeNativeForm' 0
+    $content=[IntPtr]::new($snapshot.content.handle)
+    $snapshot.fields=@((Read-EndpointChild $content 'Edit' 9100),(Read-EndpointChild $content 'Edit' 9101))
+    $decision=Get-UiaReadonlyEndpointsDecision $snapshot $ProcessId $Owner.ToInt64() $Title $ExpectedSource $ExpectedTarget
+    if (-not $decision.ready) {throw 'Readonly native/semantic endpoint identity or value changed'}
+    Write-Host ('UIA_READONLY_ENDPOINT_EVIDENCE=' + ($snapshot|ConvertTo-Json -Depth 6 -Compress))
+    return @{source=$decision.source;target=$decision.target;snapshot=$snapshot}
 }
 
 function Resolve-CapOwnedSheet {
@@ -2062,16 +2427,58 @@ function Get-CapWireAlgorithmPreflight {
         target=$target;sheet=$sheet;runtimeWindowEvidence=$false;productLaunches=0;providerLaunches=0}
 }
 
+function Initialize-CapUiaClient {
+    param([string]$AssemblyPath=$env:GRAPHCODE_VALIDATION_ASSEMBLY)
+    if (-not $PSBoundParameters.ContainsKey('AssemblyPath') -and
+        -not [Environment]::GetEnvironmentVariables('Process').Contains('GRAPHCODE_VALIDATION_ASSEMBLY')) {
+        $AssemblyPath=Join-Path $PSScriptRoot 'ValidationRunner\bin\Release\net10.0-windows\ValidationRunner.dll'
+    }
+    if ([string]::IsNullOrWhiteSpace($AssemblyPath)) {
+        throw 'Capture UIA client requires the explicit current compiled validation assembly.'
+    }
+    $assembly=& (Join-Path $PSScriptRoot 'Import-CompiledValidationAssembly.ps1') `
+        -AssemblyPath $AssemblyPath -RequiredType 'GraphCodeUiaGateState'
+    if ($assembly -isnot [Reflection.Assembly]) {
+        throw 'Capture UIA client initialization did not return the validated assembly.'
+    }
+    Write-CapTrace -Command 'CaptureUiaClientInitialized' -Parameters @{
+        assemblyPath=$assembly.Location;assemblyMvid=$assembly.ManifestModule.ModuleVersionId.ToString()
+        providerPath=(Join-Path $PSHOME 'UIAutomationClientsideProviders.dll')
+        validation='EXISTING_SOURCE_BOUND_SIGNED_RUNTIME_PROVIDER_LOADER'
+        registration='EXISTING_MANAGED_IDEMPOTENT_REGISTRATION'}
+}
+
+function Get-CapOwnedWindowStructure {
+    param([Parameter(Mandatory)][IntPtr]$RootHandle,[Parameter(Mandatory)]$ProcessIdentity)
+    $null=Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity
+    try {$rows=@([CapNative]::WindowStructure($RootHandle,$ProcessIdentity.Pid))}
+    catch {
+        $cause=$_.Exception
+        while ($cause.InnerException) {$cause=$cause.InnerException}
+        Write-CapTrace -Command 'OwnedWindowStructureFailure' -Parameters @{
+            root=[long]$RootHandle;error=$cause.Message
+            observedRows=($cause.Data['ObservedRows']|ConvertTo-Json -Depth 10 -Compress)
+            ancestryChange=($cause.Data['WindowAncestryFailure']|ConvertTo-Json -Depth 3 -Compress)}
+        throw
+    }
+    $null=Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters @{
+        root=[long]$RootHandle;rows=($rows|ConvertTo-Json -Depth 10 -Compress)}
+    return $rows
+}
+
 function Get-CapOwnedWindowHierarchy {
     param([Parameter(Mandatory)][IntPtr]$RootHandle,[Parameter(Mandatory)]$ProcessIdentity)
     $null=Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity
-    try {$rows=@([CapNative]::WindowHierarchy($ProcessIdentity.Pid))}
+    try {$rows=@([CapNative]::WindowHierarchy($RootHandle,$ProcessIdentity.Pid))}
     catch {
         $cause=$_.Exception
         while ($cause.InnerException) {$cause=$cause.InnerException}
         Write-CapTrace -Command 'OwnedWindowCensusFailure' -Parameters @{
             root=[long]$RootHandle;error=$cause.Message
-            observedRows=($cause.Data['ObservedRows']|ConvertTo-Json -Depth 10 -Compress)}
+            observedRows=($cause.Data['ObservedRows']|ConvertTo-Json -Depth 10 -Compress)
+            failedWindow=($cause.Data['WindowTextQueryFailure']|ConvertTo-Json -Depth 3 -Compress)
+            ancestryChange=($cause.Data['WindowAncestryFailure']|ConvertTo-Json -Depth 3 -Compress)}
         throw
     }
     $null=Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity
@@ -2219,7 +2626,7 @@ function Invoke-CapAction {
     if ($Action -eq 'file-exit') {
         if ($Invoker) { return & $Invoker $spec }
         $null = Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity -WindowProcessResolver $WindowProcessResolver
-        if (-not [GraphCodeUiaGateState]::PostCommand($RootHandle, [uint32]$spec.CommandId)) {
+        if (-not [CapUiaGateState]::PostCommand($RootHandle, [uint32]$spec.CommandId)) {
             throw 'Posting the native File > Exit command failed.'
         }
         return [pscustomobject]@{ Action = $Action; CommandId = $spec.CommandId; Invoked = $true }
@@ -2665,7 +3072,7 @@ function Find-CapTopLevelWindow {
     while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds -and [DateTime]::UtcNow -lt $DeadlineUtc) {
         $verified = Assert-CapProcessIdentity -Identity $ProcessIdentity
         if ($verified.State -ne 'Live') { throw "Owned app PID $($ProcessIdentity.Pid) exited before its window appeared." }
-        $window = [GraphCodeUiaGateState]::FindTopLevel($ClassName, [uint32]$ProcessIdentity.Pid)
+        $window = [CapUiaGateState]::FindTopLevel($ClassName, [uint32]$ProcessIdentity.Pid)
         if ($window -ne [IntPtr]::Zero) {
             $null = Assert-CapRootProcess -RootHandle $window -ProcessIdentity $ProcessIdentity
             return $window
@@ -3629,6 +4036,49 @@ function Get-CapAdvisoryOlderExclusion {
     }
 }
 
+function Get-CapAdvisoryExclusionDiagnostic {
+    param([Parameter(Mandatory)]$Exclusion)
+    $errorRecord=$Exclusion.OriginalErrorRecord
+    $facts=[ordered]@{
+        Pid=$Exclusion.Pid;ParentPid=$Exclusion.ParentPid
+        ParentCreationFileTimeUtc=$Exclusion.ParentCreationFileTimeUtc
+        ParentExitFileTimeUtc=$Exclusion.ParentExitFileTimeUtc
+        CandidateCreationFileTimeUtc=$Exclusion.CandidateCreationFileTimeUtc
+        CandidateCreationSource=$Exclusion.CandidateCreationSource
+        ParentCreationSource=$Exclusion.ParentCreationSource
+        NativeWin32Error=$Exclusion.NativeWin32Error;NativeFailure=$Exclusion.NativeFailure
+        Reason=$Exclusion.Reason;Disposition=$Exclusion.Disposition
+        CimProcessId=$Exclusion.RawCimRow.ProcessId;CimParentProcessId=$Exclusion.RawCimRow.ParentProcessId
+        CimSessionId=$Exclusion.RawCimRow.SessionId;CimCreationDate=$Exclusion.RawCimRow.CreationDate
+        CimExecutablePath=$Exclusion.RawCimRow.ExecutablePath;CimCommandLine=$Exclusion.RawCimRow.CommandLine
+        errorType=$errorRecord.Exception.GetType().FullName
+        fullyQualifiedErrorId=$errorRecord.FullyQualifiedErrorId
+        message=$errorRecord.Exception.Message;scriptStackTrace=$errorRecord.ScriptStackTrace
+    }
+    $truncated=[Collections.Generic.List[object]]::new()
+    $omitted=[Collections.Generic.List[object]]::new()
+    foreach ($name in @($facts.Keys)) {
+        $value=$facts[$name]
+        if ($value -is [DateTime] -or $value -is [DateTimeOffset]) {$facts[$name]=$value.ToString('o')}
+        elseif ($value -is [string]) {
+            if ($value.Length -gt 2048) {
+                $facts[$name]=$value.Substring(0,2048)
+                $truncated.Add([pscustomobject]@{field=$name;originalCharacters=$value.Length;retainedCharacters=2048})
+            }
+        } elseif ($null -ne $value -and $value -isnot [int] -and $value -isnot [long] -and
+            $value -isnot [uint32] -and $value -isnot [uint64] -and $value -isnot [bool]) {
+            $omitted.Add([pscustomobject]@{field=$name;reason='NON_SCALAR_VALUE_NOT_TRAVERSED';type=$value.GetType().FullName})
+            $facts[$name]=$null
+        }
+    }
+    $facts.diagnosticCompleteness='BOUNDED_SCALARS_WITH_EXPLICIT_GRAPH_OMISSIONS'
+    $facts.omittedGraphs=@('OriginalErrorRecord','OriginalErrorRecord.TargetObject',
+        'OriginalErrorRecord.InvocationInfo','OriginalErrorRecord.Exception.Data','Module','Process')
+    $facts.omittedFields=@($omitted.ToArray())
+    $facts.truncatedFields=@($truncated.ToArray())
+    return [pscustomobject]$facts
+}
+
 function Get-CapOwnedDescendants {
     [CmdletBinding()]
     param(
@@ -3694,7 +4144,7 @@ function Get-CapOwnedDescendants {
                     if (-not $alreadyRecorded) {
                         $script:CapExcludedDescendants.Add($exclusion)
                         Write-CapTrace -Command 'CapDescendantAdvisoryExcluded' -Parameters @{
-                            diagnosticJson = ($exclusion | ConvertTo-Json -Depth 12 -Compress)
+                            diagnosticJson = (Get-CapAdvisoryExclusionDiagnostic -Exclusion $exclusion | ConvertTo-Json -Depth 6 -Compress)
                         }
                     }
                     continue
@@ -3902,7 +4352,7 @@ function Test-CapPipeUnserved {
 }
 
 function Get-CapNativeBindingDeclarations {
-    $types = @([CapNative], [GraphCodeUiaGateState], [CapProcessJob])
+    $types = @([CapNative], [CapUiaGateState], [CapProcessJob])
     $declarations = [Collections.Generic.List[object]]::new()
     foreach ($type in $types) {
         foreach ($method in $type.GetMethods([Reflection.BindingFlags]'Static,Public,NonPublic')) {
@@ -4101,9 +4551,92 @@ function Get-CapMatchedCapturePlan {
     }
 }
 
+function Test-CapFunctionalWireJob {
+    param([Parameter(Mandatory)]$Job,[string]$Group='WireCompletion')
+    $enabled=$Job.PSObject.Properties['functionalWireOnly'] -and $Job.functionalWireOnly -ceq $true
+    $adapter=if ($Job.PSObject.Properties['sceneAdapter']) {$Job.sceneAdapter} else {''}
+    if (-not $enabled -and $adapter -cne 'S_FUNCTIONAL_W1_V1') {return $false}
+    if (-not $enabled -or $adapter -cne 'S_FUNCTIONAL_W1_V1' -or $Group -cne 'WireCompletion') {
+        throw 'Functional Wire opt-in permits only W1/WireCompletion.'
+    }
+    Assert-CapDataRecord $Job.functionalWireContract @{schemaVersion=[long];scene=[string]
+        windowSourcePath=[string];windowSourceSha256=[string];placement=[string]
+        preferredLogicalClientWH=[array];pngAllowed=[bool];visualParityClaimed=[bool]
+        applicationSourceTree=[string]} 'Functional Wire contract'
+    $contract=$Job.functionalWireContract
+    if ($contract.schemaVersion -ne 1 -or $contract.scene -cne 's-goal-unwired-unselected' -or
+        $contract.placement -cne 'MEASURED_OWNED_WINDOW_FIT_WORKAREA' -or
+        ($contract.preferredLogicalClientWH -join ',') -cne '1280,720' -or
+        $contract.pngAllowed -cne $false -or $contract.visualParityClaimed -cne $false -or
+        $contract.windowSourceSha256 -cnotmatch '^[A-F0-9]{64}$' -or
+        $Job.head -cnotmatch '^[a-f0-9]{40}$' -or $Job.binaries.after.source -cne $Job.head -or
+        $Job.binaries.after.binaryBuiltAtSource -cnotmatch '^[a-f0-9]{40}$' -or
+        $contract.applicationSourceTree -cnotmatch '^[a-f0-9]{40}$') {
+        throw 'Functional Wire contract/source/no-image boundary differs.'
+    }
+    return $true
+}
+
+function Get-CapFunctionalWireStatePlan {
+    param([Parameter(Mandatory)]$WireBinding,[Parameter(Mandatory)][string]$SourceHead,
+        [Parameter(Mandatory)][string]$WorkerSha256,[Parameter(Mandatory)][string]$StubSha256)
+    return [pscustomobject][ordered]@{
+        schemaVersion=1L
+        evidenceMode='FRESH_OWNED_W1_STATE_PLAN_NOT_RUNTIME_EVIDENCE'
+        sourceHead=$SourceHead
+        workerSha256=$WorkerSha256
+        stubDaemonSha256=$StubSha256
+        wireBinding=$WireBinding
+        expectedBefore=[pscustomobject]@{cards=2L;edges=0L;sourceTitle='Wire source';targetTitle='Wire target'}
+        requiredOutcome='OWNED_LOCKED_EXACT_ENDPOINTS_BEFORE_CREATE_AND_CORRELATED_APPLIED_EDGE'
+        imageEvidence=$false
+        visualParityClaimed=$false
+    }
+}
+
+function Get-CapFunctionalWirePlacement {
+    param([Parameter(Mandatory)]$Identity,[Parameter(Mandatory)]$Metrics,
+        [Parameter(Mandatory)][int[]]$WorkArea)
+    if ($Identity.measurement -cne 'REQUIRED_AT_OWNED_WINDOW_STARTUP' -or
+        (Get-FileHash -LiteralPath $Identity.sourcePath -Algorithm SHA256).Hash -cne $Identity.sourceSha256 -or
+        $WorkArea.Count -ne 4 -or $WorkArea[2] -le $WorkArea[0] -or $WorkArea[3] -le $WorkArea[1]) {
+        throw 'Functional Wire source/work-area measurement differs.'
+    }
+    $sourceIdentity=Get-CapGraphCodeWindowIdentity -SourceText ([IO.File]::ReadAllText($Identity.sourcePath)) `
+        -SourceCommit $Identity.sourceCommit -ExpectedDpi $Metrics.Dpi -LogicalClientWH @(96,96)
+    $null=Assert-CapDpiWindowIdentity -Metrics $Metrics -Identity $sourceIdentity -Initial
+    $frame=@(($sourceIdentity.expectedAdjustedOuterWH[0]-$Metrics.Dpi),
+        ($sourceIdentity.expectedAdjustedOuterWH[1]-$Metrics.Dpi))
+    $client=@(
+        [long][Math]::Min([Math]::Round(1280.0*$Metrics.Dpi/96),$WorkArea[2]-$WorkArea[0]-$frame[0]),
+        [long][Math]::Min([Math]::Round(720.0*$Metrics.Dpi/96),$WorkArea[3]-$WorkArea[1]-$frame[1]))
+    if ($client[0] -le 0 -or $client[1] -le 0) {throw 'Functional Wire window cannot fit measured work area.'}
+    $outer=@(($client[0]+$frame[0]),($client[1]+$frame[1]))
+    $left=[long]($WorkArea[0]+[Math]::Floor(($WorkArea[2]-$WorkArea[0]-$outer[0])/2))
+    $top=[long]($WorkArea[1]+[Math]::Floor(($WorkArea[3]-$WorkArea[1]-$outer[1])/2))
+    $sourceIdentity.expectedPhysicalClientWH=$client
+    $sourceIdentity.expectedAdjustedOuterWH=$outer
+    return [pscustomobject]@{
+        evidenceMode='MEASURED_OWNED_WINDOW_DPI_AND_WORKAREA_NOT_VISUAL_PARITY'
+        Identity=$sourceIdentity;InitialMetrics=$Metrics;WorkArea=@($WorkArea)
+        Geometry=[pscustomobject]@{OuterBounds=@($left,$top,($left+$outer[0]),($top+$outer[1]))
+            OuterWH=$outer;PhysicalClientWH=$client;Dpi=[long]$Metrics.Dpi}
+    }
+}
+
 function Get-CapActionWindowBindings {
     param([Parameter(Mandatory)]$Job,
         [Parameter(Mandatory)][ValidateSet('WireCompletion','TerminalActions','FinalBoundedActions',IgnoreCase=$false)][string]$Group)
+    if (Test-CapFunctionalWireJob -Job $Job -Group $Group) {
+        return [pscustomobject]@{
+            actionPhase='wire-completion';capturePhase='after'
+            sceneNames=@('s-goal-unwired-unselected');actionIds=@('W1');sourceCommit=$Job.head
+            identity=[pscustomobject]@{sourceContract='GRAPHCODE_MAIN_WINDOW_V1';sourceCommit=$Job.head
+                sourcePath=$Job.functionalWireContract.windowSourcePath
+                sourceSha256=$Job.functionalWireContract.windowSourceSha256
+                measurement='REQUIRED_AT_OWNED_WINDOW_STARTUP'}
+        }
+    }
     if ($Job.sceneAdapter -cne 'S_MATCHED_V12_DPI_V1') {
         throw 'Action window binding requires the matched DPI adapter.'
     }
@@ -6484,8 +7017,11 @@ function Assert-CapNoWorkerTransientArtifacts {
 }
 
 Export-ModuleMember -Function @(
+    'Get-CapAdvisoryExclusionDiagnostic',
+    'Test-CapFunctionalWireJob','Get-CapFunctionalWireStatePlan','Get-CapFunctionalWirePlacement',
+    'Get-UiaReadonlyEndpointsDecision','Read-UiaReadonlyEdgeEndpoints',
     'Get-CapWireTargetBinding','Assert-CapWireTargetBinding','Get-CapWireTargetObservation',
-    'Resolve-CapOwnedSheet','Get-CapOwnedWindowHierarchy','Assert-CapWireTargetStable','Get-CapWireAlgorithmPreflight',
+    'Resolve-CapOwnedSheet','Initialize-CapUiaClient','Get-CapOwnedWindowStructure','Get-CapOwnedWindowHierarchy','Assert-CapWireTargetStable','Get-CapWireAlgorithmPreflight',
     'Get-CapMatchedSceneNames','Get-CapMatchedFocusedSceneNames','Get-CapMatchedFocusedClassification',
     'Get-CapMatchedCapturePlan',
     'Get-CapActionWindowBindings','Assert-CapActionWindowBindings',

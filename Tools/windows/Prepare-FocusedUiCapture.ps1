@@ -9,9 +9,14 @@ param(
     [Parameter(Mandatory)][string]$PreflightReport,
     [ValidateSet('TerminalChrome','PostFixCards','PostFixCardsUnselected')][string]$FocusedProfile = 'TerminalChrome',
     [switch]$PlanOnly,
+    [switch]$FunctionalWireOnly,
+    [string]$GraphCodeBuildSource = '',
     [ValidateRange(3,30)][long]$AuthorizationMinutes = 20
 )
 $ErrorActionPreference='Stop'
+if ($FunctionalWireOnly -and (-not $PlanOnly -or $FocusedProfile -cne 'PostFixCards')) {
+    throw 'Functional Wire preparation requires PostFixCards -PlanOnly; it cannot authorize capture.'
+}
 $root=[IO.Path]::GetFullPath($OwnedRoot).TrimEnd('\')
 $repositoryRoot=[IO.Path]::GetFullPath($Repository).TrimEnd('\')
 if (Test-Path -LiteralPath $root) {throw "Focused capture root already exists: $root"}
@@ -25,6 +30,17 @@ if ($head -cnotmatch '^[a-f0-9]{40}$' -or $tree -cnotmatch '^[a-f0-9]{40}$' -or
     throw 'Focused capture preparation requires a clean exact Git head and tree.'
 }
 
+if ($FunctionalWireOnly) {
+    if ($GraphCodeBuildSource -cnotmatch '^[a-f0-9]{40}$') {
+        throw 'Functional Wire requires the actual GraphCode binary build-source commit.'
+    }
+    $builtAppTree=(& git -C $repositoryRoot rev-parse ($GraphCodeBuildSource+':graphcode-windows')).Trim()
+    if ($LASTEXITCODE -ne 0) {throw 'Functional Wire binary build-source tree is unavailable.'}
+    $currentAppTree=(& git -C $repositoryRoot rev-parse 'HEAD:graphcode-windows').Trim()
+    if ($LASTEXITCODE -ne 0 -or $currentAppTree -cne $builtAppTree) {
+        throw 'Functional Wire cannot reuse a binary with changed Windows application inputs.'
+    }
+}
 $modulePath=Join-Path $repositoryRoot 'Tools\windows\UiCaptureDriver.psm1'
 $workerPath=Join-Path $repositoryRoot 'Tools\windows\Invoke-UiCaptureWorker.ps1'
 $supervisorPath=Join-Path $repositoryRoot 'Tools\windows\Invoke-UiCapture.ps1'
@@ -183,6 +199,30 @@ $job=[ordered]@{
             sourceSha256=$backendSourceHash;networkAllowed=$false}
     }
 }
+if ($FunctionalWireOnly) {
+    $focusedScenes=@('s-goal-unwired-unselected')
+    $focusedClassification='FUNCTIONAL_W1_STATE_ONLY_NOT_VISUAL_PARITY'
+    $job.executionMode='FUNCTIONAL_W1_ONLY'
+    $job.desktopAuthorized=$false
+    $job.evidenceClassification=$focusedClassification
+    $job.sceneAdapter='S_FUNCTIONAL_W1_V1'
+    $job.Remove('focusedCapture')
+    $job.Remove('captureContract')
+    $job.scenes=@([ordered]@{name='s-goal-unwired-unselected'})
+    $windowSource=Join-Path $repositoryRoot 'graphcode-windows\src\MainWindow.zig'
+    $job.functionalWireOnly=$true
+    $job.binaries.before.binaryBuiltAtSource=$GraphCodeBuildSource
+    $job.binaries.after.binaryBuiltAtSource=$GraphCodeBuildSource
+    $job.binaries.daemon.source=$null
+    $job.binaries.daemon.binaryBuiltAtSource=$null
+    $job.binaries.daemon.evidenceMode='COPIED_RUNTIME_NOT_EXECUTED_BY_FUNCTIONAL_W1'
+    $job.functionalWireContract=[ordered]@{
+        schemaVersion=1L;scene='s-goal-unwired-unselected'
+        windowSourcePath=$windowSource;windowSourceSha256=(Get-FileHash -LiteralPath $windowSource).Hash
+        placement='MEASURED_OWNED_WINDOW_FIT_WORKAREA';preferredLogicalClientWH=@(1280L,720L)
+        pngAllowed=$false;visualParityClaimed=$false;applicationSourceTree=$currentAppTree
+    }
+}
 $jobPath=Join-Path $root 'job.json'
 [IO.File]::WriteAllText($jobPath,($job | ConvertTo-Json -Depth 40),[Text.UTF8Encoding]::new($false))
 $jobHash=(Get-FileHash -LiteralPath $jobPath -Algorithm SHA256).Hash
@@ -234,7 +274,7 @@ $plan=[ordered]@{
         backendFixturePath=(Join-Path $runtime 'copilot.exe');backendFixtureSha256=$backendHash
         offlinePeerPath=(Join-Path $inputs 'offline-peer-source.ps1');offlinePeerSha256=$peerHash
     }
-    geometry=$job.captureContract
+    geometry=$(if ($FunctionalWireOnly) {$job.functionalWireContract} else {$job.captureContract})
     authorizationBounds=[ordered]@{
         status='NOT_GRANTED'
         requestedMaxMinutes=$AuthorizationMinutes
@@ -251,6 +291,7 @@ $plan=[ordered]@{
     pngArtifacts=0L
     processLaunches=0L
 }
+if ($FunctionalWireOnly) {$plan.functionalWireOnly=$true}
 [IO.File]::WriteAllText($planPath,($plan | ConvertTo-Json -Depth 40),[Text.UTF8Encoding]::new($false))
 $planHash=(Get-FileHash -LiteralPath $planPath -Algorithm SHA256).Hash
 if (@(Get-ChildItem -LiteralPath $root -Recurse -File -Filter '*.png').Count -ne 0) {
