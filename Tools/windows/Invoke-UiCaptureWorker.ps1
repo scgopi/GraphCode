@@ -2605,6 +2605,42 @@ function Read-CapReadyWireWindowObservation {
     throw 'Wire supplement target did not expose an owned sheet and native edge child before its action deadline.'
 }
 
+function Assert-CapWireCreateAction {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Creates)
+    $observedUtc=[DateTime]::UtcNow.ToString('o')
+    $candidates=[Collections.Generic.List[object]]::new()
+    $enabled='UNAVAILABLE_NOT_READ'
+    $offscreen='UNAVAILABLE_NOT_READ'
+    try {
+        foreach ($element in $Creates) {
+            $current=$element.get_Current()
+            $type=$current.get_ControlType()
+            $candidates.Add([pscustomobject]@{name=$current.get_Name();processId=$current.get_ProcessId()
+                controlTypeId=$type.Id;controlTypeName=$type.ProgrammaticName
+                nativeHandle=$current.get_NativeWindowHandle();runtimeId=@($element.GetRuntimeId())})
+        }
+        if ($Creates.Count -eq 1) {
+            $enabled=$Creates[0].get_Current().get_IsEnabled()
+            if ($enabled) {$offscreen=$Creates[0].get_Current().get_IsOffscreen()}
+        }
+        Write-CapTrace -Command 'WireCreatePredicateObservation' -Parameters @{
+            stage='FILTERED_SECOND_READ';observedUtc=$observedUtc;count=$Creates.Count
+            candidates=($candidates|ConvertTo-Json -Depth 5 -Compress);enabled=$enabled;offscreen=$offscreen}
+        if ($Creates.Count -ne 1 -or -not $enabled -or $offscreen) {
+            throw 'Wire supplement native edge form omitted its enabled Create action.'
+        }
+    } catch {
+        $primary=$_
+        try {
+            Write-CapTrace -Command 'WireCreatePredicateFailure' -Parameters @{
+                stage='FILTERED_SECOND_READ';observedUtc=$observedUtc;count=$Creates.Count
+                candidates=($candidates|ConvertTo-Json -Depth 5 -Compress);enabled=$enabled;offscreen=$offscreen
+                propertyEvidence='INCOMPLETE_ON_ERROR_NOT_DEFAULTED';error=$primary.Exception.ToString()}
+        } catch {$primary.Exception.Data['WireCreateTraceFailure']=$_}
+        throw $primary
+    }
+}
+
 function Invoke-CapWireCompletionSupplement {
     param([Parameter(Mandatory)][string]$StubDaemonPath,[switch]$FirstCensusDiagnostic)
     if ($FirstCensusDiagnostic -and -not (Test-CapFunctionalWireJob -Job $job -Group $plan.group)) {
@@ -2680,13 +2716,28 @@ function Invoke-CapWireCompletionSupplement {
         $sheet=$observation.sheet
         $formElement=[Windows.Automation.AutomationElement]::FromHandle([IntPtr]$sheet.host.Handle)
         $modalRuntime=@($formElement.GetRuntimeId())
+        $modalObservedUtc=[DateTime]::UtcNow.ToString('o')
         $modalControls=@($formElement.FindAll([Windows.Automation.TreeScope]::Descendants,
             [Windows.Automation.Condition]::TrueCondition)|ForEach-Object {
-                $c=$_.Current
-                [pscustomobject]@{name=$c.Name;id=$c.AutomationId;processId=$c.ProcessId
-                    class=$c.ClassName;enabled=$c.IsEnabled;offscreen=$c.IsOffscreen}
+                try {
+                    $c=$_.get_Current()
+                    $type=$c.get_ControlType()
+                    [pscustomobject]@{name=$c.get_Name();id=$c.get_AutomationId();processId=$c.get_ProcessId()
+                        class=$c.get_ClassName();enabled=$c.get_IsEnabled();offscreen=$c.get_IsOffscreen()
+                        controlTypeId=$type.Id;controlTypeName=$type.ProgrammaticName
+                        nativeHandle=$c.get_NativeWindowHandle();runtimeId=@($_.GetRuntimeId())}
+                } catch {
+                    $primary=$_
+                    try {
+                        Write-CapTrace -Command 'WireOwnedModalPropertyFailure' -Parameters @{
+                            stage='UNFILTERED_FIRST_READ';observedUtc=$modalObservedUtc
+                            propertyEvidence='UNAVAILABLE_ON_ERROR';error=$primary.Exception.ToString()}
+                    } catch {$primary.Exception.Data['WireCreateTraceFailure']=$_}
+                    throw $primary
+                }
             })
         Write-CapTrace -Command 'WireOwnedModalControls' -Parameters @{
+            stage='UNFILTERED_FIRST_READ';observedUtc=$modalObservedUtc
             sheet=($sheet|ConvertTo-Json -Depth 10 -Compress)
             controls=($modalControls|ConvertTo-Json -Depth 10 -Compress)}
         $null=Assert-CapUiaProcessIds -ExpectedProcessId $app.Run.Identity.Pid `
@@ -2698,9 +2749,7 @@ function Invoke-CapWireCompletionSupplement {
             [Windows.Automation.PropertyCondition]::new(
                 [Windows.Automation.AutomationElement]::NameProperty,'Create'))
         $creates=@($formElement.FindAll([Windows.Automation.TreeScope]::Descendants,$buttonCondition))
-        if ($creates.Count -ne 1 -or -not $creates[0].Current.IsEnabled -or $creates[0].Current.IsOffscreen) {
-            throw 'Wire supplement native edge form omitted its enabled Create action.'
-        }
+        Assert-CapWireCreateAction -Creates $creates
         $latest=Resolve-CapOwnedSheet -Rows @(
             Get-CapOwnedWindowHierarchy -RootHandle $app.Window -ProcessIdentity $app.Run.Identity) `
             -RootHandle $app.Window -ExpectedProcessId $app.Run.Identity.Pid

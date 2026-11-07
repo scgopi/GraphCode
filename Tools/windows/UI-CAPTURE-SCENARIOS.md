@@ -224,6 +224,17 @@ physical input, daemon edge readback, higher-DPI captures, or macOS visual parit
 
 Native modal observation enumerates the held root's window family, not every
 window in the process. A pure topology selector requires the exact root and
+The first modal UIA census and subsequent Button+Create predicate observation
+are separately timestamped. Both retain actual control type, native handle and
+runtime identity. The filtered guard records its exact count and caches its
+existing enabled/offscreen reads for the same decision; disabled candidates
+do not cause another offscreen read. Property errors retain the primary exception
+and explicitly unavailable evidence, never a false or successful default. A pure topology selector requires the exact root and
+Current and child properties use explicit managed getters so property exceptions
+remain primary. A diagnostic trace failure is attached to that original error,
+not substituted for it. Nine managed/source observation contracts run as a
+separate owned CaptureSuite prerequisite before fresh fixtures; they do not
+increase the32 hierarchy,182 capture or684 registry counts. A pure topology selector requires the exact root and
 matching PID, follows transitive top-level ownership, and includes every
 descendant of the selected roots, including hidden and disabled controls of
 arbitrary classes. A separate same-process family is excluded by its resolved
