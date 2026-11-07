@@ -45,7 +45,8 @@ $nodeEnd=$source.IndexOf('public sealed class CapPointerReceipt {',$nodeStart)
 $selectionStart=$source.IndexOf('public static CapWindowNode[] SelectWindowFamily(')
 $ancestryStart=$source.IndexOf('public static void AssertWindowAncestry(')
 if($ancestryStart-ge0){$selectionStart=$ancestryStart}
-$selectionEnd=$source.IndexOf('public static CapWindowNode[] WindowHierarchy(')
+$selectionEnd=$source.IndexOf('private static void CheckWindowCensusDeadline(')
+if($selectionEnd-lt0){$selectionEnd=$source.IndexOf('public static CapWindowNode[] WindowHierarchy(')}
 $selection=if($selectionStart-ge0){$source.Substring($selectionStart,$selectionEnd-$selectionStart)}else{''}
 Add-Type -TypeDefinition ("using System;`n"+$source.Substring($nodeStart,$nodeEnd-$nodeStart)+
     "`npublic static class WindowFamilySelectionFixture {`n"+$selection+"`n}")
@@ -77,14 +78,17 @@ Check 'source keeps one original50ms query and PID filtering before text' {
     $method=$source.Substring($source.IndexOf('public static CapWindowNode[] WindowHierarchy('))
     $method=$method.Substring(0,$method.IndexOf('public static int[] ConvertPointerScreen'))
     Assert-True ($method.Contains('WindowHierarchy(IntPtr rootWindow, int expectedPid)')-and
-        $method.IndexOf('SelectWindowFamily(')-lt$method.IndexOf('SendMessageTimeoutW(')-and
+        $method.IndexOf('CollectWindowFamily(')-lt$method.IndexOf('SendMessageTimeoutW(')-and
         $method.IndexOf('foreach (var node in family)')-lt$method.IndexOf('SendMessageTimeoutW(')-and
         $method.Contains('if (pid != expectedPid) throw')-and
-        $method.Contains('if (rootWindow == IntPtr.Zero || expectedPid <= 0)'))
+        $source.Contains('if (rootWindow == IntPtr.Zero || expectedPid <= 0)'))
+    $topologyStart=$source.IndexOf('private static CapWindowNode ReadTopology(')
+    $topologyEnd=$source.IndexOf('private static CapWindowNode[] CollectWindowFamily(')
+    $querySource=$source.Substring($topologyStart,$topologyEnd-$topologyStart)+$method
     foreach($query in @('GetWindowRect(window, out bounds)','GetAncestor(window, 1)','GetWindow(window, 4)',
         'IsWindowVisible(window)','IsWindowEnabled(window)')){
-        Assert-True ([regex]::Matches($method,[regex]::Escape($query)).Count-eq1-and
-            $method.IndexOf($query)-lt$method.IndexOf('SendMessageTimeoutW('))
+        Assert-True ([regex]::Matches($querySource,[regex]::Escape($query)).Count-eq1-and
+            $querySource.IndexOf($query)-lt$querySource.IndexOf('SendMessageTimeoutW('))
     }
     Assert-True ($method.Contains('Parent=parent, Owner=owner')-and
         $method.Contains('Visible=visible, Enabled=enabled')-and
@@ -144,7 +148,9 @@ Check 'source forwards only closed scalar failure facts without changing rethrow
         $n.Name-ceq'Invoke-CapWireCompletionSupplement'},$true)
     $branch=$wire.Find({param($n)$n-is[Management.Automation.Language.IfStatementAst]-and
         $n.Clauses[0].Item1.Extent.Text-ceq'$FirstCensusDiagnostic'},$true)
-    Assert-True ($null-ne$branch-and$branch.Extent.StartOffset-lt$workerText.IndexOf('$sheet=Resolve-CapOwnedSheet -Rows $hierarchy'))
+    $normalIndex=$workerText.IndexOf('$observation=Read-CapReadyWireWindowObservation')
+    if($normalIndex-lt0){$normalIndex=$workerText.IndexOf('$sheet=Resolve-CapOwnedSheet -Rows $hierarchy')}
+    Assert-True ($null-ne$branch-and$branch.Extent.StartOffset-lt$normalIndex)
     Assert-True ([regex]::Matches($branch.Extent.Text,'Read-CapWireWindowObservation').Count-eq1-and
         -not($branch.Extent.Text-match'Resolve-CapOwnedSheet|Read-UiaReadonlyEdgeEndpoints|Start-Sleep|GetCurrentPattern'))
     $wireTry=@($wire.Body.EndBlock.Statements|Where-Object {$_-is[Management.Automation.Language.TryStatementAst]})
@@ -261,9 +267,121 @@ foreach($field in @('Parent','Owner','Handle','ProcessId')){
             (@($facts.PSObject.Properties.Name|Sort-Object)-join',')-ceq'ExpectedHandle,ExpectedOwner,ExpectedParent,ExpectedProcessId,Handle,Owner,Parent,ProcessId')
     }
 }
+$readinessAst=[Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path (Split-Path -Parent $path) 'Invoke-UiCaptureWorker.ps1'),[ref]$null,[ref]$null)
+$readiness=$readinessAst.Find({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and
+    $n.Name-ceq'Read-CapReadyWireWindowObservation'},$true)
+if($readiness){. ([scriptblock]::Create($readiness.Extent.Text))}
+foreach($name in @('Assert-CapUiaProcessIds','Resolve-CapOwnedSheet')){
+    $definition=$ast.Find({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-ceq$name},$true)
+    . ([scriptblock]::Create($definition.Extent.Text))
+}
+function Write-CapTrace {param($Command,$Parameters)}
+function Assert-CapWorkerDeadline {param($Stage)}
+function Get-CapOwnedWindowStructure {param($RootHandle,$ProcessIdentity)
+    $script:structureReads++;$rows=& $script:structureProbe;foreach($row in $rows){$row}
+}
+function Read-CapWireWindowObservation {param($AppRun,$Stage)
+    $script:fullReads++;$rows=& $script:fullProbe;foreach($row in $rows){$row}
+}
+function Readiness-Rows([bool]$Visible=$true){
+    $rows=@(foreach($spec in @(@(1,65548,0,'root'),@(2,65548,1,'GraphCodeSheetHost'),
+        @(3,2,0,'viewport'),@(4,3,0,'GraphCodeNativeForm'))){
+        $row=[CapWindowStructure]::new();$row.Handle=$spec[0];$row.Parent=$spec[1];$row.Owner=$spec[2]
+        $row.ClassName=$spec[3];$row.ProcessId=7;$row.Visible=$Visible;$row.Enabled=$true;$row
+    })
+    return ,$rows
+}
+function Reset-Readiness {
+    $script:readyClock=[DateTime]::SpecifyKind([DateTime]'2026-11-06T12:00:00',[DateTimeKind]::Utc)
+    $script:structureReads=0;$script:fullReads=0;$script:sleeps=[Collections.Generic.List[int]]::new()
+    $script:structureProbe={Readiness-Rows};$script:fullProbe={Readiness-Rows}
+}
+function Invoke-Readiness([DateTime]$Deadline){
+    if(-not$readiness){throw 'Actual production structural-readiness helper missing.'}
+    $app=[pscustomobject]@{Window=[IntPtr]1;Run=@{Identity=@{Pid=7}}}
+    return Read-CapReadyWireWindowObservation -AppRun $app -DeadlineUtc $Deadline `
+        -NowProvider {$script:readyClock} -SleepAction {param($ms)
+            $script:sleeps.Add($ms);$script:readyClock=$script:readyClock.AddMilliseconds($ms)}
+}
+Check 'structure observation has no caption and shares family and live ancestry guards' {
+    Assert-True (-not([CapWindowStructure].GetFields().Name -contains 'Name'))
+    $start=$source.IndexOf('public static CapWindowStructure[] WindowStructure(')
+    $finish=$source.IndexOf('public static CapWindowNode[] WindowHierarchy(')
+    $body=$source.Substring($start,$finish-$start)
+    Assert-True ($body.Contains('CollectWindowFamily(rootWindow, expectedPid, clock)')-and
+        $body.Contains('AssertWindowAncestry(node, liveTopology)')-and
+        -not($body-match'SendMessage|Automation|\bName\s*=')-and
+        -not($body-match'if\s*\(\s*!?(visible|enabled)|ClassName\s*(==|!=)'))
+}
+Check 'pending hidden structure uses no full text or UIA then ready uses one full observation' {
+    Reset-Readiness
+    $script:structureProbe={Readiness-Rows ($script:structureReads-gt1)}
+    $script:fullProbe={if($script:structureReads-lt2){throw 'Full observation preceded visible structure.'};Readiness-Rows}
+    $result=Invoke-Readiness $script:readyClock.AddSeconds(5)
+    Assert-True ($script:structureReads-eq2-and$script:fullReads-eq1-and
+        $script:sleeps.Count-eq1-and$script:sleeps[0]-eq100-and$result.sheet.host.Handle-eq2)
+    Assert-True (-not($readiness.Extent.Text-match'Read-UiaReadonlyEdgeEndpoints|GetCurrentPattern|FromHandle|Get-CapActionDeadline'))
+}
+Check 'readiness respects original deadline before reads and after structural transition' {
+    Assert-True ($null-ne$readiness)
+    foreach($stage in @('expired','structure','full')){
+        Reset-Readiness
+        $deadline=$script:readyClock.AddMilliseconds(10)
+        switch($stage){
+            'structure'{$script:structureProbe={$script:readyClock=$script:readyClock.AddMilliseconds(10);Readiness-Rows}}
+            'full'{$script:fullProbe={$script:readyClock=$script:readyClock.AddMilliseconds(10);Readiness-Rows}}
+            'expired'{$script:readyClock=$deadline}
+        }
+        $caught=$null
+        try{Invoke-Readiness $deadline|Out-Null}catch{$caught=$_}
+        Assert-True ($null-ne$caught-and$script:fullReads-eq$(if($stage-ceq'full'){1}else{0})-and$script:sleeps.Count-eq0)
+    }
+}
+Check 'structural ambiguity malformed ancestry and foreign identity refuse without full text' {
+    Assert-True ($null-ne$readiness)
+    foreach($fault in @('ambiguous','missing-parent','foreign')){
+        Reset-Readiness
+        $script:structureProbe={
+            $rows=Readiness-Rows
+            switch($fault){'ambiguous'{$rows+=$rows[1]};'missing-parent'{$rows[3].Parent=99};'foreign'{$rows[3].ProcessId=8}}
+            return $rows
+        }
+        $caught=$null
+        try{Invoke-Readiness $script:readyClock.AddSeconds(5)|Out-Null}catch{$caught=$_}
+        Assert-True ($null-ne$caught-and$script:fullReads-eq0-and$script:sleeps.Count-eq0)
+    }
+}
+Check 'structural and full failure preserve primary error and never re-poll' {
+    Assert-True ($null-ne$readiness)
+    foreach($stage in @('structure','full')){
+        Reset-Readiness
+        if($stage-ceq'structure'){
+            try{[WindowFamilySelectionFixture]::AssertWindowAncestry((Scope-Node 2 1),(Scope-Node 2 99))}
+            catch{$script:probeError=$_.Exception.GetBaseException()}
+        }else{
+            try{[WindowCensusFailureFixture]::Throw(22807762,7,9,'GraphCodeSheetHost',1460)}
+            catch{$script:probeError=$_.Exception.GetBaseException()}
+        }
+        if($stage-ceq'structure'){$script:structureProbe={throw $script:probeError}}
+        else{$script:fullProbe={throw $script:probeError}}
+        $caught=$null
+        try{Invoke-Readiness $script:readyClock.AddSeconds(5)|Out-Null}catch{$caught=$_.Exception.GetBaseException()}
+        Assert-True ([object]::ReferenceEquals($caught,$script:probeError)-and$script:sleeps.Count-eq0-and
+            $script:fullReads-eq$(if($stage-ceq'full'){1}else{0})-and$caught.Data.Count-eq1)
+    }
+}
+Check 'ready to full identity change refuses rather than re-resolving readiness' {
+    Assert-True ($null-ne$readiness)
+    Reset-Readiness
+    $script:fullProbe={$rows=Readiness-Rows;$rows[1].Handle=9;$rows[2].Parent=9;return $rows}
+    $caught=$null
+    try{Invoke-Readiness $script:readyClock.AddSeconds(5)|Out-Null}catch{$caught=$_}
+    Assert-True ($null-ne$caught-and$script:fullReads-eq1-and$script:structureReads-eq1-and$script:sleeps.Count-eq0)
+}
 $passed=@($results|Where-Object passed -EQ $true).Count
 @{suite='WindowHierarchyDiagnostic';executed=$results.Count;passed=$passed;failed=$results.Count-$passed;skipped=0
     nativeCalls=0;evidence='Actual extracted managed throw/data construction plus source contracts; not native fault behavior';cases=@($results)}|
     ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $ScratchRoot 'report.json') -Encoding utf8NoBOM
 @{suite='WindowHierarchyDiagnostic';executed=$results.Count;passed=$passed;failed=$results.Count-$passed;skipped=0;nativeCalls=0}|ConvertTo-Json -Compress
-if($results.Count-ne26-or$passed-ne26){exit 1}
+if($results.Count-ne32-or$passed-ne32){exit 1}

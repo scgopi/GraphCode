@@ -2573,6 +2573,38 @@ function Read-CapWireWindowObservation {
     return $hierarchy
 }
 
+function Read-CapReadyWireWindowObservation {
+    param([Parameter(Mandatory)]$AppRun,[Parameter(Mandatory)][DateTime]$DeadlineUtc,
+        [scriptblock]$NowProvider,[scriptblock]$SleepAction)
+    $now={if ($NowProvider) {return & $NowProvider};return [DateTime]::UtcNow}
+    while ((& $now) -lt $DeadlineUtc) {
+        Assert-CapWorkerDeadline 'Wire completion native form'
+        $structure=@(Get-CapOwnedWindowStructure -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity)
+        $ready=Resolve-CapOwnedSheet -Rows $structure -RootHandle $AppRun.Window `
+            -ExpectedProcessId $AppRun.Run.Identity.Pid
+        if ((& $now) -ge $DeadlineUtc) {break}
+        if ($null -ne $ready) {
+            Assert-CapWorkerDeadline 'Wire completion native form'
+            $hierarchy=@(Read-CapWireWindowObservation -AppRun $AppRun -Stage 'after-posted-target')
+            Assert-CapWorkerDeadline 'Wire completion native form'
+            if ((& $now) -ge $DeadlineUtc) {break}
+            $sheet=Resolve-CapOwnedSheet -Rows $hierarchy -RootHandle $AppRun.Window `
+                -ExpectedProcessId $AppRun.Run.Identity.Pid
+            if ($null -eq $sheet -or $sheet.host.Handle -ne $ready.host.Handle -or
+                $sheet.content.Handle -ne $ready.content.Handle) {
+                throw 'Owned wire sheet changed between structural readiness and full observation.'
+            }
+            return [pscustomobject]@{sheet=$sheet;hierarchy=$hierarchy}
+        }
+        $remaining=($DeadlineUtc-(& $now)).TotalMilliseconds
+        if ($remaining -le 0) {break}
+        $milliseconds=[int][Math]::Min(100,[Math]::Ceiling($remaining))
+        if ($SleepAction) {& $SleepAction $milliseconds}
+        else {Start-Sleep -Milliseconds $milliseconds}
+    }
+    throw 'Wire supplement target did not expose an owned sheet and native edge child before its action deadline.'
+}
+
 function Invoke-CapWireCompletionSupplement {
     param([Parameter(Mandatory)][string]$StubDaemonPath,[switch]$FirstCensusDiagnostic)
     if ($FirstCensusDiagnostic -and -not (Test-CapFunctionalWireJob -Job $job -Group $plan.group)) {
@@ -2643,14 +2675,9 @@ function Invoke-CapWireCompletionSupplement {
                 status='DIAGNOSTIC_NOT_W1_ACCEPTANCE';rows=($hierarchy|ConvertTo-Json -Depth 10 -Compress)}
             return
         }
-        do {
-            $hierarchy=@(Read-CapWireWindowObservation -AppRun $app -Stage 'after-posted-target')
-            $sheet=Resolve-CapOwnedSheet -Rows $hierarchy -RootHandle $app.Window `
-                -ExpectedProcessId $app.Run.Identity.Pid
-            if ($null -ne $sheet) {break}
-            Assert-CapWorkerDeadline 'Wire completion native form';Start-Sleep -Milliseconds 100
-        } while ([DateTime]::UtcNow -lt $deadline)
-        if ($null -eq $sheet) {throw 'Wire supplement target did not expose an owned sheet and native edge child; see hierarchy census.'}
+        $observation=Read-CapReadyWireWindowObservation -AppRun $app -DeadlineUtc $deadline
+        $hierarchy=@($observation.hierarchy)
+        $sheet=$observation.sheet
         $formElement=[Windows.Automation.AutomationElement]::FromHandle([IntPtr]$sheet.host.Handle)
         $modalRuntime=@($formElement.GetRuntimeId())
         $modalControls=@($formElement.FindAll([Windows.Automation.TreeScope]::Descendants,

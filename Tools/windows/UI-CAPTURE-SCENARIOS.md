@@ -239,6 +239,21 @@ Neither enumeration nor this check is atomic: a window can change after the
 check, newly created children may be omitted, and HWND-generation identity is
 not established. Existing held-root and endpoint revalidation remain mandatory.
 This scope does not diagnose any earlier query timeout.
+Normal post-dispatch modal acquisition first reads a distinct structure-only
+observation with no Name/caption field, text messages or UIA text traversal.
+It uses the same root-family selector, live ancestry checks and existing
+owner/class/visible-content resolver. Hidden or not-yet-created required
+content remains pending only within the original clipped 5s deadline and
+at-most-100ms cadence; malformed ancestry, foreign identity, ambiguity and
+native observation errors still refuse.
+Once structurally ready, exactly one full post-dispatch observation must resolve
+the same host/content before continuing. Failure or identity mismatch does not
+re-poll. The deadline is checked before/after that transition without resetting
+it. The full census still includes every rooted hidden/disabled member of every
+class, with unchanged 50ms/2s guards. Before-arm/pre-Create full revalidation and
+endpoint/Create guards remain separate and unchanged. Source creation-before-show
+ordering supports this boundary, not a proof of message-pump responsiveness,
+HWND generation, or the cause of an earlier timeout.
 It requires exactly one visible GraphCodeSheetHost owned by the app root and
 one visible GraphCodeNativeForm descendant through the viewport. The Create
 button belongs to the sheet footer, so UIA observation/invocation uses that
@@ -262,7 +277,7 @@ parent/owner are re-read for the immediate ancestry validation described above.
 The original 50ms query, PID filter, refusal and rethrow
 remain unchanged. A zero native error is recorded as zero, not diagnosed as a
 specific timeout cause.
-The canonical capture suite runs 26 pure-selection/managed/source contracts
+The canonical capture suite runs 32 pure-selection/managed/source contracts
 for this metadata as an owned prerequisite before fresh fixture preparation.
 They are not added to the 182/185 capture-driver case inventory and do not
 invoke the native text-query failure path.

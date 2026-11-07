@@ -170,6 +170,14 @@ public sealed class CapWindowNode {
   public int[] Bounds;
 }
 
+public sealed class CapWindowStructure {
+  public long Handle, Parent, Owner;
+  public int ProcessId;
+  public string ClassName;
+  public bool Visible, Enabled;
+  public int[] Bounds;
+}
+
 public sealed class CapPointerReceipt {
   public long Window, Recipient, Foreground, PackedLParam, CursorWindow;
   public int ProcessId, RecipientProcessId, ScreenX, ScreenY, ClientX, ClientY, CursorX, CursorY;
@@ -392,57 +400,96 @@ public static class CapNative {
     return selected.ToArray();
   }
 
-  public static CapWindowNode[] WindowHierarchy(IntPtr rootWindow, int expectedPid) {
+  private static void CheckWindowCensusDeadline(System.Diagnostics.Stopwatch clock) {
+    if (clock.ElapsedMilliseconds > 2000) throw new InvalidOperationException("Owned window census exceeded 2000ms.");
+  }
+
+  private static CapWindowNode ReadTopology(IntPtr window, uint pid) {
+    return new CapWindowNode { Handle=window.ToInt64(), Parent=GetAncestor(window, 1).ToInt64(),
+      Owner=GetWindow(window, 4).ToInt64(), ProcessId=(int)pid };
+  }
+
+  private static CapWindowNode[] CollectWindowFamily(IntPtr rootWindow, int expectedPid,
+    System.Diagnostics.Stopwatch clock) {
     if (rootWindow == IntPtr.Zero || expectedPid <= 0)
       throw new InvalidOperationException("Window family: missing root or process.");
-    var rows = new System.Collections.Generic.List<CapWindowNode>();
-    IntPtr previous = EnterPerMonitorV2();
-    Exception primary = null;
-    try {
-      Exception failure = null;
-      var clock = System.Diagnostics.Stopwatch.StartNew();
-      var topology = new System.Collections.Generic.List<CapWindowNode>();
-      var topHandles = new System.Collections.Generic.List<long>();
-      void CheckDeadline() {
-        if (clock.ElapsedMilliseconds > 2000) throw new InvalidOperationException("Owned window census exceeded 2000ms.");
-      }
-      CapWindowNode ReadTopology(IntPtr window, uint pid) {
-        return new CapWindowNode { Handle=window.ToInt64(), Parent=GetAncestor(window, 1).ToInt64(),
-          Owner=GetWindow(window, 4).ToInt64(), ProcessId=(int)pid };
-      }
-      bool complete = EnumWindows(delegate(IntPtr window, IntPtr value) {
+    Exception failure = null;
+    var topology = new System.Collections.Generic.List<CapWindowNode>();
+    var topHandles = new System.Collections.Generic.List<long>();
+    bool complete = EnumWindows(delegate(IntPtr window, IntPtr value) {
+      try {
+        CheckWindowCensusDeadline(clock);
+        uint pid;
+        GetWindowThreadProcessId(window, out pid);
+        if (pid != expectedPid) return true;
+        topHandles.Add(window.ToInt64());
+        topology.Add(ReadTopology(window, pid));
+        return true;
+      } catch (Exception error) { failure=error; return false; }
+    }, IntPtr.Zero);
+    if (failure != null) throw failure;
+    if (!complete) throw new InvalidOperationException("Owned EnumWindows failed: " + Marshal.GetLastWin32Error());
+    var roots = SelectWindowFamily(topology.ToArray(), topHandles.ToArray(), rootWindow.ToInt64(), expectedPid);
+    CheckWindowCensusDeadline(clock);
+    foreach (var root in roots) {
+      EnumChildWindows(new IntPtr(root.Handle), delegate(IntPtr window, IntPtr value) {
         try {
-          CheckDeadline();
-          uint pid;
-          GetWindowThreadProcessId(window, out pid);
-          if (pid != expectedPid) return true;
-          topHandles.Add(window.ToInt64());
-          topology.Add(ReadTopology(window, pid));
+          CheckWindowCensusDeadline(clock);
+          uint childPid;
+          if (GetWindowThreadProcessId(window, out childPid) == 0 || childPid != expectedPid)
+            throw new InvalidOperationException("Window family: missing or foreign descendant process.");
+          topology.Add(ReadTopology(window, childPid));
           return true;
         } catch (Exception error) { failure=error; return false; }
       }, IntPtr.Zero);
       if (failure != null) throw failure;
-      if (!complete) throw new InvalidOperationException("Owned EnumWindows failed: " + Marshal.GetLastWin32Error());
-      var roots = SelectWindowFamily(topology.ToArray(), topHandles.ToArray(), rootWindow.ToInt64(), expectedPid);
-      CheckDeadline();
-      foreach (var root in roots) {
-        EnumChildWindows(new IntPtr(root.Handle), delegate(IntPtr window, IntPtr value) {
-          try {
-            CheckDeadline();
-            uint childPid;
-            if (GetWindowThreadProcessId(window, out childPid) == 0 || childPid != expectedPid)
-              throw new InvalidOperationException("Window family: missing or foreign descendant process.");
-            topology.Add(ReadTopology(window, childPid));
-            return true;
-          } catch (Exception error) { failure=error; return false; }
-        }, IntPtr.Zero);
-        if (failure != null) throw failure;
+    }
+    var family = SelectWindowFamily(topology.ToArray(), topHandles.ToArray(), rootWindow.ToInt64(), expectedPid);
+    CheckWindowCensusDeadline(clock);
+    return family;
+  }
+
+  public static CapWindowStructure[] WindowStructure(IntPtr rootWindow, int expectedPid) {
+    var rows = new System.Collections.Generic.List<CapWindowStructure>();
+    IntPtr previous = EnterPerMonitorV2();
+    Exception primary = null;
+    try {
+      var clock = System.Diagnostics.Stopwatch.StartNew();
+      foreach (var node in CollectWindowFamily(rootWindow, expectedPid, clock)) {
+        CheckWindowCensusDeadline(clock);
+        IntPtr window = new IntPtr(node.Handle);
+        uint pid;
+        if (GetWindowThreadProcessId(window, out pid) == 0 || pid != expectedPid)
+          throw new InvalidOperationException("Window family: selected process changed.");
+        var cls = new StringBuilder(256);
+        if (GetClassName(window, cls, cls.Capacity) == 0)
+          throw new InvalidOperationException("Window census class query failed.");
+        NativeRect bounds;
+        if (!GetWindowRect(window, out bounds))
+          throw new InvalidOperationException("Window census bounds query failed.");
+        bool visible = IsWindowVisible(window), enabled = IsWindowEnabled(window);
+        var liveTopology = ReadTopology(window, pid);
+        AssertWindowAncestry(node, liveTopology);
+        rows.Add(new CapWindowStructure { Handle=window.ToInt64(), Parent=liveTopology.Parent,
+          Owner=liveTopology.Owner, ProcessId=(int)pid, ClassName=cls.ToString(), Visible=visible, Enabled=enabled,
+          Bounds=new int[] {bounds.Left,bounds.Top,bounds.Right,bounds.Bottom} });
       }
-      var family = SelectWindowFamily(topology.ToArray(), topHandles.ToArray(), rootWindow.ToInt64(), expectedPid);
-      CheckDeadline();
+      CheckWindowCensusDeadline(clock);
+      return rows.ToArray();
+    } catch (Exception error) { error.Data["ObservedRows"]=rows.ToArray(); primary=error; throw; }
+    finally { RestoreDpiAwareness(previous, primary); }
+  }
+
+  public static CapWindowNode[] WindowHierarchy(IntPtr rootWindow, int expectedPid) {
+    var rows = new System.Collections.Generic.List<CapWindowNode>();
+    IntPtr previous = EnterPerMonitorV2();
+    Exception primary = null;
+    try {
+      var clock = System.Diagnostics.Stopwatch.StartNew();
+      var family = CollectWindowFamily(rootWindow, expectedPid, clock);
       foreach (var node in family) {
         IntPtr window = new IntPtr(node.Handle);
-        CheckDeadline();
+        CheckWindowCensusDeadline(clock);
         uint pid;
         uint thread = GetWindowThreadProcessId(window, out pid);
         if (thread == 0)
@@ -472,7 +519,7 @@ public static class CapNative {
           ProcessId=(int)pid, ClassName=cls.ToString(), Name=name.ToString(), Visible=visible, Enabled=enabled,
           Bounds=new int[] {bounds.Left,bounds.Top,bounds.Right,bounds.Bottom} });
       }
-      CheckDeadline();
+      CheckWindowCensusDeadline(clock);
       return rows.ToArray();
     } catch (Exception error) { error.Data["ObservedRows"]=rows.ToArray(); primary=error; throw; }
     finally { RestoreDpiAwareness(previous, primary); }
@@ -2378,6 +2425,25 @@ function Get-CapWireAlgorithmPreflight {
     if ($null -eq $sheet) {throw 'Wire algorithm fixture did not resolve owned sheet content.'}
     return [pscustomobject]@{kind='MODEL_FIXTURE_SHARED_PRODUCTION_ALGORITHMS_NOT_NATIVE_ACTION'
         target=$target;sheet=$sheet;runtimeWindowEvidence=$false;productLaunches=0;providerLaunches=0}
+}
+
+function Get-CapOwnedWindowStructure {
+    param([Parameter(Mandatory)][IntPtr]$RootHandle,[Parameter(Mandatory)]$ProcessIdentity)
+    $null=Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity
+    try {$rows=@([CapNative]::WindowStructure($RootHandle,$ProcessIdentity.Pid))}
+    catch {
+        $cause=$_.Exception
+        while ($cause.InnerException) {$cause=$cause.InnerException}
+        Write-CapTrace -Command 'OwnedWindowStructureFailure' -Parameters @{
+            root=[long]$RootHandle;error=$cause.Message
+            observedRows=($cause.Data['ObservedRows']|ConvertTo-Json -Depth 10 -Compress)
+            ancestryChange=($cause.Data['WindowAncestryFailure']|ConvertTo-Json -Depth 3 -Compress)}
+        throw
+    }
+    $null=Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters @{
+        root=[long]$RootHandle;rows=($rows|ConvertTo-Json -Depth 10 -Compress)}
+    return $rows
 }
 
 function Get-CapOwnedWindowHierarchy {
@@ -6934,7 +7000,7 @@ Export-ModuleMember -Function @(
     'Test-CapFunctionalWireJob','Get-CapFunctionalWireStatePlan','Get-CapFunctionalWirePlacement',
     'Get-UiaReadonlyEndpointsDecision','Read-UiaReadonlyEdgeEndpoints',
     'Get-CapWireTargetBinding','Assert-CapWireTargetBinding','Get-CapWireTargetObservation',
-    'Resolve-CapOwnedSheet','Get-CapOwnedWindowHierarchy','Assert-CapWireTargetStable','Get-CapWireAlgorithmPreflight',
+    'Resolve-CapOwnedSheet','Get-CapOwnedWindowStructure','Get-CapOwnedWindowHierarchy','Assert-CapWireTargetStable','Get-CapWireAlgorithmPreflight',
     'Get-CapMatchedSceneNames','Get-CapMatchedFocusedSceneNames','Get-CapMatchedFocusedClassification',
     'Get-CapMatchedCapturePlan',
     'Get-CapActionWindowBindings','Assert-CapActionWindowBindings',
