@@ -1531,7 +1531,7 @@ test "edge creation primary caption pure: unrelated labels stay unchanged" {
     try std.testing.expectEqualStrings("Change", statePrimaryLabel(&timed));
 }
 
-test "edge creation primary caption native: footer roles default and validation remain" {
+test "dialog framework: new edge primary caption native footer roles default and validation remain" {
     const owner = try hiddenNativeControlHost();
     defer _ = c.DestroyWindow(owner);
     var state = DialogState{ .allocator = std.testing.allocator, .kind = .edge, .parent = owner };
