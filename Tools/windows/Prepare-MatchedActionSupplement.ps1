@@ -4,8 +4,9 @@ param(
     [Parameter(Mandatory)][string]$FocusedPlanPath,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$FocusedPlanSha256,
     [Parameter(Mandatory)][ValidateSet('WireCompletion','TerminalActions','FinalBoundedActions')][string]$Group,
-    [Parameter(Mandatory)][string]$ExistingSceneManifestPath,
-    [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExistingSceneManifestSha256,
+    [string]$ExistingSceneManifestPath = '',
+    [ValidatePattern('^([A-Fa-f0-9]{64})?$')][string]$ExistingSceneManifestSha256 = '',
+    [switch]$FunctionalWireOnly,
     [string]$QualifiedCaptureRoot = '',
     [string]$QualifiedRunId = '',
     [ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$QualifiedManifestSha256 = ('0' * 64),
@@ -17,17 +18,27 @@ $ErrorActionPreference='Stop'
 $root=[IO.Path]::GetFullPath($OwnedRoot).TrimEnd('\')
 $repositoryRoot=[IO.Path]::GetFullPath($Repository).TrimEnd('\')
 $focusedPath=[IO.Path]::GetFullPath($FocusedPlanPath)
-$sceneManifestPath=[IO.Path]::GetFullPath($ExistingSceneManifestPath)
+$functional=$FunctionalWireOnly.IsPresent
+if ($functional -and ($Group -cne 'WireCompletion' -or $ExistingSceneManifestPath -or $ExistingSceneManifestSha256)) {
+    throw 'Functional Wire permits only W1 and fresh scene state, never an image manifest.'
+}
+if (-not $functional -and (-not $ExistingSceneManifestPath -or -not $ExistingSceneManifestSha256)) {
+    throw 'Visual action supplement requires the existing scene image manifest and hash.'
+}
+$sceneManifestPath=if ($functional) {$null} else {[IO.Path]::GetFullPath($ExistingSceneManifestPath)}
 if (-not $focusedPath.StartsWith($root + '\',[StringComparison]::OrdinalIgnoreCase) -or
     (Get-FileHash $focusedPath -Algorithm SHA256).Hash -ne $FocusedPlanSha256.ToUpperInvariant()) {
     throw 'Action supplement requires the exact focused no-authority plan below its owned root.'
 }
-if ((Get-FileHash $sceneManifestPath -Algorithm SHA256).Hash -ne
+if (-not $functional -and (Get-FileHash $sceneManifestPath -Algorithm SHA256).Hash -ne
     $ExistingSceneManifestSha256.ToUpperInvariant()) {
     throw 'Action supplement existing scene manifest hash mismatch.'
 }
 $focused=Get-Content $focusedPath -Raw | ConvertFrom-Json -DateKind String
-$scenes=Get-Content $sceneManifestPath -Raw | ConvertFrom-Json -DateKind String
+$scenes=if ($functional) {$null} else {Get-Content $sceneManifestPath -Raw | ConvertFrom-Json -DateKind String}
+if ($functional -ne [bool]($focused.PSObject.Properties['functionalWireOnly'] -and $focused.functionalWireOnly)) {
+    throw 'Functional Wire opt-in differs from the focused plan.'
+}
 $expectedProfile=if ($Group -ceq 'WireCompletion') {'PostFixCards'} else {'TerminalChrome'}
 if ($focused.status -cne 'PREPARED_NO_AUTHORITY' -or $focused.profile -cne $expectedProfile -or
     $focused.pngArtifacts -ne 0 -or $focused.processLaunches -ne 0 -or
@@ -152,7 +163,7 @@ if ($Group -ceq 'FinalBoundedActions') {
     }
 }
 $bindings=[ordered]@{}
-foreach ($scene in $expectedScenes) {
+foreach ($scene in $(if ($functional) {@()} else {$expectedScenes})) {
     $rows=@($scenes.scenes | Where-Object canonicalScene -CEQ $scene)
     if ($rows.Count -ne 1 -or $rows[0].sha256 -cnotmatch '^[A-Fa-f0-9]{64}$') {
         throw "Action supplement existing image binding missing or duplicated: $scene"
@@ -166,6 +177,9 @@ if ((Get-FileHash -LiteralPath $focused.jobPath -Algorithm SHA256).Hash -cne $fo
     throw 'Action window binding job hash mismatch.'
 }
 $actionJob=Get-Content -LiteralPath $focused.jobPath -Raw | ConvertFrom-Json -DateKind String
+if ((Test-CapFunctionalWireJob -Job $actionJob -Group $Group) -ne $functional) {
+    throw 'Functional Wire opt-in differs from the job.'
+}
 $actionWindowBindings=@(Get-CapActionWindowBindings -Job $actionJob -Group $Group)
 $plan=[ordered]@{
     schemaVersion=1L
@@ -193,7 +207,7 @@ $plan=[ordered]@{
     stubDaemonPath=$stubPath
     stubDaemonSha256=(Get-FileHash $stubPath -Algorithm SHA256).Hash
     existingSceneManifestPath=$sceneManifestPath
-    existingSceneManifestSha256=$ExistingSceneManifestSha256.ToUpperInvariant()
+    existingSceneManifestSha256=$(if ($functional) {$null} else {$ExistingSceneManifestSha256.ToUpperInvariant()})
     expectedScenes=$expectedScenes
     actionWindowBindings=$actionWindowBindings
     wireTargetBinding=$(if ($Group -cne 'TerminalActions') {
@@ -239,6 +253,15 @@ $plan=[ordered]@{
     pngArtifacts=0L
     maximumResultPngs=$(if ($Group -ceq 'FinalBoundedActions') {1L} else {0L})
     processLaunches=0L
+}
+if ($functional) {
+    $statePath=Join-Path $root 'inputs\functional-wire-state.json'
+    if (Test-Path -LiteralPath $statePath) {throw 'Fresh functional Wire state plan already exists.'}
+    $state=Get-CapFunctionalWireStatePlan -WireBinding $plan.wireTargetBinding -SourceHead $head `
+        -WorkerSha256 $plan.workerSha256 -StubSha256 $plan.stubDaemonSha256
+    [IO.File]::WriteAllText($statePath,($state|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))
+    $plan.functionalWireOnly=$true
+    $plan.functionalWireState=[ordered]@{path=$statePath;sha256=(Get-FileHash -LiteralPath $statePath).Hash}
 }
 $planPath=Join-Path $root 'action-plan.json'
 if (Test-Path $planPath) {throw 'Action supplement plan already exists.'}

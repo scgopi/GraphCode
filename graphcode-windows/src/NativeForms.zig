@@ -1497,7 +1497,85 @@ fn nodePrimaryLabel(state: *const DialogState) []const u8 {
 fn statePrimaryLabel(state: *const DialogState) []const u8 {
     if (state.kind == .node) return nodePrimaryLabel(state);
     if (state.kind == .promotion and state.promotion_source != .sketch) return "Change";
+    if (state.kind == .edge and state.edge_initial == null) return "Create";
     return primaryLabel(state.kind);
+}
+
+test "edge creation primary caption pure: new edge uses Create" {
+    const state = DialogState{ .allocator = std.testing.allocator, .kind = .edge, .parent = null };
+    try std.testing.expectEqualStrings("Create", statePrimaryLabel(&state));
+}
+
+test "edge creation primary caption pure: edited edge keeps OK" {
+    const state = DialogState{
+        .allocator = std.testing.allocator,
+        .kind = .edge,
+        .parent = null,
+        .edge_initial = .{ .from = "source", .to = "target" },
+    };
+    try std.testing.expectEqualStrings("OK", statePrimaryLabel(&state));
+}
+
+test "edge creation primary caption pure: unrelated labels stay unchanged" {
+    for ([_]Kind{ .update, .settings, .jump, .template_picker, .worktree_policy, .worktree_sweep }) |kind| {
+        const state = DialogState{ .allocator = std.testing.allocator, .kind = kind, .parent = null };
+        try std.testing.expectEqualStrings(primaryLabel(kind), statePrimaryLabel(&state));
+    }
+    var node_state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    node_state.values[1] = try std.testing.allocator.dupe(u8, "goalBased");
+    defer std.testing.allocator.free(node_state.values[1]);
+    try std.testing.expectEqualStrings(NewLoopSheet.primaryLabel("goalBased"), statePrimaryLabel(&node_state));
+    const sketch = DialogState{ .allocator = std.testing.allocator, .kind = .promotion, .parent = null, .promotion_source = .sketch };
+    const timed = DialogState{ .allocator = std.testing.allocator, .kind = .promotion, .parent = null, .promotion_source = .timed };
+    try std.testing.expectEqualStrings("Promote", statePrimaryLabel(&sketch));
+    try std.testing.expectEqualStrings("Change", statePrimaryLabel(&timed));
+}
+
+test "dialog framework: new edge primary caption native footer roles default and validation remain" {
+    const owner = try hiddenNativeControlHost();
+    defer _ = c.DestroyWindow(owner);
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .edge, .parent = owner };
+    defer freeValues(&state);
+    try initializeEdge(&state, .{
+        .from = "60000000-0000-4000-8000-000000000001",
+        .to = "60000000-0000-4000-8000-000000000002",
+    });
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try initHiddenForm(owner, &state, &host);
+    const primary = c.GetDlgItem(host.hwnd, ok_id) orelse return error.TestControlCreationFailed;
+    const cancel = c.GetDlgItem(host.hwnd, cancel_id) orelse return error.TestControlCreationFailed;
+    try std.testing.expectEqual(@as(c_int, ok_id), c.GetDlgCtrlID(primary));
+    try std.testing.expect(c.GetParent(primary) == host.hwnd and c.GetParent(cancel) == host.hwnd);
+    var wide: [32]u16 = undefined;
+    var text: [32]u8 = undefined;
+    var length = c.GetWindowTextW(primary, &wide, @intCast(wide.len));
+    var written = try std.unicode.utf16LeToUtf8(&text, wide[0..@intCast(length)]);
+    try std.testing.expectEqualStrings("Create", text[0..written]);
+    length = c.GetWindowTextW(cancel, &wide, @intCast(wide.len));
+    written = try std.unicode.utf16LeToUtf8(&text, wide[0..@intCast(length)]);
+    try std.testing.expectEqualStrings("Cancel", text[0..written]);
+    const actions = footerActions(&state, true);
+    try std.testing.expectEqual(SheetFramework.ActionRole.primary, actions[2].role);
+    try std.testing.expectEqual(SheetFramework.ActionRole.cancel, actions[0].role);
+    try std.testing.expect(actions[2].return_hint and c.IsWindowEnabled(primary) != 0);
+    try std.testing.expectEqual(measureTextWidth(host.hwnd, &state, "Create"), actions[2].measured_text_width);
+    const previous_focus = c.GetFocus();
+    defer _ = c.SetFocus(previous_focus);
+    _ = c.SetFocus(state.edits[0]);
+    const default_primary: usize = @bitCast(c.SendMessageW(host.hwnd, c.DM_GETDEFID, 0, 0));
+    try std.testing.expectEqual(@as(u16, ok_id), @as(u16, @truncate(default_primary)));
+    try std.testing.expectEqual(@as(u16, c.DC_HASDEFID), @as(u16, @truncate(default_primary >> 16)));
+    _ = c.SetFocus(cancel);
+    const default_cancel: usize = @bitCast(c.SendMessageW(host.hwnd, c.DM_GETDEFID, 0, 0));
+    try std.testing.expectEqual(@as(u16, cancel_id), @as(u16, @truncate(default_cancel)));
+    try std.testing.expectEqual(@as(u16, c.DC_HASDEFID), @as(u16, @truncate(default_cancel >> 16)));
+    state.allocator.free(state.values[7]);
+    state.values[7] = try state.allocator.dupe(u8, "-7");
+    syncValidation(&state);
+    try std.testing.expect(validationReason(&state) != null and c.IsWindowEnabled(primary) == 0);
+    _ = c.SetFocus(state.edits[0]);
+    try std.testing.expectEqual(@as(c.LRESULT, 0), c.SendMessageW(host.hwnd, c.DM_GETDEFID, 0, 0));
 }
 
 fn newLoopFieldLabel(loop_type: []const u8, index: usize) []const u8 {

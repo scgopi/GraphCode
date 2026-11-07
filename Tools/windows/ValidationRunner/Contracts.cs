@@ -7,7 +7,8 @@ public interface IValidationSuite
     Task<IReadOnlyList<UnitResult>> RunAsync(ValidationContext context, CancellationToken cancellationToken);
 }
 
-public sealed record ValidationContext(string RepositoryRoot, string ArtifactRoot);
+public sealed record ValidationContext(string RepositoryRoot, string ArtifactRoot,
+    string? FixtureCompilerInput = null, string? FixtureCompilerInputSha256 = null);
 
 public enum UnitStatus { Passed, Failed, Skipped, Incomplete }
 
