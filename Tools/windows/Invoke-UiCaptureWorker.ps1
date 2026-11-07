@@ -1671,7 +1671,15 @@ function Close-CapGraphCodeApp {
     try {
         $null = Get-CapTreeForApp -AppRun $AppRun
     } catch {
-        $cleanupFailures.Add("Post-exit descendant discovery failed for PID $($run.Identity.Pid): $($_.Exception.Message)")
+        $discoveryFailure=$_
+        $AppRun | Add-Member -NotePropertyName PostExitDiscoveryFailure -NotePropertyValue $discoveryFailure -Force
+        try {
+            Write-CapTrace -Command 'PostExitDescendantDiscoveryFailure' -Parameters @{
+                pid=$run.Identity.Pid;creationFileTimeUtc=$run.Identity.CreationFileTimeUtc;role=$run.Identity.Role
+                error=$discoveryFailure.Exception.ToString();scriptStack=$discoveryFailure.ScriptStackTrace
+                nativeContext='HELD_IDENTITY_ALREADY_OBSERVED_NO_ADDITIONAL_QUERY'}
+        } catch {$discoveryFailure.Exception.Data['PostExitDiscoveryTraceFailure']=$_}
+        $cleanupFailures.Add("Post-exit descendant discovery failed for PID $($run.Identity.Pid): $($discoveryFailure.Exception.Message)")
     }
     foreach ($identity in @($AppRun.Descendants | Sort-Object CreationFileTimeUtc -Descending)) {
         try {
