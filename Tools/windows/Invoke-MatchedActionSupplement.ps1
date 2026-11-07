@@ -145,6 +145,7 @@ $dryRunLauncher=$null
 $dryRunProof=$null
 try {
     Assert-CapWorkerDeadline 'action entry'
+    if (-not $DryRun) {Initialize-CapUiaClient}
     $boundWindows=@(Assert-CapActionWindowContext)
     $wireTargetPreflight=if ($plan.group -cne 'TerminalActions') {Get-CapWorkerWireBinding} else {$null}
     $windowPreflight=@(foreach ($binding in $boundWindows) {

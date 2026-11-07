@@ -3625,6 +3625,7 @@ try {
     }
     $fixtureHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $fixturePath).Hash
     }
+    if (-not $rehearsal) {Initialize-CapUiaClient}
     if (Test-CapMatchedAdapter) {
         $matchedCapturePlan=Get-CapMatchedCapturePlan -Job $job
     }

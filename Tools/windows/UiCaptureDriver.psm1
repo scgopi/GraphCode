@@ -2427,6 +2427,27 @@ function Get-CapWireAlgorithmPreflight {
         target=$target;sheet=$sheet;runtimeWindowEvidence=$false;productLaunches=0;providerLaunches=0}
 }
 
+function Initialize-CapUiaClient {
+    param([string]$AssemblyPath=$env:GRAPHCODE_VALIDATION_ASSEMBLY)
+    if (-not $PSBoundParameters.ContainsKey('AssemblyPath') -and
+        -not [Environment]::GetEnvironmentVariables('Process').Contains('GRAPHCODE_VALIDATION_ASSEMBLY')) {
+        $AssemblyPath=Join-Path $PSScriptRoot 'ValidationRunner\bin\Release\net10.0-windows\ValidationRunner.dll'
+    }
+    if ([string]::IsNullOrWhiteSpace($AssemblyPath)) {
+        throw 'Capture UIA client requires the explicit current compiled validation assembly.'
+    }
+    $assembly=& (Join-Path $PSScriptRoot 'Import-CompiledValidationAssembly.ps1') `
+        -AssemblyPath $AssemblyPath -RequiredType 'GraphCodeUiaGateState'
+    if ($assembly -isnot [Reflection.Assembly]) {
+        throw 'Capture UIA client initialization did not return the validated assembly.'
+    }
+    Write-CapTrace -Command 'CaptureUiaClientInitialized' -Parameters @{
+        assemblyPath=$assembly.Location;assemblyMvid=$assembly.ManifestModule.ModuleVersionId.ToString()
+        providerPath=(Join-Path $PSHOME 'UIAutomationClientsideProviders.dll')
+        validation='EXISTING_SOURCE_BOUND_SIGNED_RUNTIME_PROVIDER_LOADER'
+        registration='EXISTING_MANAGED_IDEMPOTENT_REGISTRATION'}
+}
+
 function Get-CapOwnedWindowStructure {
     param([Parameter(Mandatory)][IntPtr]$RootHandle,[Parameter(Mandatory)]$ProcessIdentity)
     $null=Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity
@@ -7000,7 +7021,7 @@ Export-ModuleMember -Function @(
     'Test-CapFunctionalWireJob','Get-CapFunctionalWireStatePlan','Get-CapFunctionalWirePlacement',
     'Get-UiaReadonlyEndpointsDecision','Read-UiaReadonlyEdgeEndpoints',
     'Get-CapWireTargetBinding','Assert-CapWireTargetBinding','Get-CapWireTargetObservation',
-    'Resolve-CapOwnedSheet','Get-CapOwnedWindowStructure','Get-CapOwnedWindowHierarchy','Assert-CapWireTargetStable','Get-CapWireAlgorithmPreflight',
+    'Resolve-CapOwnedSheet','Initialize-CapUiaClient','Get-CapOwnedWindowStructure','Get-CapOwnedWindowHierarchy','Assert-CapWireTargetStable','Get-CapWireAlgorithmPreflight',
     'Get-CapMatchedSceneNames','Get-CapMatchedFocusedSceneNames','Get-CapMatchedFocusedClassification',
     'Get-CapMatchedCapturePlan',
     'Get-CapActionWindowBindings','Assert-CapActionWindowBindings',

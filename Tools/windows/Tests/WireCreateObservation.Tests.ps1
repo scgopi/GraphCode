@@ -110,9 +110,91 @@ Check 'trace failure is attached without replacing primary property error' {
     Assert ($null-ne$failure-and$failure.Exception.ToString().Contains('CONTROLLED_PROPERTY_FAILURE'))
     Assert ($failure.Exception.Data['WireCreateTraceFailure'].Exception.ToString().Contains('CONTROLLED_TRACE_FAILURE'))
 }
+$modulePath=Join-Path $PSScriptRoot '..\UiCaptureDriver.psm1'
+$moduleAst=[Management.Automation.Language.Parser]::ParseFile($modulePath,[ref]$null,[ref]$null)
+$initialize=$moduleAst.Find({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and
+    $n.Name-ceq'Initialize-CapUiaClient'},$true)
+if(-not$initialize){throw 'Actual client initializer missing.'}
+# Substitute only the loader boundary; no runtime provider is registered by these tests.
+$initializerText=$initialize.Extent.Text.Replace(
+    "(Join-Path `$PSScriptRoot 'Import-CompiledValidationAssembly.ps1')",'Invoke-ControlledUiaLoader')
+# Extracted scriptblocks have no file directory; retain the real module's source directory as data.
+$initializerText=$initializerText.Replace('$PSScriptRoot',"'"+(Split-Path -Parent ([IO.Path]::GetFullPath($modulePath))).Replace("'","''")+"'")
+. ([scriptblock]::Create($initializerText))
+function Invoke-ControlledUiaLoader {param($AssemblyPath,$RequiredType)
+    $script:loaderCalls++
+    $script:loaderPath=$AssemblyPath
+    if($script:loaderError){throw $script:loaderError}
+    if($script:loaderWrongShape){return 'INVALID'}
+    if($RequiredType-cne'GraphCodeUiaGateState'){throw 'Wrong required loader type.'}
+    return [string].Assembly
+}
+function Reset-Loader {
+    $script:loaderCalls=0;$script:loaderError=$null;$script:loaderWrongShape=$false
+}
+Check 'client uses existing guarded loader once and records successful identity' {
+    Reset-Loader
+    Initialize-CapUiaClient -AssemblyPath 'C:\controlled\current.dll'
+    Assert ($script:loaderCalls-eq1-and$script:trace[0].command-ceq'CaptureUiaClientInitialized')
+}
+Check 'client missing assembly refuses before loader or success trace' {
+    Reset-Loader
+    $failure=$null
+    try{Initialize-CapUiaClient -AssemblyPath ''}catch{$failure=$_}
+    Assert ($null-ne$failure-and$script:loaderCalls-eq0-and$script:trace.Count-eq0)
+}
+Check 'client provenance or registration failure propagates primary without defaults' {
+    Reset-Loader
+    $script:loaderError=[InvalidOperationException]::new('CONTROLLED_PROVENANCE_OR_REGISTRATION_FAILURE')
+    $failure=$null
+    try{Initialize-CapUiaClient -AssemblyPath 'C:\controlled\current.dll'}catch{$failure=$_.Exception.GetBaseException()}
+    Assert ([object]::ReferenceEquals($failure,$script:loaderError)-and$script:trace.Count-eq0)
+}
+Check 'client wrong loader output refuses before success trace' {
+    Reset-Loader;$script:loaderWrongShape=$true;$failure=$null
+    try{Initialize-CapUiaClient -AssemblyPath 'C:\controlled\current.dll'}catch{$failure=$_}
+    Assert ($null-ne$failure-and$script:trace.Count-eq0)
+}
+Check 'client startup precedes UIA use on both live entry paths and keeps managed register-once guard' {
+    $entry=[IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\Invoke-MatchedActionSupplement.ps1'))
+    $worker=[IO.File]::ReadAllText($path)
+    $managed=[IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\ValidationRunner\Ui\Production\GraphCodeUiaGateState.cs'))
+    Assert ($entry.Contains('if (-not $DryRun) {Initialize-CapUiaClient}')-and
+        $entry.IndexOf('Initialize-CapUiaClient')-lt$entry.IndexOf('$boundWindows=@(Assert-CapActionWindowContext)')-and
+        $worker.Contains('if (-not $rehearsal) {Initialize-CapUiaClient}')-and
+        $managed.Contains('if (RegisteredClientSideProvider == assemblyName.FullName) return;')-and
+        $managed.IndexOf('ClientSettings.RegisterClientSideProviderAssembly(assemblyName)')-lt
+            $managed.IndexOf('RegisteredClientSideProvider = assemblyName.FullName;')-and
+        -not($initialize.Extent.Text-match'Add-Type|RegisterClientSideProviderAssembly\('))
+}
+Check 'generic caller preserves explicit assembly across scrub and default selects canonical without build' {
+    $present=[Environment]::GetEnvironmentVariables('Process').Contains('GRAPHCODE_VALIDATION_ASSEMBLY')
+    $saved=$env:GRAPHCODE_VALIDATION_ASSEMBLY
+    try{
+        if([Environment]::GetEnvironmentVariables('Process').Contains('GRAPHCODE_VALIDATION_ASSEMBLY')){
+            Remove-Item -LiteralPath Env:\GRAPHCODE_VALIDATION_ASSEMBLY
+        }
+        Reset-Loader
+        Initialize-CapUiaClient
+        Assert ($script:loaderCalls-eq1-and$script:loaderPath.EndsWith('ValidationRunner\bin\Release\net10.0-windows\ValidationRunner.dll'))
+        $env:GRAPHCODE_VALIDATION_ASSEMBLY='C:\explicit\current.dll'
+        Reset-Loader
+        Initialize-CapUiaClient
+        Assert ($script:loaderPath-ceq'C:\explicit\current.dll')
+        $supervisor=[IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\Invoke-UiCapture.ps1'))
+        Assert ($supervisor.Contains("`$workerEnvironment['GRAPHCODE_VALIDATION_ASSEMBLY']=`$env:GRAPHCODE_VALIDATION_ASSEMBLY")-and
+            $supervisor.Contains('-HoldStdin -Environment $workerEnvironment')-and
+            -not($initialize.Extent.Text-match'Build-CompiledValidationRunner|Copy-Item'))
+    }finally{
+        if($present){$env:GRAPHCODE_VALIDATION_ASSEMBLY=$saved}
+        elseif([Environment]::GetEnvironmentVariables('Process').Contains('GRAPHCODE_VALIDATION_ASSEMBLY')){
+            Remove-Item -LiteralPath Env:\GRAPHCODE_VALIDATION_ASSEMBLY
+        }
+    }
+}
 $passed=@($results|Where-Object passed -EQ $true).Count
 @{suite='WireCreateObservation';executed=$results.Count;passed=$passed;failed=$results.Count-$passed;skipped=0;nativeCalls=0;
     evidence='Actual extracted guard with controlled property getters; not runtime UIA evidence';cases=@($results)}|
     ConvertTo-Json -Depth 6|Set-Content (Join-Path $ScratchRoot 'report.json') -Encoding utf8NoBOM
 @{suite='WireCreateObservation';executed=$results.Count;passed=$passed;failed=$results.Count-$passed;skipped=0;nativeCalls=0}|ConvertTo-Json -Compress
-if($results.Count-ne9-or$passed-ne9){exit 1}
+if($results.Count-ne15-or$passed-ne15){exit 1}

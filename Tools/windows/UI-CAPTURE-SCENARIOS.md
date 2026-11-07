@@ -232,9 +232,22 @@ do not cause another offscreen read. Property errors retain the primary exceptio
 and explicitly unavailable evidence, never a false or successful default. A pure topology selector requires the exact root and
 Current and child properties use explicit managed getters so property exceptions
 remain primary. A diagnostic trace failure is attached to that original error,
-not substituted for it. Nine managed/source observation contracts run as a
+not substituted for it. Fifteen managed/source observation/client-startup contracts run as a
 separate owned CaptureSuite prerequisite before fresh fixtures; they do not
 increase the32 hierarchy,182 capture or684 registry counts. A pure topology selector requires the exact root and
+Live capture clients initialize UIA through the existing
+`Import-CompiledValidationAssembly.ps1` path for `GraphCodeUiaGateState`
+before observations. The loader verifies current source-bound assemblies,
+matching runtime dependencies and the signed Microsoft client-side provider,
+then uses the existing idempotent managed registration helper. Import-only,
+dry-run and no-desktop rehearsal paths do not register providers. Missing
+assembly/provenance/registration failures refuse rather than falling back to
+generic roles. Without an explicit selection, the client uses the existing
+current-worktree canonical Release assembly path through that same guarded
+loader; it does not build or copy an assembly. Explicit selection is forwarded
+through the supervisor's scrubbed child environment; explicit empty selections
+still refuse. This startup contract is not proof that an earlier Pane role
+was caused by missing proxies; native Button/Edit roles still need evidence. A pure topology selector requires the exact root and
 matching PID, follows transitive top-level ownership, and includes every
 descendant of the selected roots, including hidden and disabled controls of
 arbitrary classes. A separate same-process family is excluded by its resolved

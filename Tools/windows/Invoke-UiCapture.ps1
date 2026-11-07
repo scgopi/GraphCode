@@ -1420,11 +1420,15 @@ try {
     $workerLaunchAttempted = $true
     [CapProcessJob]::ClearStandardHandleInheritance()
     $workerJob = [CapProcessJob]::Create()
+    $workerEnvironment=@{}
+    if ([Environment]::GetEnvironmentVariables('Process').Contains('GRAPHCODE_VALIDATION_ASSEMBLY')) {
+        $workerEnvironment['GRAPHCODE_VALIDATION_ASSEMBLY']=$env:GRAPHCODE_VALIDATION_ASSEMBLY
+    }
     $workerRun = Start-CapManagedProcess -FilePath $pwshPath -ArgumentList @(
         '-NoProfile', '-File', $workerPath,
         '-AuthorizationPath', $authorizationPath,
         '-AuthorizationSha256', $authorizationHash, '-OwnedRoot', $root, '-AwaitSupervisorGate'
-    ) -WorkingDirectory $runDirectory -Role 'b-capture-worker' -HoldStdin
+    ) -WorkingDirectory $runDirectory -Role 'b-capture-worker' -HoldStdin -Environment $workerEnvironment
     [CapProcessJob]::Assign($workerJob, $workerRun.Identity.Process.Handle)
     $journalBinding = New-CapJournalBinding -RunId ([IO.Path]::GetFileName($runDirectory)) `
         -LeaseId $authorityId -JobSha256 $jobHash -ModuleSha256 $moduleHash `
