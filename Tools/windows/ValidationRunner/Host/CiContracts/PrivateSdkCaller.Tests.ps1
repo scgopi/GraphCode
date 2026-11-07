@@ -140,7 +140,7 @@ try {
     }, $true))
     Assert-Root ($calls.Count -eq 1 -and
       (@($calls[0].CommandElements | ForEach-Object { $_.Extent.Text }) -join ' ') -ceq
-        '$runner --repository-root $repoRoot --artifact-root $artifactRoot') 'Runtime scope changed the normal unfiltered apphost arguments'
+        '$runner --repository-root $repoRoot --artifact-root $artifactRoot @compilerArguments') 'Runtime scope changed the normal unfiltered apphost arguments or omitted compiler-input forwarding'
   }
 } finally {
   foreach ($name in $names) {

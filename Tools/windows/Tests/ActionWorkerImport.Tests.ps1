@@ -102,12 +102,12 @@ $fixtureRepository=Join-Path $caseRoot 'repository'
 $fixtureTools=Join-Path $fixtureRepository 'Tools\windows'
 $null=New-Item -ItemType Directory -Path $fixtureTools
 foreach ($name in @('Invoke-MatchedActionSupplement.ps1','Invoke-UiCaptureWorker.ps1','UiCaptureDriver.psm1',
-    'Stub-Daemon.ps1','Start-MatchedActionSessions.ps1')) {
+    'Stub-Daemon.ps1','Start-MatchedActionSessions.ps1','Prepare-MatchedActionSupplement.ps1','Invoke-UiCapture.ps1')) {
     Copy-Item -LiteralPath (Join-Path $driverDirectory $name) -Destination (Join-Path $fixtureTools $name)
 }
 $fixtureSource=Join-Path $fixtureRepository 'graphcode-windows\src'
 $null=New-Item -ItemType Directory -Path $fixtureSource -Force
-foreach ($name in @('GraphCanvas.zig','DesignTokens.zig','NativeForms.zig','SheetFramework.zig')) {
+foreach ($name in @('GraphCanvas.zig','DesignTokens.zig','NativeForms.zig','SheetFramework.zig','MainWindow.zig')) {
     Copy-Item -LiteralPath (Join-Path $driverDirectory "..\..\graphcode-windows\src\$name") `
         -Destination (Join-Path $fixtureSource $name)
 }
@@ -119,7 +119,7 @@ foreach ($name in @('GraphCanvas.zig','DesignTokens.zig','NativeForms.zig','Shee
 if ($LASTEXITCODE -ne 0) {throw 'Could not commit production entry fixture.'}
 $fixtureHead=(& git -C $fixtureRepository rev-parse HEAD).Trim()
 $fixtureTree=(& git -C $fixtureRepository rev-parse 'HEAD^{tree}').Trim()
-foreach ($scenario in @('accepted','setup-refusal')) {
+foreach ($scenario in @('accepted','setup-refusal','functional')) {
     $owned=Join-Path $caseRoot $scenario
     $null=New-Item -ItemType Directory -Path (Join-Path $owned 'fixtures'),(Join-Path $owned 'inputs')
     $fixtureHashValue=Write-ImportJson (Join-Path $owned 'fixtures\fixture.json') @{}
@@ -134,8 +134,20 @@ foreach ($scenario in @('accepted','setup-refusal')) {
         logicalClientWH=@(320L,240L);expectedWindowDpi=96L
         windowIdentities=@{before=$windowIdentity;after=$windowIdentity}
     }}
+    $actionGroup=if ($scenario -ceq 'functional') {'WireCompletion'} else {'FinalBoundedActions'}
+    if ($scenario -ceq 'functional') {
+        $windowSource=Join-Path $fixtureSource 'MainWindow.zig'
+        $jobValue.sceneAdapter='S_FUNCTIONAL_W1_V1'
+        $jobValue.Remove('captureContract')
+        $jobValue.functionalWireOnly=$true
+        $jobValue.functionalWireContract=@{schemaVersion=1L;scene='s-goal-unwired-unselected'
+            windowSourcePath=$windowSource;windowSourceSha256=(Get-FileHash -LiteralPath $windowSource).Hash
+            placement='MEASURED_OWNED_WINDOW_FIT_WORKAREA';preferredLogicalClientWH=@(1280L,720L)
+            pngAllowed=$false;visualParityClaimed=$false
+            applicationSourceTree=(& git -C $fixtureRepository rev-parse 'HEAD:graphcode-windows').Trim()}
+    }
     $jobValue=$jobValue|ConvertTo-Json -Depth 30|ConvertFrom-Json -DateKind String
-    $windowBindings=@(Get-CapActionWindowBindings -Job $jobValue -Group FinalBoundedActions)
+    $windowBindings=@(Get-CapActionWindowBindings -Job $jobValue -Group $actionGroup)
     $jobDigest=Write-ImportJson $jobFile $jobValue
     $preflightFile=Join-Path $owned 'preflight.json'
     $preflightDigest=Write-ImportJson $preflightFile @{status='FILE_ONLY_TEST_NOT_LIVE_PREFLIGHT'}
@@ -143,7 +155,7 @@ foreach ($scenario in @('accepted','setup-refusal')) {
     $sceneDigest=Write-ImportJson $sceneFile @{}
     $actionPlan=[ordered]@{
         status='PREPARED_NO_AUTHORITY';pngArtifacts=0L;processLaunches=0L
-        sourceHead=$fixtureHead;sourceTree=$fixtureTree;group='FinalBoundedActions'
+        sourceHead=$fixtureHead;sourceTree=$fixtureTree;group=$actionGroup
         expectedScenes=@($windowBindings|ForEach-Object {$_.sceneNames})
         actionWindowBindings=$windowBindings
         wireTargetBinding=(Get-CapWireTargetBinding -Repository $fixtureRepository -OwnedRoot $owned)
@@ -180,10 +192,45 @@ foreach ($scenario in @('accepted','setup-refusal')) {
     })
     $actionPlan.qualifiedAuthority=@{topologies=$topologies}
     $planFile=Join-Path $owned 'action-plan.json'
-    $planDigest=Write-ImportJson $planFile $actionPlan
+    $functionalArguments=@()
+    if ($scenario -ceq 'functional') {
+        $focusedFile=Join-Path $owned 'focused-plan.json'
+        $focusedDigest=Write-ImportJson $focusedFile @{
+            status='PREPARED_NO_AUTHORITY';profile='PostFixCards';pngArtifacts=0L;processLaunches=0L
+            functionalWireOnly=$true;sourceHead=$fixtureHead;sourceTree=$fixtureTree
+            jobPath=$jobFile;jobSha256=$jobDigest;moduleSha256=$actionPlan.moduleSha256
+            workerSha256=$actionPlan.workerSha256
+            supervisorSha256=(Get-FileHash -LiteralPath (Join-Path $fixtureTools 'Invoke-UiCapture.ps1')).Hash
+            preflightReceiptPath=$preflightFile;preflightReceiptSha256=$preflightDigest
+            fixture=$actionPlan.fixture;binaries=@{}
+        }
+        $prepareOutput=@(& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File `
+            (Join-Path $fixtureTools 'Prepare-MatchedActionSupplement.ps1') `
+            -Repository $fixtureRepository -OwnedRoot $owned -FocusedPlanPath $focusedFile `
+            -FocusedPlanSha256 $focusedDigest -Group WireCompletion -FunctionalWireOnly 2>&1)
+        $prepareOutput|Set-Content -LiteralPath (Join-Path $owned 'prepare.log')
+        Assert-ImportCase ($LASTEXITCODE -eq 0) "Actual functional preparation failed: $prepareOutput"
+        $actionPlan=Get-Content -LiteralPath $planFile -Raw|ConvertFrom-Json -DateKind String
+        $planDigest=(Get-FileHash -LiteralPath $planFile).Hash
+        Assert-ImportCase ($actionPlan.functionalWireOnly -and
+            @($actionPlan.imageBindings.PSObject.Properties).Count -eq 0 -and
+            $null -eq $actionPlan.existingSceneManifestPath -and $actionPlan.maximumResultPngs -eq 0) `
+            'Functional preparation fabricated image evidence or permits PNGs.'
+        $missingOptIn=@(& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File `
+            (Join-Path $fixtureTools 'Invoke-MatchedActionSupplement.ps1') `
+            -Repository $fixtureRepository -OwnedRoot $owned -ActionPlanPath $planFile -ActionPlanSha256 $planDigest -DryRun 2>&1)
+        $missingOptIn|Set-Content -LiteralPath (Join-Path $owned 'missing-opt-in.log')
+        Assert-ImportCase ($LASTEXITCODE -ne 0 -and
+            ($missingOptIn -join "`n").Contains('explicit W1-only no-image opt-in') -and
+            -not (Test-Path -LiteralPath (Join-Path $owned 'dry-run-binding.json'))) 'Missing opt-in was not refused before authority/launch.'
+        $results.Add(@{name='functional production entry refuses missing opt-in before launch';passed=$true})
+        $functionalArguments=@('-FunctionalWireOnly')
+    } else {
+        $planDigest=Write-ImportJson $planFile $actionPlan
+    }
     $entryOutput=@(& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File `
         (Join-Path $fixtureTools 'Invoke-MatchedActionSupplement.ps1') `
-        -Repository $fixtureRepository -OwnedRoot $owned -ActionPlanPath $planFile -ActionPlanSha256 $planDigest -DryRun 2>&1)
+        -Repository $fixtureRepository -OwnedRoot $owned -ActionPlanPath $planFile -ActionPlanSha256 $planDigest -DryRun @functionalArguments 2>&1)
     $entryExit=$LASTEXITCODE
     $entryOutput | Set-Content -LiteralPath (Join-Path $owned 'entry.log') -Encoding utf8NoBOM
     $manifestFile=Join-Path $owned 'dry-run-output\action-manifest.json'
@@ -191,6 +238,21 @@ foreach ($scenario in @('accepted','setup-refusal')) {
     $manifest=Get-Content $manifestFile -Raw | ConvertFrom-Json -DateKind String
     $release=Get-Content (Join-Path $owned 'dry-run-output\action-release.json') -Raw | ConvertFrom-Json -DateKind String
     $launchSpecs=@(Get-ChildItem (Join-Path $owned 'dry-run-output') -File -Filter '*-launch.json')
+    if ($scenario -ceq 'functional') {
+        Assert-ImportCase ($entryExit -eq 0 -and $manifest.status -ceq 'COMPLETE' -and
+            $release.status -ceq 'RELEASED_ZERO_SURVIVORS' -and $launchSpecs.Count -eq 1 -and
+            $manifest.dryRun.geometry.kind -ceq 'OWNED_WINDOW_MEASUREMENT_REQUIRED' -and
+            $null -eq $manifest.dryRun.geometry.actualDpi -and
+            $manifest.dryRun.windowBindings.Count -eq 1 -and $manifest.receiptCount -eq 0 -and
+            $manifest.providerReceipts.Count -eq 0 -and $manifest.pngCount -eq 0 -and
+            $manifest.cleanup.Count -eq 1 -and $manifest.cleanup[0].jobActive0 -and
+            $manifest.cleanup[0].launcherStdoutEof -and $manifest.cleanup[0].launcherStderrEof -and
+            $manifest.cleanupFailures.Count -eq 0 -and $manifest.independentSurvivors.Count -eq 0) `
+            "Functional actual production dry run/cleanup failed: $entryOutput"
+        $results.Add(@{name='functional actual preparation and production dry run bind fresh state not image';passed=$true
+            manifestPath=$manifestFile;manifestSha256=(Get-FileHash -LiteralPath $manifestFile).Hash})
+        continue
+    }
     if ($scenario -ceq 'setup-refusal') {
         Assert-ImportCase ($entryExit -ne 0 -and $manifest.status -ceq 'FAILED' -and
             $release.status -ceq 'FAILED_ZERO_SURVIVORS' -and $manifest.failures.Count -eq 1 -and
@@ -271,4 +333,4 @@ $report=[ordered]@{suite='ActionWorkerImport';executed=$results.Count;passed=$re
     productLaunches=0;providerLaunches=0;cases=@($results)}
 $null=Write-ImportJson (Join-Path $caseRoot 'report.json') $report
 [pscustomobject]$report | Select-Object suite,executed,passed,failed,skipped | ConvertTo-Json -Compress
-if ($results.Count -ne 18) {throw "Unexpected action import contract count: $($results.Count)"}
+if ($results.Count -ne 20) {throw "Unexpected action import contract count: $($results.Count)"}

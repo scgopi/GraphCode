@@ -8,6 +8,7 @@ The Windows port must have runnable commands before implementation fleets begin.
 |---|---|
 | Windows investigation spikes | `pwsh Tools/windows/validate.ps1 -Task all` |
 | Compiled validation runner contract | `pwsh -NoProfile -File Tools\windows\Invoke-ValidationRunnerContract.ps1` (builds and runs the normal full C# entry; see [runner documentation](ValidationRunner/README.md)) |
+| Explicit fixture compiler selection (controlled files and observations; no compiler/GUI execution) | `pwsh -NoProfile -File Tools\windows\Tests\FixtureCompiler.Tests.ps1 -ScratchRoot .build\fixture-compiler-contracts` (fresh directory required; 27 cases; also run by the canonical capture adapter before fresh preparation) |
 | Exclusive validation fixture directories (independent filesystem and static wiring contracts) | `pwsh -NoProfile -File Tools\windows\Tests\ValidationFixtureDirectory.Tests.ps1` |
 | Isolated 30-key process environment boundary | `pwsh -NoProfile -File Tools\windows\Tests\IsolatedProcessEnvironment.Contracts.Tests.ps1 -Phase REGRESSION` |
 | Deterministic visual baseline | `pwsh Tools/windows/validate.ps1 -Task visual-baseline` |
@@ -866,14 +867,19 @@ shell PIDs, or nonce output on another pane. The opt-in
 `-RestoredTerminalInputOnly` route now calls these guards, with 25 additional
 mock/source/managed-file adapter cases in that same headless entry point.
 
-**Qualified observer source intake, not M2 native qualification:**
+**Integrated observer source binding, not a new native qualification:**
 `Assert-UiaRestorationPeerCapability` binds `UiCaptureDriver.psm1` to SHA-256
-`B499EA0FBECC7B8CE17DBAD853DE17C56281DA1768167262700B2ABDCD391ABF`.
-The minimal source-only intake is M3's `df0a80cc`, `2379a614`, `8aec6ba1`,
-and `d621c494`, not its App/form changes or built artifacts. Preflight checks
+`35B3985DDF7C7EAAC6360AE90917BF143DA633CF03E687F5214AE4CD89C1F297`.
+This integrates main's Wire merge `1aa4a225` with M3's `df0a80cc`,
+`2379a614`, `8aec6ba1`, and `d621c494`; the read-only peer method is unchanged.
+The previous module hash `B499EA0F` belongs to the historical M3/51c tuple,
+not these integrated module bytes. Preflight checks
 those source bytes, requires a fresh helper load, and requires the actual
 `PipeServerProcessId(SafePipeHandle)` method. Different bytes still refuse
-before resource creation; there is no command-line waiver.
+before resource creation; there is no command-line waiver. The default startup
+imports the shared module normally; the opt-in route imports it only through
+its preflight and then runs `Initialize-CapUiaClient` with its own current
+source-bound assembly before any UIA/native route work.
 
 The coordinator qualified M3 source `d621c4948b5b5ee2172e4ab9ae6e8c9db9bf6857`
 with its actual All-five receipt at `D:\np5b\s\report.json`, SHA-256
@@ -886,6 +892,13 @@ matched payload bytes and preserved nonpipe error 6. This is the original
 **M3 tuple**, not a rerun or M2 app/provider/daemon qualification. The earlier
 `np5`/`8aec6ba1` failure remains failed. The imported test source hash is
 `0328888460DB9F6E859C82C4B12D93A2DE15AA5DE1A6D2B1E1B02F309B01D9DF`.
+That test hash is historical too; integrated tests also contain main's compiler,
+hierarchy, Create, and image-buffer contracts. The compiled CaptureSuite retains
+all prerequisites: peer 5, compiler 27, hierarchy 32, Create 15, image buffer 9.
+The accepted restored-pane run at `51c71b9b` remains historical execution
+evidence only. Main changes product and native image/window surfaces, so a new
+integrated source-bound build and separately admitted functional rerun are
+required before claiming this head is natively qualified.
 
 The normal default UIA gate sets synthetic fixture and
 connection-failure flags and uses its identity-file/PID-reopen launcher. It

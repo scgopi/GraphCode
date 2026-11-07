@@ -318,6 +318,23 @@ Test-Route "canonical opt-in dispatch" {
     $dispatch[0].Extent.Text.Contains('return') -and
     $dispatch[0].Extent.StartOffset -lt $ast.Extent.Text.IndexOf('$oldZmx =')) `
     "real opt-in must return before any default fixture environment or PID-reopen launch"
+  $imports = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.IfStatementAst] -and
+      $node.Clauses[0].Item1.Extent.Text -ceq '-not $RestoredTerminalInputOnly' -and
+      $node.Extent.Text.Contains("Import-Module -Name (Join-Path `$PSScriptRoot 'UiCaptureDriver.psm1')")
+  }, $true))
+  Assert-Contract ($imports.Count -eq 1) "default shared-helper import must not preload the real route's peer type"
+  $preflight = $ast.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+      $node.Name -ceq "Assert-UiaRestorationPeerCapability"
+  }, $true).Extent.Text
+  Assert-Contract (
+    $preflight.IndexOf('Initialize-CapUiaClient -AssemblyPath $validationAssemblyPath') -gt
+      $preflight.IndexOf('Import-Module $module -ErrorAction Stop') -and
+    $preflight.Contains('Require (-not ("CapNative" -as [type]))')
+  ) "opt-in must initialize the current source-bound UIA proxy loader after its fresh module import"
 }
 Test-Route "unqualified peer bytes refuse before resources" {
   function Join-Path($Path, $ChildPath) { return "HEADLESS_MODULE_PATH" }

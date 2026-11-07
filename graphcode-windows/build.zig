@@ -60,6 +60,7 @@ pub fn build(b: *std.Build) !void {
     module.addIncludePath(.{ .cwd_relative = winghostty_include });
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", package_version);
+    build_options.addOption(bool, "wire_receiver_trace", b.option(bool, "wire-receiver-trace", "Enable bounded private Wire receiver diagnostics") orelse false);
     module.addOptions("build_options", build_options);
 
     const exe = b.addExecutable(.{
