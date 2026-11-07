@@ -123,6 +123,11 @@ public static class StandaloneSuites
                 ["-ScratchRoot", Path.Combine(captureRoot, "wire-create-contracts")], cancellationToken);
             if (EvidenceParser.Structured(Id, "WireCreateObservation", createContracts.Output, 15, 15).Status != UnitStatus.Passed)
                 throw new InvalidDataException("Wire Create observation contracts failed");
+            var imageContracts = await PowerShellPayload.RunAsync(context, Id + ".native-image-buffer",
+                "Tools\\windows\\Tests\\NativeImageBuffer.Tests.ps1",
+                ["-ScratchRoot", Path.Combine(captureRoot, "native-image-contracts")], cancellationToken);
+            if (EvidenceParser.Structured(Id, "NativeImageBuffer", imageContracts.Output, 9, 9).Status != UnitStatus.Passed)
+                throw new InvalidDataException("Native image buffer contracts failed");
             string[] compilerArguments = context.FixtureCompilerInput is null ? [] :
                 ["-FixtureCompilerInput", context.FixtureCompilerInput,
                  "-FixtureCompilerInputSha256", context.FixtureCompilerInputSha256!];

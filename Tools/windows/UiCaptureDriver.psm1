@@ -233,7 +233,7 @@ public static class CapNative {
   [DllImport("kernel32.dll", SetLastError=true)]
   private static extern bool GetProcessTimes(IntPtr process, out NativeFileTime creation, out NativeFileTime exit, out NativeFileTime kernel, out NativeFileTime user);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
-  private static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder image, ref uint size);
+  private static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, IntPtr image, ref uint size);
   [DllImport("kernel32.dll", SetLastError=true)]
   private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
   [DllImport("kernel32.dll", SetLastError=true)]
@@ -688,14 +688,32 @@ public static class CapNative {
     };
   }
 
+  public static string DecodeImagePath(bool success, int nativeError, IntPtr buffer, int capacity, uint length) {
+    if (!success) throw new Win32Exception(nativeError);
+    if (buffer == IntPtr.Zero || capacity <= 0 || length == 0 || length >= (uint)capacity)
+      throw new InvalidOperationException("Native image query returned invalid buffer or length.");
+    if (Marshal.ReadInt16(buffer, checked((int)length * 2)) != 0)
+      throw new InvalidOperationException("Native image query returned an unterminated path.");
+    string image = Marshal.PtrToStringUni(buffer, (int)length);
+    if (image == null || image.Length != (int)length || image.IndexOf('\0') >= 0)
+      throw new InvalidOperationException("Native image query returned inconsistent path content.");
+    return image;
+  }
+
   public static string ImagePath(IntPtr handle, int expectedPid) {
     if (handle == IntPtr.Zero || GetProcessId(handle) != (uint)expectedPid)
       throw new InvalidOperationException("Process handle/PID mismatch.");
-    uint size = 32768;
-    var buffer = new StringBuilder((int)size);
-    if (!QueryFullProcessImageNameW(handle, 0, buffer, ref size))
-      throw new Win32Exception(Marshal.GetLastWin32Error());
-    return buffer.ToString();
+    const int capacity = 32768;
+    IntPtr buffer = Marshal.AllocHGlobal(capacity * 2);
+    try {
+      var initialized = new short[capacity];
+      Array.Fill(initialized, (short)-1);
+      Marshal.Copy(initialized, 0, buffer, capacity);
+      uint size = capacity;
+      bool success = QueryFullProcessImageNameW(handle, 0, buffer, ref size);
+      int nativeError = Marshal.GetLastWin32Error();
+      return DecodeImagePath(success, nativeError, buffer, capacity, size);
+    } finally { Marshal.FreeHGlobal(buffer); }
   }
 
   public static CapProcessSnapshot Snapshot(IntPtr handle, int expectedPid) {

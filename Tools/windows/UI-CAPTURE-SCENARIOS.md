@@ -223,18 +223,21 @@ priority. These are native-form/component contracts, not a live W1 campaign,
 physical input, daemon edge readback, higher-DPI captures, or macOS visual parity.
 
 Native modal observation enumerates the held root's window family, not every
-window in the process. A pure topology selector requires the exact root and
+window in the process.
+
 The first modal UIA census and subsequent Button+Create predicate observation
 are separately timestamped. Both retain actual control type, native handle and
 runtime identity. The filtered guard records its exact count and caches its
 existing enabled/offscreen reads for the same decision; disabled candidates
 do not cause another offscreen read. Property errors retain the primary exception
-and explicitly unavailable evidence, never a false or successful default. A pure topology selector requires the exact root and
+and explicitly unavailable evidence, never a false or successful default.
+
 Current and child properties use explicit managed getters so property exceptions
 remain primary. A diagnostic trace failure is attached to that original error,
 not substituted for it. Fifteen managed/source observation/client-startup contracts run as a
 separate owned CaptureSuite prerequisite before fresh fixtures; they do not
-increase the32 hierarchy,182 capture or684 registry counts. A pure topology selector requires the exact root and
+increase the32 hierarchy,182 capture or684 registry counts.
+
 Live capture clients initialize UIA through the existing
 `Import-CompiledValidationAssembly.ps1` path for `GraphCodeUiaGateState`
 before observations. The loader verifies current source-bound assemblies,
@@ -247,8 +250,19 @@ current-worktree canonical Release assembly path through that same guarded
 loader; it does not build or copy an assembly. Explicit selection is forwarded
 through the supervisor's scrubbed child environment; explicit empty selections
 still refuse. This startup contract is not proof that an earlier Pane role
-was caused by missing proxies; native Button/Edit roles still need evidence. A pure topology selector requires the exact root and
-matching PID, follows transitive top-level ownership, and includes every
+was caused by missing proxies; native Button/Edit roles still need evidence.
+
+Held-process image queries use a fixed 32768-character unmanaged Unicode buffer
+instead of StringBuilder copyback. The actual BOOL and cached Win32 error are
+handled before any output decoding; failure remains a Win32Exception. Successful
+length and terminator/content checks refuse invalid output, and owned storage is
+freed in finally. This hardens a documented output contract; it does not prove
+the historical CI capacity error came from this API. Nine controlled decoder
+contracts run as a separate prerequisite without native process queries or
+inflating capture/registry counts.
+
+A pure topology selector requires the exact root and matching PID, follows
+transitive top-level ownership, and includes every
 descendant of the selected roots, including hidden and disabled controls of
 arbitrary classes. A separate same-process family is excluded by its resolved
 ownership/parent relationships, never by class or visibility. Unresolved
