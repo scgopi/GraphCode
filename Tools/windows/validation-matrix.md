@@ -8,6 +8,7 @@ The Windows port must have runnable commands before implementation fleets begin.
 |---|---|
 | Windows investigation spikes | `pwsh Tools/windows/validate.ps1 -Task all` |
 | Compiled validation runner contract | `pwsh -NoProfile -File Tools\windows\Invoke-ValidationRunnerContract.ps1` (builds and runs the normal full C# entry; see [runner documentation](ValidationRunner/README.md)) |
+| Explicit fixture compiler selection (controlled files and observations; no compiler/GUI execution) | `pwsh -NoProfile -File Tools\windows\Tests\FixtureCompiler.Tests.ps1 -ScratchRoot .build\fixture-compiler-contracts` (fresh directory required; 27 cases; also run by the canonical capture adapter before fresh preparation) |
 | Exclusive validation fixture directories (independent filesystem and static wiring contracts) | `pwsh -NoProfile -File Tools\windows\Tests\ValidationFixtureDirectory.Tests.ps1` |
 | Isolated 30-key process environment boundary | `pwsh -NoProfile -File Tools\windows\Tests\IsolatedProcessEnvironment.Contracts.Tests.ps1 -Phase REGRESSION` |
 | Deterministic visual baseline | `pwsh Tools/windows/validate.ps1 -Task visual-baseline` |
@@ -848,11 +849,152 @@ so the two run in parallel.
 - `Assert-ProviderCheckout.ps1` re-verifies each provider's pinned SHA and
   clean tree after a restore.
 
+**Official gobject prefetch for the required Swift real-zmx test.**
+`Initialize-GobjectPackageCache.ps1` downloads only official release asset
+493157198 through GitHub's asset API using the existing read-only job token.
+It requires 1,867,503 bytes and SHA-256
+`D572886E8672A46AC6C740E3FE3A1F1C9D9A1A9F09D59FD62328A41FCDB70196`
+before the pinned Zig 0.16.0 performs a local, no-save fetch. Network and
+fetch deadlines are 60 and 120 seconds respectively, without retries.
+
+Zig 0.16.0 requires a build-root context even for `fetch`, so this helper uses
+a fresh private directory with a zero-byte `build.zig`, not a provider checkout.
+The fetch must return exactly
+`gobject-0.3.2-Skun7F6HogCMynX2JqeSHS7xr-8pK4ob-qRFIcEasVi3`
+with complete original held-job cleanup. Only then does it publish its fresh
+job-owned `ZIG_GLOBAL_CACHE_DIR`. Zig's normal provider build reads the
+hash-addressed `p/HASH.tar.gz` there before a remote fetch and verifies the
+package content again. No local cache is transferred, manifest or pin is
+changed, or acquired build script is executed during prefetch. The existing
+required `Test-RealZmxEmptyList.ps1` build/test remains unchanged and mandatory.
+The Swift job compiles existing ownership bindings but does not execute another
+validation runner. Verification receipts, private context writes and original
+worker streams are retained on failure as well as success. The headless
+helper announces and flushes the existing root-retention marker before an
+unknown-ownership lifetime hold. Its managed propagation contract uses the
+source-bound observer (`WindowsCiTopology.Tests.ps1 -RetentionPropagationOnly`
+with `GRAPHCODE_VALIDATION_ASSEMBLY` set to the current canonical build);
+it does not start a native lifetime hold. The headless
+byte/hash, argument transport, refusal and job-order contracts run through
+`pwsh -NoProfile -File Tools\windows\Tests\WindowsCiTopology.Tests.ps1`;
+they do not establish a successful current-head provider build or XCTest run.
+
 **Timeouts and cancellation.**
 - Every Windows job has a `timeout-minutes`.
 - A newer push to the same pull request cancels the older in-flight run.
 - Runs for any other event use a unique concurrency group, so they are never
   cancelled.
+
+## Automatic selected-pane restoration qualification
+
+The observation guards `Assert-UiaUnrepairedTerminalFocus` and
+`Assert-UiaTerminalChallengeOutput` in `uia-live-gate.ps1` have headless contracts
+in the existing `Tests\TerminalGate.Tests.ps1` entry point (20 executed cases).
+They reject absent, duplicate, foreign, background, stale, or nonexclusive focus,
+require a nonzero selected pane in a **persisted-layout-ordered** roster, and
+reject stale nonces, command echoes, duplicate output, wrong arithmetic, invalid
+shell PIDs, or nonce output on another pane. The opt-in
+`-RestoredTerminalInputOnly` route now calls these guards, with 25 additional
+mock/source/managed-file adapter cases in that same headless entry point.
+
+**Integrated observer source binding, not a new native qualification:**
+`Assert-UiaRestorationPeerCapability` binds `UiCaptureDriver.psm1` to SHA-256
+`35B3985DDF7C7EAAC6360AE90917BF143DA633CF03E687F5214AE4CD89C1F297`.
+This integrates main's Wire merge `1aa4a225` with M3's `df0a80cc`,
+`2379a614`, `8aec6ba1`, and `d621c494`; the read-only peer method is unchanged.
+The previous module hash `B499EA0F` belongs to the historical M3/51c tuple,
+not these integrated module bytes. Preflight checks
+those source bytes, requires a fresh helper load, and requires the actual
+`PipeServerProcessId(SafePipeHandle)` method. Different bytes still refuse
+before resource creation; there is no command-line waiver. The default startup
+imports the shared module normally; the opt-in route imports it only through
+its preflight and then runs `Initialize-CapUiaClient` with its own current
+source-bound assembly before any UIA/native route work.
+
+The coordinator qualified M3 source `d621c4948b5b5ee2172e4ab9ae6e8c9db9bf6857`
+with its actual All-five receipt at `D:\np5b\s\report.json`, SHA-256
+`217703BE1ED8FFA0DE346EC062BB052DF21A30C04F2104384CEFC79E58361F4C`.
+Its terminal receipt hash was
+`09A0DC3A9B54F2B95EFDC488E64CC3144D08372CD3A722497FACEA0834ED2AD7`;
+elapsed 3.443 seconds, all six cleanup booleans true, original held child PID
+27920/generation 134384774974541102 matched both kernel queries, with three
+matched payload bytes and preserved nonpipe error 6. This is the original
+**M3 tuple**, not a rerun or M2 app/provider/daemon qualification. The earlier
+`np5`/`8aec6ba1` failure remains failed. The imported test source hash is
+`0328888460DB9F6E859C82C4B12D93A2DE15AA5DE1A6D2B1E1B02F309B01D9DF`.
+That test hash is historical too; integrated tests also contain main's compiler,
+hierarchy, Create, and image-buffer contracts. The compiled CaptureSuite retains
+all prerequisites: peer 5, compiler 27, hierarchy 32, Create 15, image buffer 9.
+The accepted restored-pane run at `51c71b9b` remains historical execution
+evidence only. Main changes product and native image/window surfaces, so a new
+integrated source-bound build and separately admitted functional rerun are
+required before claiming this head is natively qualified.
+
+The normal default UIA gate sets synthetic fixture and
+connection-failure flags and uses its identity-file/PID-reopen launcher. It
+does not establish real-daemon/session restoration and is unchanged. The new
+route returns before that default path and uses `ShellProcessOwnership.psm1`
+suspended original launches and retained jobs, private profile/support/temp,
+explicit child environments with no inherited UIA or synthetic workspace flags,
+and normal production CLI commands. Since Swift's zmx locator ignores `PATH`,
+the route stages the admitted provider bytes in its private support `bin` and
+rejects a different provider beside either Swift executable.
+
+It registers its own project, obtains the canonical project path using
+`projects --json`, creates/stops one attended main loop, then starts two real
+pinned-zmx `--daemon` roots with separate held launch jobs and distinct
+shell-computed nonce/PID/arithmetic markers. Stopping the loop prevents opening
+it from launching an agent backend. The test prepares the existing schema-v2
+layout and shell ownership record with **pane zero initially selected**; this
+setup is not evidence that the product created a split. Only the first window
+uses the normal pane-focus action to select pane one and waits for the product
+to persist it. The original shell exits through its normal tray Exit command;
+its original root and attach job are finalized before a new held shell is
+launched. Both separately owned seed roots must remain alive.
+
+Each opening uses normal project/loop UIA actions. Every current owned
+Winghostty provider is mapped to its session by actual TextPattern marker
+content, never screen order or a generic ID. The persisted pane/session order
+then identifies the expected selected provider. After reopen, actual UIA and
+native keyboard focus must already match it exclusively. There are no pane
+SetFocus calls, pane clicks, setters, or forced foreground recovery after
+reopen. Guarded `SendUnicodeInput`/`SendKeyInput` require the retained shell,
+foreground HWND and exact current pane HWND; a fresh shell-computed response
+must appear on that provider and not the other one. Printed PIDs are data
+witnesses, never process-control authority. The read-only peer query proves
+only the observer connection's server, not the shell's separate pipe handle.
+
+Coordinator/executor invocation **after** own source-bound guard/build custody,
+source/binary admission and a serialized native lane:
+
+```powershell
+pwsh -NoProfile -File Tools\windows\uia-live-gate.ps1 `
+  -RestoredTerminalInputOnly `
+  -Shell (Join-Path $PWD 'graphcode-windows\zig-out\bin\graphcode-windows.exe') `
+  -Daemon (Join-Path $daemonRuntime 'graphcoded.exe') `
+  -Cli (Join-Path $daemonRuntime 'graphcode.exe') `
+  -Zmx (Join-Path $env:GRAPHCODE_ZMX_ROOT 'zig-out\bin\zmx.exe') `
+  -RestorationRoot D:\gc-m2-restore
+```
+
+`$daemonRuntime` is the current worktree's staged Swift release runtime returned
+by the existing canonical build, with its matching runtime DLLs. The restoration
+root must be a new, short, private absolute path. The executor must establish
+binary provenance against the admitted source and provider pins; recorded input
+hashes alone do not prove which source compiled a binary.
+
+Work shares the original 20-minute case clock and protects a 90-second cleanup
+reserve. Existing bounded waits are clamped to that clock; UIA/OS calls do not
+acquire a kernel scheduling guarantee from a stopwatch. Cleanup uses the
+original scope/job API to require zero owned survivors and pipe EOF, retains
+independent stdout/stderr logs for each original launch, and holds lifetime
+authority indefinitely on UNKNOWN instead of discovering/killing by PID or
+name. On incomplete teardown, buffered output is retained as separate
+`.stdout.partial.log` and `.stderr.partial.log` files, without an EOF claim.
+Success evidence is emitted only after cleanup completes. Failures and setup
+artifacts remain in the owned root. Headless passing
+cases are not native input, persistence, provider, glyph, agent-backend, or
+whole-parity qualification; the native result remains pending.
 
 ## Winghostty fork
 

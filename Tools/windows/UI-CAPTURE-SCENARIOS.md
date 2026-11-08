@@ -107,10 +107,10 @@ A failed precondition
 is a bounded tooling/setup blocker, never permission to retry a product action.
 No prior W1 setup exception is reconstructed by this dry run.
 
-`Tests\ActionWorkerImport.Tests.ps1` adds **18 separately counted contracts**
+`Tests\ActionWorkerImport.Tests.ps1` has **20 separately counted contracts**
 (including two actual production-entry dry runs and null/reset/path/hash/run/
 authority/deadline/replacement negatives). `ValidationRunner.Tests.ps1` requires
-all 18 with zero skips, in addition to the unchanged **182 default / 185
+all 20 with zero skips, in addition to the unchanged **182 default / 185
 real-zmx** UiCaptureDriver baseline. The new cases are not omitted or used to
 replace baseline cases.
 
@@ -120,21 +120,68 @@ bindings, source/hash/run/authority/deadline/replacement failures, actual
 production startup refusal before launch, and initial/placed identity guard
 drift with modeled metrics. Its accepted startup intercepts the launcher without
 starting a process; it is not native-window evidence. ValidationRunner requires
-all 57 with zero skips, alongside the 18 import and unchanged 182/185 baseline.
+all 85 with zero skips, alongside the 20 import and unchanged 182/185 baseline.
 The W1 targeting repair expands that window-binding suite to **62** contracts:
 five additional startup refusals require an explicit nonnull, source/hash-bound
-source/target plan before either the stub or app can launch.
+source/target plan before either the stub or app can launch. The functional-only
+Wire route adds 23 further contracts, for **85** current identity contracts.
 
 `Tests\ActionTopologyImport.Tests.ps1` adds **16 separately counted contracts**
 for production import, lexical top-level scope, exact topology copies, layout/
 session hash refusals, missing layouts, prepare-only manifests and invocation,
 default launcher reachability (intercepted without a process), invalid session
-inventories, and cleanup/idempotence with modeled launcher output. The 18 import
+inventories, and cleanup/idempotence with modeled launcher output. The import
 contracts also exercise all five qualified topology/seed preparation paths
 through the unmodified production entry dry run. ValidationRunner requires all
 16 with zero skips without replacing the existing suites or baseline cases.
 
 ### W1 target selection and native form observation
+
+The explicit `-FunctionalWireOnly` opt-in is available on
+`Prepare-FocusedUiCapture.ps1 -FocusedProfile PostFixCards -PlanOnly`,
+`Prepare-MatchedActionSupplement.ps1 -Group WireCompletion`, and
+`Invoke-MatchedActionSupplement.ps1` (including `-DryRun`). All three must agree;
+other action groups and image-manifest arguments are refused in this mode.
+Functional preparation also requires `-GraphCodeBuildSource` identifying the
+binary's actual build commit. A harness-only new head may reuse that binary
+only when its entire tracked `graphcode-windows` tree is identical; preparation
+and runtime both check that equivalence and retain the actual build commit,
+rather than claiming a new product build.
+The copied daemon is not executed by functional W1; its functional job metadata
+does not invent a daemon build-source commit.
+It uses the same production Wire worker and locked native/semantic endpoint
+reader, Create correlation, edge readback, and held-process/job/EOF cleanup.
+It does not authorize screenshots or establish visual, glyph, higher-DPI, or
+whole-application parity.
+
+The functional plan binds a fresh owned scene-**state** plan, the exact source/
+target IDs and source files, worker and stub hashes, rather than inventing an
+existing image hash. This plan is explicitly not runtime evidence. A successful
+actual action separately records the owned process generations, UIA state,
+measured placement, locked endpoints, and correlated graph result.
+Its `S_FUNCTIONAL_W1_V1` contract derives frame identity from the current
+`MainWindow.zig`, measures the owned window's actual DPI and physical work area,
+and fits a preferred 1280-by-720 logical client within that measured area.
+After placement and on target reacquisition, DPI, source identity, frame and
+client bounds, and work area must remain unchanged. A too-small or changed
+window still fails normal visible-card/target admission; it is not resampled.
+The functional dry run records measurement **pending** until an owned product
+window exists, not a fabricated measured DPI.
+
+The default visual/matched-DPI route retains its existing image-manifest and
+DPI192/2880-by-1800-client/2906-by-1910-work-area guards unchanged. Choosing
+functional W1 does not lower those visual guards or authorize a capture
+campaign. Prepare canonical owned offline backend/peer inputs and a fresh
+current-controls 185-case report as usual; fixture compilation, injected DPI
+component models, and harmless dry-run custody are not live W1 acceptance.
+
+Advisory descendant exclusions retain the original native failure/ErrorRecord
+in memory for eligibility and refusal checks. Their diagnostic output is a
+bounded scalar projection: native/CIM facts, error type, FQID, message and
+script-stack text, with explicit graph omissions and per-field truncation
+metadata. Logging never recursively serializes the retained ErrorRecord,
+InvocationInfo, module, or process graphs. This changes observability only,
+not access-denied eligibility, held-generation checks, ownership or cleanup.
 
 The prepared action plan includes `wireTargetBinding` for WireCompletion and
 FinalBoundedActions. It binds the owned project path, exact source and target
@@ -146,34 +193,160 @@ the exact armed status and source-bound window metrics, and refuses identity,
 runtime-ID, bounds, scale, or overlap drift. The selected point is inside the
 title band above the source-defined inline actions, not the card midpoint.
 
+The version-2 binding also requires `SOURCE_CONNECTOR_DRAG_DROP` from the
+source card's source-derived right-centre connector. The worker posts a move
+and left-button down at that connector, a move with the button held to the
+safe target point, then left-button up at the target. It does **not** click
+the target card: macOS completes edges in the connector's drag `onEnded`,
+while a card tap opens the loop. Windows likewise routes a target-card down
+through node activation before its edge-drop branch. The binding is
+regenerated by the production preparer; old click-only plans are refused.
+
 The physical screen-to-client conversion and posted mouse-message dispatch
 enter per-monitor-v2 awareness and restore the caller's context in `finally`.
-W1 requires the native recipient to equal the held app's intended root HWND.
+W1 requires both native recipients to equal the held app's intended root HWND
+before posting any message. Dispatch stops at the first rejection, without
+retry or a synthetic release; the primary failure trace retains the partial
+drag receipt and ordinary owned-app cleanup remains responsible for teardown.
 The intent/result trace records source/target binding, safe bounds, screen and
 client points, packed LPARAM, recipient PID/HWND, foreground HWND, DPI context,
-and individual message-post results. These are **posted window messages**, not
+and individual message-post results for both endpoints and the held move.
+These are **posted window messages**, not
 physical cursor movement or a W6 hover result.
 
-Native modal observation now enumerates the held process's window hierarchy.
+App's three `wire completion` tests use never-shown fixture owners and the
+production message handler at injected DPI96/192: target clicks activate nodes;
+source connector drags reach the actual owned native form and its exact endpoint
+fields, and Create queues the expected command. They also cover ordinary
+connector use, modal cancellation, self/empty/cancelled drops and inline Mark
+priority. These are native-form/component contracts, not a live W1 campaign,
+physical input, daemon edge readback, higher-DPI captures, or macOS visual parity.
+
+Native modal observation enumerates the held root's window family, not every
+window in the process.
+
+The first modal UIA census and subsequent Button+Create predicate observation
+are separately timestamped. Both retain actual control type, native handle and
+runtime identity. The filtered guard records its exact count and caches its
+existing enabled/offscreen reads for the same decision; disabled candidates
+do not cause another offscreen read. Property errors retain the primary exception
+and explicitly unavailable evidence, never a false or successful default.
+
+Current and child properties use explicit managed getters so property exceptions
+remain primary. A diagnostic trace failure is attached to that original error,
+not substituted for it. Fifteen managed/source observation/client-startup contracts run as a
+separate owned CaptureSuite prerequisite before fresh fixtures; they do not
+increase the32 hierarchy,182 capture or684 registry counts.
+
+Live capture clients initialize UIA through the existing
+`Import-CompiledValidationAssembly.ps1` path for `GraphCodeUiaGateState`
+before observations. The loader verifies current source-bound assemblies,
+matching runtime dependencies and the signed Microsoft client-side provider,
+then uses the existing idempotent managed registration helper. Import-only,
+dry-run and no-desktop rehearsal paths do not register providers. Missing
+assembly/provenance/registration failures refuse rather than falling back to
+generic roles. Without an explicit selection, the client uses the existing
+current-worktree canonical Release assembly path through that same guarded
+loader; it does not build or copy an assembly. Explicit selection is forwarded
+through the supervisor's scrubbed child environment; explicit empty selections
+still refuse. This startup contract is not proof that an earlier Pane role
+was caused by missing proxies; native Button/Edit roles still need evidence.
+
+Held-process image queries use a fixed 32768-character unmanaged Unicode buffer
+instead of StringBuilder copyback. The actual BOOL and cached Win32 error are
+handled before any output decoding; failure remains a Win32Exception. Successful
+length and terminator/content checks refuse invalid output, and owned storage is
+freed in finally. This hardens a documented output contract; it does not prove
+the historical CI capacity error came from this API. Nine controlled decoder
+contracts run as a separate prerequisite without native process queries or
+inflating capture/registry counts.
+
+A pure topology selector requires the exact root and matching PID, follows
+transitive top-level ownership, and includes every
+descendant of the selected roots, including hidden and disabled controls of
+arbitrary classes. A separate same-process family is excluded by its resolved
+ownership/parent relationships, never by class or visibility. Unresolved
+nonzero owners, cyclic or missing ancestry, conflicting duplicate handles,
+missing/ambiguous roots and foreign selected processes refuse. Only selected
+windows receive the unchanged 50ms text query within the 2s census deadline.
+Immediately before each selected text query, live parent/owner values are
+compared with the collected topology. Changed ancestry refuses without retry
+or re-resolution; the failure trace retains the observed and expected scalar
+relationships. Stable observations supply the success/text-failure rows.
+Neither enumeration nor this check is atomic: a window can change after the
+check, newly created children may be omitted, and HWND-generation identity is
+not established. Existing held-root and endpoint revalidation remain mandatory.
+This scope does not diagnose any earlier query timeout.
+Normal post-dispatch modal acquisition first reads a distinct structure-only
+observation with no Name/caption field, text messages or UIA text traversal.
+It uses the same root-family selector, live ancestry checks and existing
+owner/class/visible-content resolver. Hidden or not-yet-created required
+content remains pending only within the original clipped 5s deadline and
+at-most-100ms cadence; malformed ancestry, foreign identity, ambiguity and
+native observation errors still refuse.
+Once structurally ready, exactly one full post-dispatch observation must resolve
+the same host/content before continuing. Failure or identity mismatch does not
+re-poll. The deadline is checked before/after that transition without resetting
+it. The full census still includes every rooted hidden/disabled member of every
+class, with unchanged 50ms/2s guards. Before-arm/pre-Create full revalidation and
+endpoint/Create guards remain separate and unchanged. Source creation-before-show
+ordering supports this boundary, not a proof of message-pump responsiveness,
+HWND generation, or the cause of an earlier timeout.
 It requires exactly one visible GraphCodeSheetHost owned by the app root and
 one visible GraphCodeNativeForm descendant through the viewport. The Create
 button belongs to the sheet footer, so UIA observation/invocation uses that
-owned host rather than the child content. The trace retains pre/post hierarchy
+owned host rather than the child content. Immediately before Create, the worker
+uses the same readonly-endpoint reader as the ordinary UIA edge routes, with
+Wire's exact bound source and target UUIDs instead of the ordinary fixture
+defaults. The reader requires the owned host/viewport/native-form lineage,
+unique direct Edit controls 9100/9101, stable runtime identities, native
+`ES_READONLY` and semantic `ValuePattern.IsReadOnly`, and matching native-buffer
+and semantic values. A missing, mutable, stale, swapped or foreign endpoint
+refuses before Create. The Wire receipt retains the validated endpoint snapshot
+alongside the correlated applied-edge request IDs. The trace retains pre/post hierarchy
 censuses and observed modal controls, including on timeout. Missing hosts or
 not-yet-created content are polled within the clipped action deadline;
 ambiguity, foreign identity, replacement, or native query errors refuse.
+On a native text-query failure, the error trace also retains the already-read
+HWND, class, process/thread IDs, bounds, parent/owner, visibility/enabled state
+and cached Win32 error. These existing structural reads precede the text query
+and are reused on success. No title/text payload or new native API is added;
+parent/owner are re-read for the immediate ancestry validation described above.
+The original 50ms query, PID filter, refusal and rethrow
+remain unchanged. A zero native error is recorded as zero, not diagnosed as a
+specific timeout cause.
+The canonical capture suite runs 32 pure-selection/managed/source contracts
+for this metadata as an owned prerequisite before fresh fixture preparation.
+They are not added to the 182/185 capture-driver case inventory and do not
+invoke the native text-query failure path.
+For a separately authorized first-census diagnostic, the existing
+`Invoke-MatchedActionSupplement.ps1` entry accepts `-WireCensusDiagnostic`
+only with `-FunctionalWireOnly` and without `-DryRun`. It performs the normal
+owned dispatch, then one post-dispatch window observation and stops before
+sheet resolution, endpoint reads or Create. Query failures propagate unchanged;
+success is labeled `DIAGNOSTIC_NOT_W1_ACCEPTANCE`, with zero action receipts
+and no images. Both outcomes use the existing cleanup path. The default W1
+route is unchanged. Current source/control bindings and fresh capture preflight
+remain mandatory; neither this diagnostic nor its clean release accepts W1.
 The original action exception is retained if cleanup also fails; launcher EOF
 is never relabeled target-private pipe EOF.
 
-`Tests\WireTargeting.Tests.ps1` adds **56 separately counted contracts**, required
+`Tests\WireTargeting.Tests.ps1` defines **75 separately counted contracts**, required
 by ValidationRunner with zero skips. They exercise the actual shared production
 target/oracle/stability/dispatch helpers with modeled negative cases and a
 harmless native owned popup/child fixture. The native fixture checks actual
 PMv2 conversion, message acceptance and awareness restoration on the current
 desktop; it is not GraphCode/provider or product-action evidence. Dispatch
 failure cases inject rejected native-post results into the same dispatch loop.
+The default suite also records the actual worker's CapNative dispatch boundary
+and runs its selected shared message dispatcher without native input. Run just
+that headless regression with
+`pwsh -NoProfile -File Tools\windows\Tests\WireTargeting.Tests.ps1 -DispatchOnly`;
+its three executed cases are selected headless dispatch/endpoint contracts, not
+a default-suite or live W1 pass.
 The preserved legacy behavioral run demonstrates the top-level-only child miss
-and midpoint/Mark collision separately from passing results.
+and midpoint/Mark collision separately from passing results; it is not the
+target-click connector-gesture regression.
 
 The production `-DryRun` also validates `wireTargetBinding` before launching its
 harmless child and records `wireAlgorithmPreflight`, which exercises the shared

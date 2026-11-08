@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param()
+param(
+  [string] $FixtureCompilerInput = "",
+  [string] $FixtureCompilerInputSha256 = ""
+)
 
 function Invoke-WithValidationRunnerRuntime([scriptblock] $Action) {
   $selected = [Environment]::GetEnvironmentVariable("GRAPHCODE_DOTNET10403", "Process")
@@ -40,8 +43,17 @@ $output = [Collections.Generic.List[string]]::new()
 $passMarkers = 0
 $executedMarkers = 0
 $exitCode = $null
+$compilerArguments = @()
+if ($FixtureCompilerInput -or $FixtureCompilerInputSha256) {
+  if (-not $FixtureCompilerInput -or $FixtureCompilerInputSha256 -cnotmatch '\A[A-F0-9]{64}\z' -or
+      -not [IO.Path]::IsPathFullyQualified($FixtureCompilerInput)) {
+    throw "Fixture compiler input requires an absolute JSON path and uppercase SHA256"
+  }
+  $compilerArguments = @("--fixture-compiler-input", $FixtureCompilerInput,
+    "--fixture-compiler-input-sha256", $FixtureCompilerInputSha256)
+}
 Invoke-WithValidationRunnerRuntime {
-  & $runner --repository-root $repoRoot --artifact-root $artifactRoot 2>&1 | ForEach-Object {
+  & $runner --repository-root $repoRoot --artifact-root $artifactRoot @compilerArguments 2>&1 | ForEach-Object {
     $line = "$_"
     $output.Add($line)
     Write-Host $line

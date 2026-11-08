@@ -534,6 +534,14 @@ public static class GraphCodeUiaGateState {
   public static int ControlIdOf(IntPtr control) {
     return control == IntPtr.Zero ? 0 : GetDlgCtrlID(control);
   }
+  public static bool IsReadonlyEdit(IntPtr window) {
+    if (window == IntPtr.Zero || !String.Equals(WindowClass(window), "Edit", StringComparison.Ordinal))
+      throw new InvalidOperationException("Readonly endpoint requires a native Edit control.");
+    long style = GetWindowLongPtr(window, -16).ToInt64();
+    if (style == 0)
+      throw new InvalidOperationException("Readonly endpoint style query failed: " + Marshal.GetLastWin32Error());
+    return (style & 0x0800) != 0;
+  }
   public static bool HasVisibleBounds(IntPtr window) {
     RECT rect;
     return window != IntPtr.Zero && IsWindowVisible(window) &&
@@ -866,7 +874,7 @@ public static class GraphCodeUiaGateState {
   private static extern IntPtr RealChildWindowFromPoint(IntPtr parent, ScreenPoint clientPoint);
   [DllImport("user32.dll")]
   private static extern IntPtr GetWindow(IntPtr window, uint command);
-  [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+  [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
   private static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
   public sealed class ControlClick {
     public int ControlId, Left, Top, Right, Bottom, ScreenX, ScreenY;

@@ -1,9 +1,11 @@
 param(
     [string]$ScratchRoot = (Join-Path ([IO.Path]::GetTempPath()) ('wt' + [guid]::NewGuid().ToString('N').Substring(0,8))),
-    [switch]$LegacyBehavior
+    [switch]$LegacyBehavior,
+    [switch]$DispatchOnly
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
+if ($LegacyBehavior -and $DispatchOnly) {throw 'LegacyBehavior and DispatchOnly are mutually exclusive.'}
 $directory=Split-Path -Parent $PSScriptRoot
 $repository=Split-Path -Parent (Split-Path -Parent $directory)
 Import-Module (Join-Path $directory 'UiCaptureDriver.psm1') -Force -WarningAction SilentlyContinue
@@ -30,6 +32,185 @@ function Reject-WireCase {
     }
 }
 
+if (-not $LegacyBehavior) {
+    Test-WireCase 'actual worker dispatch presses source then holds moves and releases target' {
+        Add-Type -TypeDefinition @'
+using System;
+public static class WireDispatchRecorder {
+  public static object[] PostPointerClickScreen(IntPtr window,int x,int y) {
+    return new object[] { "click",window.ToInt64(),x,y };
+  }
+  public static object[] PostPointerDragScreen(IntPtr window,int sx,int sy,int tx,int ty) {
+    return new object[] { "drag",window.ToInt64(),sx,sy,tx,ty };
+  }
+}
+'@
+        $tokens=$null;$parseErrors=$null
+        $worker=[Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $directory 'Invoke-UiCaptureWorker.ps1'),[ref]$tokens,[ref]$parseErrors)
+        Assert-WireCase ($parseErrors.Count -eq 0) 'Worker source did not parse.'
+        $functions=@($worker.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Invoke-CapWireCompletionSupplement'
+        },$false))
+        Assert-WireCase ($functions.Count -eq 1) 'Expected the actual Wire supplement definition.'
+        $assignments=@($functions[0].Body.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -cin @('$sourceX','$sourceY','$targetX','$targetY','$dispatch')
+        },$false))
+        $calls=@($assignments|Where-Object {$_.Left.Extent.Text -ceq '$dispatch'})
+        Assert-WireCase ($calls.Count -eq 1 -and $calls[0].Right.Extent.Text.StartsWith('[CapNative]::')) `
+            'Expected one actual CapNative worker dispatch boundary.'
+        $app=[pscustomobject]@{Window=[IntPtr]123}
+        $reacquired=[pscustomobject]@{sourceScreenPoint=@(250,48);screenPoint=@(393,15)}
+        $dispatch=$null
+        foreach ($assignment in $assignments) {
+            $statement=$assignment.Extent.Text
+            if ($assignment.Left.Extent.Text -ceq '$dispatch') {
+                $statement=$statement.Replace('[CapNative]::','[WireDispatchRecorder]::')
+            }
+            . ([scriptblock]::Create($statement))
+        }
+        Assert-WireCase ($dispatch[1] -eq 123) 'Worker dispatched to a different root HWND.'
+        $script:dragMessages=[Collections.Generic.List[string]]::new()
+        $poster=[Func[uint32,uint32,long,bool]]{
+            param($message,$keys,$position)
+            $script:dragMessages.Add("$message/$keys/$position")
+            return $true
+        }
+        if ($dispatch[0] -ceq 'click') {
+            $receipt=[CapPointerReceipt]::new()
+            $receipt.PackedLParam=($dispatch[3] -shl 16) -bor $dispatch[2]
+            [CapNative]::DispatchPointerMessages($receipt,$poster)
+        } elseif ($dispatch[0] -ceq 'drag') {
+            $receipt=New-Object -TypeName CapPointerDragReceipt
+            $receipt.Start=[CapPointerReceipt]::new();$receipt.End=[CapPointerReceipt]::new()
+            $receipt.Start.PackedLParam=($dispatch[3] -shl 16) -bor $dispatch[2]
+            $receipt.End.PackedLParam=($dispatch[5] -shl 16) -bor $dispatch[4]
+            [CapNative]::DispatchPointerDragMessages($receipt,$poster)
+        } else {throw "Unexpected worker dispatch: $($dispatch[0])"}
+        $actual=$script:dragMessages -join ','
+        Assert-WireCase ($actual -ceq '512/0/3145978,513/1/3145978,512/1/983433,514/0/983433') `
+            "Worker gesture must press source, hold-move, release target; actual=$actual"
+    }
+    Test-WireCase 'actual worker reads exact locked endpoints before Create and refuses invalid fields' {
+        $tokens=$null;$parseErrors=$null
+        $worker=[Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $directory 'Invoke-UiCaptureWorker.ps1'),[ref]$tokens,[ref]$parseErrors)
+        Assert-WireCase ($parseErrors.Count -eq 0) 'Worker source did not parse.'
+        $function=$worker.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Invoke-CapWireCompletionSupplement'
+        },$false)
+        $body=@($function.Body.EndBlock.Statements|Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]})[0].Body
+        $statements=@($body.Statements)
+        $createIndexes=@(for ($i=0;$i -lt $statements.Count;$i++) {
+            if ($statements[$i].Extent.Text -ceq
+                '$creates[0].GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()') {$i}
+        })
+        Assert-WireCase ($createIndexes.Count -eq 1) 'Expected the actual worker Create boundary.'
+        $createIndex=$createIndexes[0]
+        $readerIndexes=@(for ($i=0;$i -lt $createIndex;$i++) {
+            if ($statements[$i].Extent.Text -match '^\$endpoints\s*=\s*Read-UiaReadonlyEdgeEndpoints\b') {$i}
+        })
+        Assert-WireCase ($readerIndexes.Count -le 1) 'Duplicate endpoint observations before Create.'
+        $first=if ($readerIndexes.Count -eq 1) {$readerIndexes[0]} else {$createIndex}
+        $transaction=[scriptblock]::Create(($statements[$first..$createIndex].Extent.Text -join "`n"))
+        $sourceId='60000000-0000-4000-8000-000000000001'
+        $targetId='60000000-0000-4000-8000-000000000002'
+        $app=[pscustomobject]@{Window=[IntPtr]123;Run=[pscustomobject]@{Identity=[pscustomobject]@{Pid=4242}}}
+        $formElement=[pscustomobject]@{Identity='owned-form'}
+        $invoker=[pscustomobject]@{}
+        $invoker|Add-Member ScriptMethod Invoke {
+            $script:wireEndpointState.calls.Add('create')
+            $script:wireEndpointState.creates++
+        }
+        $create=[pscustomobject]@{Invoker=$invoker}
+        $create|Add-Member ScriptMethod GetCurrentPattern {param($pattern) return $this.Invoker}
+        $creates=@($create)
+        function Read-UiaReadonlyEdgeEndpoints {
+            param($Dialog,$ProcessId,$Owner,$Title,$ExpectedSource,$ExpectedTarget,$AssemblyPath)
+            $script:wireEndpointState.calls.Add('read')
+            Assert-WireCase ($Dialog -eq $formElement -and $ProcessId -eq 4242 -and $Owner -eq [IntPtr]123 -and
+                $ExpectedSource -ceq $sourceId -and $ExpectedTarget -ceq $targetId) 'Worker endpoint binding differs.'
+            if ($script:wireEndpointState.scenario -cin @('missing','writable','mutable')) {
+                throw "Endpoint refusal: $($script:wireEndpointState.scenario)"
+            }
+            return @{source=$(if ($script:wireEndpointState.scenario -ceq 'wrong-source') {$targetId} else {$sourceId})
+                target=$(if ($script:wireEndpointState.scenario -ceq 'wrong-target') {$sourceId} else {$targetId})
+                snapshot=@{fields=@(@{controlId=9100;readonly=$true},@{controlId=9101;readonly=$true})}}
+        }
+        foreach ($scenario in @('valid','wrong-source','wrong-target','missing','writable','mutable')) {
+            $script:wireEndpointState=@{scenario=$scenario;creates=0;calls=[Collections.Generic.List[string]]::new()}
+            $endpoints=$null;$failure=$null
+            try {. $transaction} catch {$failure=$_}
+            if ($scenario -ceq 'valid') {
+                Assert-WireCase ($null -eq $failure -and $script:wireEndpointState.creates -eq 1 -and
+                    ($script:wireEndpointState.calls -join ',') -ceq 'read,create' -and
+                    $null -ne $endpoints.snapshot) `
+                    "Actual worker must read exact locked endpoints before Create; actual=$($script:wireEndpointState.calls -join ','); failure=$failure"
+            } else {
+                Assert-WireCase ($null -ne $failure -and $script:wireEndpointState.creates -eq 0 -and
+                    ($script:wireEndpointState.calls -join ',') -ceq 'read') `
+                    "Actual worker invoked Create after $scenario endpoint refusal."
+            }
+        }
+    }
+    Test-WireCase 'shared readonly endpoint decision preserves ordinary defaults and exact Wire identities' {
+        $reader=(Get-Command Read-UiaReadonlyEdgeEndpoints -CommandType Function).ScriptBlock.Ast
+        $defaults=@{}
+        foreach ($parameter in $reader.Body.ParamBlock.Parameters) {
+            if ($parameter.Name.VariablePath.UserPath -cin @('ExpectedSource','ExpectedTarget')) {
+                $defaults[$parameter.Name.VariablePath.UserPath]=$parameter.DefaultValue.SafeGetValue()
+            }
+        }
+        Assert-WireCase ($defaults.ExpectedSource -ceq '11111111-1111-4111-8111-111111111111' -and
+            $defaults.ExpectedTarget -ceq '22222222-2222-4222-8222-222222222222') 'Ordinary UIA fixture defaults changed.'
+        foreach ($ids in @(
+            @($defaults.ExpectedSource,$defaults.ExpectedTarget),
+            @('60000000-0000-4000-8000-000000000001','60000000-0000-4000-8000-000000000002'))) {
+            $sample=@{
+                handle=10;processId=123;owner=5;class='GraphCodeSheetHost';title='Create or edit edge';captionless=$true
+                viewport=@{handle=11;parent=10;processId=123;class='GraphCodeSheetViewport';matches=1;stable=$true;runtime='11';owned=$true}
+                content=@{handle=12;parent=11;processId=123;class='GraphCodeNativeForm';matches=1;stable=$true;runtime='12';owned=$true}
+                fields=@(
+                    @{handle=21;parent=12;processId=123;controlId=9100;class='Edit';matches=1;stable=$true;runtime='21';owned=$true
+                        readonly=$true;nativeReadonly=$true;value=$ids[0];semanticValue=$ids[0];semanticProcessId=123;name='Source loop identity'},
+                    @{handle=22;parent=12;processId=123;controlId=9101;class='Edit';matches=1;stable=$true;runtime='22';owned=$true
+                        readonly=$true;nativeReadonly=$true;value=$ids[1];semanticValue=$ids[1];semanticProcessId=123;name='Target loop identity'})
+            }
+            Assert-WireCase (Get-UiaReadonlyEndpointsDecision $sample 123 5 'Create or edit edge' $ids[0] $ids[1]).ready `
+                'Shared reader rejected matching native and semantic endpoint values.'
+            foreach ($fault in @('missing','duplicate','wrong-id','wrong-pid','wrong-parent','wrong-sheet-owner',
+                'writable','native-writable','missing-native-readonly','wrong-value','wrong-target','semantic-mismatch','stale','wrong-class')) {
+                $changed=$sample|ConvertTo-Json -Depth 10|ConvertFrom-Json -AsHashtable
+                switch ($fault) {
+                    'missing' {$changed.fields=@($changed.fields[1])}
+                    'duplicate' {$changed.fields[0].matches=2}
+                    'wrong-id' {$changed.fields[0].controlId=9101}
+                    'wrong-pid' {$changed.fields[0].processId=456}
+                    'wrong-parent' {$changed.fields[0].parent=11}
+                    'wrong-sheet-owner' {$changed.owner=6}
+                    'writable' {$changed.fields[0].readonly=$false}
+                    'native-writable' {$changed.fields[0].nativeReadonly=$false}
+                    'missing-native-readonly' {$changed.fields[0].Remove('nativeReadonly')}
+                    'wrong-value' {$changed.fields[0].value=$ids[1];$changed.fields[0].semanticValue=$ids[1]}
+                    'wrong-target' {$changed.fields[1].value=$ids[0];$changed.fields[1].semanticValue=$ids[0]}
+                    'semantic-mismatch' {$changed.fields[0].semanticValue=$ids[1]}
+                    'stale' {$changed.fields[0].stable=$false}
+                    'wrong-class' {$changed.fields[0].class='Static'}
+                }
+                Assert-WireCase (-not (Get-UiaReadonlyEndpointsDecision $changed 123 5 'Create or edit edge' $ids[0] $ids[1]).ready) `
+                    "Shared reader accepted $fault endpoints."
+            }
+        }
+    }
+}
+
+if (-not $DispatchOnly) {
 # Harmless native hierarchy with the same parent/owner distinction as the sheet.
 Add-Type -TypeDefinition @'
 using System;
@@ -49,6 +230,10 @@ public static class WireFixture {
     if(RegisterClassW(ref cls)==0) throw new Exception("Fixture class registration failed.");
     cls.Name="WireTargetFixtureContent";
     if(RegisterClassW(ref cls)==0) throw new Exception("Fixture child class registration failed.");
+    foreach(var name in new[] { "GraphCodeSheetHost","GraphCodeSheetViewport","GraphCodeNativeForm" }) {
+      cls.Name=name;
+      if(RegisterClassW(ref cls)==0) throw new Exception("Endpoint fixture class registration failed.");
+    }
   }
   [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
   static extern IntPtr CreateWindowExW(uint ex, string cls, string name, uint style,
@@ -64,6 +249,34 @@ public static class WireFixture {
   [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window,out uint processId);
   [DllImport("user32.dll")] static extern bool PeekMessageW(out Message message,IntPtr window,uint first,uint last,uint remove);
+  [DllImport("user32.dll")] static extern IntPtr SendMessageW(IntPtr window,uint message,IntPtr wp,IntPtr lp);
+  public static void SetReadonly(IntPtr window,bool value) {
+    if(SendMessageW(window,0x00CF,new IntPtr(value ? 1 : 0),IntPtr.Zero)==IntPtr.Zero)
+      throw new Exception("Endpoint fixture readonly update failed.");
+  }
+  public static IntPtr[] CreateEndpoints(IntPtr owner,string source,string target) {
+    IntPtr host=CreateWindowExW(0x08000008,"GraphCodeSheetHost","Create or edit edge",0x90000000,
+      20,20,350,180,owner,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
+    if(host==IntPtr.Zero) throw new Exception("Endpoint fixture host creation failed.");
+    try {
+      IntPtr viewport=CreateWindowExW(0,"GraphCodeSheetViewport","",0x50000000,
+        0,0,350,180,host,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
+      if(viewport==IntPtr.Zero) throw new Exception("Endpoint fixture viewport creation failed.");
+      IntPtr content=CreateWindowExW(0,"GraphCodeNativeForm","",0x50000000,
+        0,0,350,180,viewport,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
+      if(content==IntPtr.Zero) throw new Exception("Endpoint fixture content creation failed.");
+      IntPtr from=CreateWindowExW(0,"EDIT",source,0x50000800,
+        5,5,320,25,content,new IntPtr(9100),IntPtr.Zero,IntPtr.Zero);
+      if(from==IntPtr.Zero) throw new Exception("Endpoint fixture source creation failed.");
+      IntPtr to=CreateWindowExW(0,"EDIT",target,0x50000800,
+        5,40,320,25,content,new IntPtr(9101),IntPtr.Zero,IntPtr.Zero);
+      if(to==IntPtr.Zero) throw new Exception("Endpoint fixture target creation failed.");
+      return new[] { host,viewport,content,from,to };
+    } catch(Exception primary) {
+      if(!DestroyWindow(host)) throw new AggregateException(primary,new Exception("Endpoint fixture failed-launch cleanup failed."));
+      throw;
+    }
+  }
   public static IntPtr AtPoint(int x,int y) { return WindowFromPoint(new Point { X=x,Y=y }); }
   public static bool HasPointerMessage(IntPtr window) {
     Message message; return PeekMessageW(out message,window,0x0200,0x0202,0);
@@ -88,7 +301,7 @@ try {
     $content=[WireFixture]::Create($hostWindow,$true,'wire fixture content')
     if ($LegacyBehavior) {
         Test-WireCase 'owned child form is observable, not just a top-level class' {
-            $actual=[GraphCodeUiaGateState]::FindTopLevel('WireTargetFixtureContent',[uint32]$PID)
+            $actual=[CapUiaGateState]::FindTopLevel('WireTargetFixtureContent',[uint32]$PID)
             Assert-WireCase ($actual -eq $content) 'Top-level-only oracle missed the owned child content.'
         }
         Test-WireCase 'target point excludes the inline Mark action' {
@@ -103,7 +316,7 @@ try {
             Assert-WireCase (($binding.safeLogicalBounds -join ',') -ceq '11,0,176,31' -and
                 $binding.sourceNodeId -cne $binding.targetNodeId) 'Invalid source-derived safe region.'
         }
-        foreach ($field in @('sourceNodeId','targetNodeId','sourceCardId','targetCardId','scene','phase','projectPath','wireId','sourceHashes')) {
+        foreach ($field in @('sourceNodeId','targetNodeId','sourceCardId','targetCardId','scene','phase','projectPath','wireId','sourceHashes','gesture','sourceConnector')) {
             $changed=$binding|ConvertTo-Json -Depth 20|ConvertFrom-Json
             $changed.$field='foreign'
             Reject-WireCase "reject planned $field drift" {
@@ -130,7 +343,9 @@ try {
             Test-WireCase "production safe target excludes inline Mark at DPI$dpi" {
                 $observation=Get-CapWireTargetObservation $binding $rows $PID $dpi
                 Assert-WireCase ($observation.screenPoint[1] -lt 31*$dpi/96 -and
-                    $observation.screenPoint[0] -gt 300*$dpi/96) 'Target point hits inline action.'
+                    $observation.screenPoint[0] -gt 300*$dpi/96 -and
+                    ($observation.sourceScreenPoint -join ',') -ceq "$([int](250*$dpi/96)),$([int](48*$dpi/96))") `
+                    'Target point hits inline action or source point misses connector.'
             }
         }
         Test-WireCase 'production algorithm preflight is explicitly model-only with no launch' {
@@ -142,7 +357,7 @@ try {
         Test-WireCase 'immutable reacquisition preserves exact target and root identity' {
             Assert-CapWireTargetStable $first $first @(1,2) @(1,2)
         }
-        foreach ($fault in @('source','target','runtime','bounds','mode','root')) {
+        foreach ($fault in @('source','target','runtime','bounds','mode','root','source-point')) {
             $second=$first|ConvertTo-Json -Depth 20|ConvertFrom-Json
             $rootAfter=@(1,2)
             switch ($fault) {
@@ -152,12 +367,13 @@ try {
                 'bounds' {$second.target.Bounds[0]++}
                 'mode' {$second.mode='not armed'}
                 'root' {$rootAfter=@(1,3)}
+                'source-point' {$second.sourceScreenPoint[0]++}
             }
             Reject-WireCase "reacquisition rejects $fault drift" {
                 Assert-CapWireTargetStable $first $second @(1,2) $rootAfter
             } 'drifted before dispatch'
         }
-        foreach ($fault in @('source','target','mode','foreign-process','offscreen','disabled','bounds','NaN','duplicate','overlap')) {
+        foreach ($fault in @('source','target','mode','foreign-process','offscreen','disabled','bounds','NaN','duplicate','overlap','source-overlap')) {
             $rows=@($baseRows|ConvertTo-Json -Depth 20|ConvertFrom-Json)
             switch ($fault) {
                 'source' {$rows[0].AutomationId='foreign'}
@@ -170,11 +386,13 @@ try {
                 'NaN' {$rows[1].Bounds[0]=[double]::NaN}
                 'duplicate' {$rows+= $rows[1]}
                 'overlap' {$rows[3].Bounds=@(300,0,550,31)}
+                'source-overlap' {$rows[3].Bounds=@(240,40,260,60)}
             }
             $message=switch ($fault) {
                 'foreign-process' {'does not match owned PID'}
                 {$_ -in @('offscreen','disabled','bounds','NaN')} {'bounds/scale'}
                 'overlap' {'Unsafe wire target point'}
+                'source-overlap' {'Unsafe wire source connector'}
                 default {'identity or active Wire mode'}
             }
             Reject-WireCase "reject observed $fault" {
@@ -264,6 +482,14 @@ try {
                     'Unrelated same-process HWND was not refused by the actual recipient guard.'
                 Assert-WireCase (-not [WireFixture]::HasPointerMessage($hostWindow) -and
                     -not [WireFixture]::HasPointerMessage($overlay)) 'Recipient refusal posted a pointer message.'
+                $failure=$null
+                try {[CapNative]::PostPointerDragScreen($hostWindow,($b[0]+10),($b[1]+10),($b[0]+20),($b[1]+20))|Out-Null}
+                catch {$failure=$_}
+                Assert-WireCase ($null -ne $failure -and
+                    $failure.Exception.Message.Contains('Pointer recipient differs from intended owned HWND')) `
+                    'Drag accepted an unrelated same-process source recipient.'
+                Assert-WireCase (-not [WireFixture]::HasPointerMessage($hostWindow) -and
+                    -not [WireFixture]::HasPointerMessage($overlay)) 'Drag source refusal posted a pointer message.'
             } finally {
                 try {
                     if ($overlay -ne [IntPtr]::Zero -and -not [WireFixture]::DestroyWindow($overlay)) {
@@ -271,6 +497,31 @@ try {
                     }
                 } finally {$null=[WireFixture]::SetThreadDpiAwarenessContext($previous)}
             }
+        }
+        Test-WireCase 'drag refuses a foreign end recipient before any dispatch and restores PMv2' {
+            $b=@($nativeRows|Where-Object Handle -EQ $hostWindow.ToInt64())[0].Bounds
+            $previous=[WireFixture]::SetThreadDpiAwarenessContext([IntPtr](-4))
+            Assert-WireCase ($previous -ne [IntPtr]::Zero) 'Drag recipient preflight PMv2 setup failed.'
+            try {
+                Assert-WireCase ([WireFixture]::AtPoint(($b[0]+10),($b[1]+10)) -eq $hostWindow -and
+                    [WireFixture]::OwnerProcess($hostWindow) -eq $PID) 'Owned drag source recipient preflight refused.'
+                Assert-WireCase (-not [WireFixture]::HasPointerMessage($hostWindow)) 'Pointer message queued before end refusal.'
+                $before=[WireFixture]::GetThreadDpiAwarenessContext()
+                $failure=$null
+                try {[CapNative]::PostPointerDragScreen($hostWindow,($b[0]+10),($b[1]+10),-30000,-30000)|Out-Null}
+                catch {$failure=$_}
+                Assert-WireCase ($null -ne $failure -and $failure.Exception.Message.Contains('recipient differs')) `
+                    'Foreign drag endpoint was accepted.'
+                $cause=$failure.Exception
+                while ($cause.InnerException) {$cause=$cause.InnerException}
+                $partial=$cause.Data['PointerDragReceipt']
+                Assert-WireCase ($null -ne $partial -and $null -ne $partial.Start -and
+                    -not $partial.Start.MovePosted -and -not $partial.Start.DownPosted -and
+                    -not $partial.HeldMovePosted -and $null -eq $partial.End -and
+                    -not [WireFixture]::HasPointerMessage($hostWindow) -and
+                    [WireFixture]::GetThreadDpiAwarenessContext() -eq $before) `
+                    'End recipient refusal posted a partial gesture, lost its receipt, or leaked DPI awareness.'
+            } finally {$null=[WireFixture]::SetThreadDpiAwarenessContext($previous)}
         }
         Test-WireCase 'native PMv2 conversion dispatch persists coordinates and restores caller awareness' {
             $b=@($nativeRows|Where-Object Handle -EQ $hostWindow.ToInt64())[0].Bounds
@@ -293,6 +544,60 @@ try {
         Reject-WireCase 'invalid native HWND is not a successful click' {
             [CapNative]::PostPointerClickScreen([IntPtr]::Zero,0,0)
         } 'recipient differs'
+        Test-WireCase 'native drag validates both endpoints under restored PMv2 awareness' {
+            $b=@($nativeRows|Where-Object Handle -EQ $hostWindow.ToInt64())[0].Bounds
+            $preflight=[WireFixture]::SetThreadDpiAwarenessContext([IntPtr](-4))
+            Assert-WireCase ($preflight -ne [IntPtr]::Zero) 'Owned drag recipient PMv2 preflight failed.'
+            try {
+                # The child content starts at client20,20; both recipients must be the host.
+                foreach ($offset in @(10,15)) {
+                    $recipient=[WireFixture]::AtPoint(($b[0]+$offset),($b[1]+$offset))
+                    $recipientPid=[WireFixture]::OwnerProcess($recipient)
+                    Assert-WireCase ($recipient -eq $hostWindow -and $recipientPid -eq $PID) `
+                        "Owned drag recipient preflight refused: offset=$offset; intended=$hostWindow; recipient=$recipient; recipientPID=$recipientPid; expectedPID=$PID."
+                }
+            } finally {$null=[WireFixture]::SetThreadDpiAwarenessContext($preflight)}
+            $previous=[WireFixture]::SetThreadDpiAwarenessContext([IntPtr](-1))
+            try {
+                $before=[WireFixture]::GetThreadDpiAwarenessContext()
+                $receipt=[CapNative]::PostPointerDragScreen($hostWindow,($b[0]+10),($b[1]+10),($b[0]+15),($b[1]+15))
+                Assert-WireCase ($receipt.Start.ClientX -eq 10 -and $receipt.Start.ClientY -eq 10 -and
+                    $receipt.End.ClientX -eq 15 -and $receipt.End.ClientY -eq 15 -and
+                    $receipt.Start.MovePosted -and $receipt.Start.DownPosted -and
+                    $receipt.HeldMovePosted -and $receipt.End.UpPosted -and
+                    $receipt.Start.Recipient -eq $hostWindow.ToInt64() -and
+                    $receipt.End.Recipient -eq $hostWindow.ToInt64() -and
+                    [WireFixture]::GetThreadDpiAwarenessContext() -eq $before) `
+                    "Drag receipt/DPI restore failed: $($receipt|ConvertTo-Json -Depth 10 -Compress); before=$before; after=$([WireFixture]::GetThreadDpiAwarenessContext())"
+            } finally {$null=[WireFixture]::SetThreadDpiAwarenessContext($previous)}
+        }
+        foreach ($failureIndex in 0..3) {
+            $script:dragMessages=[Collections.Generic.List[string]]::new()
+            $receipt=[CapPointerDragReceipt]::new()
+            $receipt.Start=[CapPointerReceipt]::new();$receipt.End=[CapPointerReceipt]::new()
+            $poster=[Func[uint32,uint32,long,bool]]{
+                param($message,$keys,$position)
+                $script:dragMessages.Add("$message/$keys/$position")
+                return $script:dragMessages.Count -ne ($failureIndex+1)
+            }
+            Test-WireCase "drag dispatch reports failure at step $failureIndex" {
+                $failure=$null
+                try {[CapNative]::DispatchPointerDragMessages($receipt,$poster)}
+                catch {$failure=$_}
+                Assert-WireCase ($null -ne $failure -and
+                    $failure.Exception.Message.Contains('Native pointer drag dispatch failed')) 'Expected explicit drag refusal.'
+                $cause=$failure.Exception
+                while ($cause.InnerException) {$cause=$cause.InnerException}
+                Assert-WireCase ([object]::ReferenceEquals($cause.Data['PointerDragReceipt'],$receipt) -and
+                    $receipt.Start.MovePosted -eq ($failureIndex -gt 0) -and
+                    $receipt.Start.DownPosted -eq ($failureIndex -gt 1) -and
+                    $receipt.HeldMovePosted -eq ($failureIndex -gt 2) -and -not $receipt.End.UpPosted) `
+                    'Dispatch failure lost or misstated its partial receipt.'
+            }
+            Test-WireCase "drag dispatch stops without retry or synthetic UP after step $failureIndex" {
+                Assert-WireCase ($script:dragMessages.Count -eq ($failureIndex+1)) 'Drag continued after refusal.'
+            }
+        }
         Reject-WireCase 'native conversion error is explicit, never a successful coordinate fallback' {
             [CapNative]::ConvertPointerScreen([IntPtr]123,0,0)
         } 'ScreenToClient failed'
@@ -312,6 +617,47 @@ try {
             Test-WireCase "native dispatch stops at failed message $failedMessage" {
                 Assert-WireCase ($script:messages[-1] -eq $failedMessage -and
                     $script:messages.Count -eq ($failedMessage-0x0200+1)) 'Dispatch continued after rejection.'
+            }
+        }
+        Test-WireCase 'shared native reader validates owned readonly exact endpoints and refuses changed fields' {
+            $handles=[WireFixture]::CreateEndpoints($root,
+                '60000000-0000-4000-8000-000000000001','60000000-0000-4000-8000-000000000002')
+            try {
+                $dialog=[Windows.Automation.AutomationElement]::FromHandle($handles[0])
+                $proof=Read-UiaReadonlyEdgeEndpoints -Dialog $dialog -ProcessId $PID -Owner $root `
+                    -Title 'Create or edit edge' -ExpectedSource '60000000-0000-4000-8000-000000000001' `
+                    -ExpectedTarget '60000000-0000-4000-8000-000000000002'
+                Assert-WireCase ($proof.source -ceq '60000000-0000-4000-8000-000000000001' -and
+                    $proof.target -ceq '60000000-0000-4000-8000-000000000002' -and
+                    $proof.snapshot.fields[0].nativeReadonly -and $proof.snapshot.fields[0].readonly -and
+                    $proof.snapshot.fields[1].nativeReadonly -and $proof.snapshot.fields[1].readonly) `
+                    'Native fixture lost exact locked endpoint evidence.'
+                [WireFixture]::SetReadonly($handles[3],$false)
+                $failure=$null
+                try {
+                    Read-UiaReadonlyEdgeEndpoints -Dialog $dialog -ProcessId $PID -Owner $root `
+                        -Title 'Create or edit edge' -ExpectedSource $proof.source -ExpectedTarget $proof.target|Out-Null
+                } catch {$failure=$_}
+                Assert-WireCase ($null -ne $failure -and $failure.Exception.Message.Contains('Readonly native/semantic endpoint')) `
+                    'Shared native reader accepted a mutable endpoint.'
+                [WireFixture]::SetReadonly($handles[3],$true)
+                $failure=$null
+                try {
+                    Read-UiaReadonlyEdgeEndpoints -Dialog $dialog -ProcessId $PID -Owner $root `
+                        -Title 'Create or edit edge' -ExpectedSource $proof.target -ExpectedTarget $proof.source|Out-Null
+                } catch {$failure=$_}
+                Assert-WireCase ($null -ne $failure -and $failure.Exception.Message.Contains('Readonly native/semantic endpoint')) `
+                    'Shared native reader accepted swapped endpoint identities.'
+                if (-not [WireFixture]::DestroyWindow($handles[4])) {throw 'Endpoint fixture field cleanup failed.'}
+                $failure=$null
+                try {
+                    Read-UiaReadonlyEdgeEndpoints -Dialog $dialog -ProcessId $PID -Owner $root `
+                        -Title 'Create or edit edge' -ExpectedSource $proof.source -ExpectedTarget $proof.target|Out-Null
+                } catch {$failure=$_}
+                Assert-WireCase ($null -ne $failure -and $failure.Exception.Message.Contains('Exact owned readonly endpoint child missing')) `
+                    'Shared native reader accepted an absent endpoint.'
+            } finally {
+                if (-not [WireFixture]::DestroyWindow($handles[0])) {throw 'Endpoint fixture host cleanup failed.'}
             }
         }
         Test-WireCase 'worker preserves original primary when stub cleanup also refuses' {
@@ -341,6 +687,7 @@ try {
         if (Get-Variable self -ErrorAction SilentlyContinue) {$self.Dispose()}
     }
 }
+}
 $failed=@($results|Where-Object passed -EQ $false).Count
 $report=[ordered]@{suite='WireTargeting';executed=$results.Count;passed=($results.Count-$failed)
     failed=$failed;skipped=0;productLaunches=0;providerLaunches=0;cases=@($results)}
@@ -350,4 +697,4 @@ $report|ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $ScratchR
 [pscustomobject]$report|Select-Object suite,executed,passed,failed,skipped|ConvertTo-Json -Compress
 foreach ($result in @($results|Where-Object passed -EQ $false)) {$result|ConvertTo-Json -Compress|Write-Host}
 if ($failed -gt 0) {throw "$failed behavioral wire targeting contracts failed."}
-if ($results.Count -ne $(if ($LegacyBehavior) {2} else {57})) {throw 'Wire targeting executed count differs.'}
+if ($results.Count -ne $(if ($DispatchOnly) {3} elseif ($LegacyBehavior) {2} else {75})) {throw 'Wire targeting executed count differs.'}

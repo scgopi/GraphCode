@@ -4,6 +4,7 @@ param(
   [Parameter(Mandatory)][string] $AssemblyPath
 )
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $RepositoryRoot 'Tools\windows\UiCaptureDriver.psm1') -WarningAction SilentlyContinue
 class CardsPilotExitWaitData {
   [int] $SignalAfterMilliseconds
   [int] $Calls
@@ -487,39 +488,30 @@ Invoke-CardsContract 'ui.cards-pilot.default-source-boundary' {
       $node.GetCommandName() -ceq 'Read-UiaReadonlyEdgeEndpoints'
   },$true))
   if ($endpointCalls.Count -ne 2) { throw 'Both ordinary edge routes must use the strict readonly reader' }
-  $endpointReader = $gate.Find({
-    param($node)
-    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-      $node.Name -ceq 'Read-UiaReadonlyEdgeEndpoints'
-  },$true)
+  $endpointReader = (Get-Command Read-UiaReadonlyEdgeEndpoints -CommandType Function).ScriptBlock.Ast
   if ($null -eq $endpointReader -or $endpointReader.Extent.Text -notmatch 'GraphCodeMultiProjectEditNative\]::Buffer\(\$handle,100\)' -or
       $endpointReader.Extent.Text -notmatch '\$pattern\.Current\.Value' -or
       $endpointReader.Extent.Text -match '\.Current\.Name') {
     throw 'Readonly endpoint reader must agree on native buffer and semantic ValuePattern without a Name fallback'
   }
-  $endpointDecision = $gate.Find({
-    param($node)
-    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-      $node.Name -ceq 'Get-UiaReadonlyEndpointsDecision'
-  },$true)
-  if ($null -eq $endpointDecision) { throw 'Strict readonly endpoint decision missing' }
-  . ([scriptblock]::Create($endpointDecision.Extent.Text))
+  $endpointDecision = Get-Command Get-UiaReadonlyEndpointsDecision -CommandType Function
+  if ($endpointDecision.ModuleName -cne 'UiCaptureDriver') { throw 'Strict readonly endpoint decision is not shared' }
   $endpointSnapshot = @{
     handle=10;processId=123;owner=5;class='GraphCodeSheetHost';title='Create or edit edge';captionless=$true
     viewport=@{handle=11;parent=10;processId=123;class='GraphCodeSheetViewport';matches=1;stable=$true;runtime='11';owned=$true}
     content=@{handle=12;parent=11;processId=123;class='GraphCodeNativeForm';matches=1;stable=$true;runtime='12';owned=$true}
     fields=@(
       @{handle=21;parent=12;processId=123;controlId=9100;class='Edit';matches=1;stable=$true;runtime='21';owned=$true
-        readonly=$true;value=$nodeId;semanticValue=$nodeId;semanticProcessId=123;name='Source loop identity'},
+        readonly=$true;nativeReadonly=$true;value=$nodeId;semanticValue=$nodeId;semanticProcessId=123;name='Source loop identity'},
       @{handle=22;parent=12;processId=123;controlId=9101;class='Edit';matches=1;stable=$true;runtime='22';owned=$true
-        readonly=$true;value=$peerId;semanticValue=$peerId;semanticProcessId=123;name='Target loop identity'}
+        readonly=$true;nativeReadonly=$true;value=$peerId;semanticValue=$peerId;semanticProcessId=123;name='Target loop identity'}
     )
   }
   if (-not (Get-UiaReadonlyEndpointsDecision $endpointSnapshot 123 5 'Create or edit edge' $nodeId $peerId).ready) {
     throw 'Correct native/semantic readonly values were rejected because their Names are labels'
   }
   foreach ($negative in @('missing','duplicate','wrong-id','wrong-pid','wrong-parent','wrong-sheet-owner',
-      'writable','wrong-value','semantic-mismatch','stale','wrong-class')) {
+      'writable','native-writable','wrong-value','semantic-mismatch','stale','wrong-class')) {
     $changed = $endpointSnapshot | ConvertTo-Json -Depth 10 | ConvertFrom-Json -AsHashtable
     switch ($negative) {
       'missing' { $changed.fields = @($changed.fields[1]) }
@@ -529,6 +521,7 @@ Invoke-CardsContract 'ui.cards-pilot.default-source-boundary' {
       'wrong-parent' { $changed.fields[0].parent = 11 }
       'wrong-sheet-owner' { $changed.owner = 6 }
       'writable' { $changed.fields[0].readonly = $false }
+      'native-writable' { $changed.fields[0].nativeReadonly = $false }
       'wrong-value' { $changed.fields[0].value = $peerId; $changed.fields[0].semanticValue = $peerId }
       'semantic-mismatch' { $changed.fields[0].semanticValue = $peerId }
       'stale' { $changed.fields[0].stable = $false }

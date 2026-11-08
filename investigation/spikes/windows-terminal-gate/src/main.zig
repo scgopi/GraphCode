@@ -1,4 +1,5 @@
 const std = @import("std");
+const AttachCleanup = @import("AttachCleanup.zig");
 
 const c = @cImport({
     @cDefine("_WIN32_WINNT", "0x0601");
@@ -526,10 +527,42 @@ fn startSession(app: *App, name: []const u8, index: usize) !void {
     app.surfaces[index].attach = child;
 }
 
-fn waitAttachClient(slot: *SurfaceSlot) void {
+const AttachExitApi = struct {
+    timer: std.time.Timer,
+    budget_ms: u32,
+
+    pub fn signaled(_: *AttachExitApi, handle: anytype, milliseconds: u32) !bool {
+        return switch (c.WaitForSingleObject(@ptrCast(handle), milliseconds)) {
+            c.WAIT_OBJECT_0 => true,
+            c.WAIT_TIMEOUT => false,
+            else => {
+                std.debug.print("held attach WaitForSingleObject failed: Win32={d}\n", .{c.GetLastError()});
+                return error.AttachWaitFailed;
+            },
+        };
+    }
+    pub fn terminate(_: *AttachExitApi, handle: anytype) !void {
+        if (c.TerminateProcess(@ptrCast(handle), 1) == 0) {
+            std.debug.print("held attach TerminateProcess failed: Win32={d}\n", .{c.GetLastError()});
+            return error.AttachTerminateFailed;
+        }
+    }
+    pub fn remaining(self: *AttachExitApi) u32 {
+        const elapsed = self.timer.read() / std.time.ns_per_ms;
+        return if (elapsed >= self.budget_ms) 0 else self.budget_ms - @as(u32, @intCast(elapsed));
+    }
+};
+
+fn waitAttachClient(slot: *SurfaceSlot) !void {
+    var api: AttachExitApi = .{ .timer = try std.time.Timer.start(), .budget_ms = 5000 };
+    try waitAttachClientWith(slot, &api);
+}
+
+fn waitAttachClientWith(slot: *SurfaceSlot, api: *AttachExitApi) !void {
     if (slot.attach) |*child| {
-        _ = child.kill() catch {};
-        _ = child.wait() catch {};
+        AttachCleanup.stopWith(api, child.id) catch |err| retainUnknownAttach(err);
+        // Child.wait's Windows wait is now on an already-signaled held handle.
+        _ = child.wait() catch |err| retainUnknownAttach(err);
         slot.attach = null;
     }
 }
@@ -768,8 +801,8 @@ fn waitForInitialAttachOutput(app: *App, index: usize) !void {
         if (app.surfaces[index].output_seen) return;
         if (!attach_alive) {
             if (restarts == attach_restart_limit) return error.InitialAttachRestartLimit;
-            waitAttachClient(&app.surfaces[index]);
-            try startSession(app, sessionName(app, index), index);
+            var restart: RestartAttachApi = .{ .app = app, .index = index };
+            try AttachCleanup.restartWith(&restart);
             restarts += 1;
         }
         std.Thread.sleep(100 * std.time.ns_per_ms);
@@ -812,17 +845,20 @@ fn createWinghosttySurface(app: *App, index: usize) !void {
 fn createSurface(app: *App, index: usize) !void {
     try startSession(app, sessionName(app, index), index);
     createWinghosttySurface(app, index) catch |err| {
-        waitAttachClient(&app.surfaces[index]);
+        waitAttachClient(&app.surfaces[index]) catch |cleanup_err| {
+            std.debug.print("terminal create primary={s}; attach cleanup={s}\n", .{ @errorName(err), @errorName(cleanup_err) });
+            retainUnknownAttach(cleanup_err);
+        };
         return err;
     };
 }
 
-fn destroyWinghosttySurface(app: *App, index: usize) void {
+fn destroyWinghosttySurface(app: *App, index: usize) !void {
     const slot = &app.surfaces[index];
     if (slot.surface) |surface| {
         slot.destroying = true;
         rememberRetiredSurface(app, surface);
-        _ = c.winghostty_surface_destroy(surface);
+        if (c.winghostty_surface_destroy(surface) != c.WINGHOSTTY_OK) return error.SurfaceDestroyFailed;
         slot.surface = null;
         slot.destroyed = true;
         slot.destroying = false;
@@ -831,14 +867,14 @@ fn destroyWinghosttySurface(app: *App, index: usize) void {
 
 // The gate creates two independent complete surfaces through
 // winghostty_host_create_surface_v2: surface A and surface B.
-fn destroySurface(app: *App, index: usize) void {
+fn destroySurface(app: *App, index: usize) !void {
     const slot = &app.surfaces[index];
-    waitAttachClient(slot);
-    destroyWinghosttySurface(app, index);
+    try waitAttachClient(slot);
+    try destroyWinghosttySurface(app, index);
 }
 
 fn recreateSurface(app: *App, index: usize) !void {
-    destroyWinghosttySurface(app, index);
+    try destroyWinghosttySurface(app, index);
     app.recreate_count += 1;
     return createWinghosttySurface(app, index);
 }
@@ -916,11 +952,22 @@ fn runInputContracts(app: *App) !void {
     }
 }
 
+const RestartAttachApi = struct {
+    app: *App,
+    index: usize,
+    pub fn retire(self: *RestartAttachApi) !void {
+        try waitAttachClient(&self.app.surfaces[self.index]);
+    }
+    pub fn start(self: *RestartAttachApi) !void {
+        try startSession(self.app, sessionName(self.app, self.index), self.index);
+    }
+};
+
 fn restartBrokenAttach(app: *App, index: usize) !void {
     const slot = &app.surfaces[index];
     if (slot.attach_restarts == attach_restart_limit) return error.AttachRestartLimit;
-    waitAttachClient(slot);
-    try startSession(app, sessionName(app, index), index);
+    var restart: RestartAttachApi = .{ .app = app, .index = index };
+    try AttachCleanup.restartWith(&restart);
     slot.attach_restarts += 1;
     slot.silent_attach_ticks = 0;
 }
@@ -1114,15 +1161,33 @@ fn createWindow(app: *App) !void {
     _ = c.SetTimer(app.hwnd, timer_id, 100, null);
 }
 
-fn cleanup(app: *App) void {
-    destroySurface(app, 0);
-    destroySurface(app, 1);
-    if (app.host) |host| {
-        _ = c.winghostty_host_deinitialize(host);
-        app.host = null;
+fn retainUnknownAttach(failure: anyerror) noreturn {
+    std.debug.print("GRAPHCODE_VALIDATION_ROOT_RETENTION_REQUIRED=ownership_unproven attach={s}\n", .{@errorName(failure)});
+    while (true) std.Thread.sleep(std.time.ns_per_s);
+}
+
+const FinalCleanupApi = struct {
+    app: *App,
+    exit_api: AttachExitApi,
+    pub fn stop(self: *FinalCleanupApi, index: usize) !void {
+        waitAttachClientWith(&self.app.surfaces[index], &self.exit_api) catch |err| retainUnknownAttach(err);
     }
+    pub fn destroy(self: *FinalCleanupApi, index: usize) !void {
+        try destroyWinghosttySurface(self.app, index);
+    }
+    pub fn deinitialize(self: *FinalCleanupApi) !void {
+        if (self.app.host) |host| {
+            if (c.winghostty_host_deinitialize(host) != c.WINGHOSTTY_OK) return error.HostDeinitializeFailed;
+            self.app.host = null;
+        }
+    }
+};
+
+fn cleanup(app: *App) !void {
+    var api: FinalCleanupApi = .{ .app = app, .exit_api = .{ .timer = try std.time.Timer.start(), .budget_ms = 5000 } };
+    try AttachCleanup.cleanupWith(&api);
     if (app.hwnd) |hwnd| {
-        if (c.IsWindow(hwnd) != 0) _ = c.DestroyWindow(hwnd);
+        if (c.IsWindow(hwnd) != 0 and c.DestroyWindow(hwnd) == 0) return error.WindowDestroyFailed;
         app.hwnd = null;
     }
 }
@@ -1214,7 +1279,10 @@ pub fn main() !void {
     }
 
     try createWindow(app);
-    defer cleanup(app);
+    var cleanup_attempted = false;
+    errdefer if (!cleanup_attempted) cleanup(app) catch |err| {
+        std.debug.print("terminal gate cleanup failed while preserving primary error: {s}\n", .{@errorName(err)});
+    };
     if (c.winghostty_host_initialize(&app.host) != c.WINGHOSTTY_OK) {
         return error.WinghosttyHostInitializeFailed;
     }
@@ -1224,4 +1292,7 @@ pub fn main() !void {
     app.ready = true;
     if (app.smoke) _ = c.PostMessageW(app.hwnd, wm_gate_tick, 0, 0);
     try messageLoop(app);
+    cleanup_attempted = true;
+    try cleanup(app);
+    if (app.callbacksAfterDestroy != 0) return error.CallbackAfterDestroy;
 }

@@ -23,13 +23,13 @@ public static class StandaloneSuites
                 .Select(unit => unit.Id).ToArray()),
         new CaptureSuite(required.Single(unit => unit.Id == "ps.ui-capture")),
         new ScriptSuite("ps.action-worker", "ActionWorkerImport.Tests.ps1",
-            output => EvidenceParser.Structured("ps.action-worker", "ActionWorkerImport", output, 18, 18)),
+            output => EvidenceParser.Structured("ps.action-worker", "ActionWorkerImport", output, 20, 20)),
         new ScriptSuite("ps.action-identity", "ActionWindowIdentity.Tests.ps1",
-            output => EvidenceParser.Structured("ps.action-identity", "ActionWindowIdentity", output, 62, 62)),
+            output => EvidenceParser.Structured("ps.action-identity", "ActionWindowIdentity", output, 85, 85)),
         new ScriptSuite("ps.action-topology", "ActionTopologyImport.Tests.ps1",
             output => EvidenceParser.Structured("ps.action-topology", "ActionTopologyImport", output, 16, 16)),
         new ScriptSuite("ps.wire-targeting", "WireTargeting.Tests.ps1",
-            output => EvidenceParser.Structured("ps.wire-targeting", "WireTargeting", output, 57, 57)),
+            output => EvidenceParser.Structured("ps.wire-targeting", "WireTargeting", output, 75, 75)),
         new ScriptSuite("ps.agent-command", "Invoke-AgentCommand.Tests.ps1", EvidenceParser.AgentCommand),
         new HostTaskSuite("host.task-inventory", "inventory", 17),
         new HostTaskSuite("host.task-dry-run", "dry-run", 7),
@@ -113,8 +113,31 @@ public static class StandaloneSuites
             if (EvidenceParser.Structured(Id, "UiCaptureNativePipePeerContracts", peerContracts.Output, 5, 5).Status != UnitStatus.Passed)
                 throw new InvalidDataException("Native pipe peer contracts failed");
             var prebuilt = Path.Combine(captureRoot, "prebuilt");
+            var compilerContracts = await PowerShellPayload.RunAsync(context, Id + ".compiler-input",
+                "Tools\\windows\\Tests\\FixtureCompiler.Tests.ps1",
+                ["-ScratchRoot", Path.Combine(captureRoot, "compiler-contracts")], cancellationToken);
+            if (EvidenceParser.Structured(Id, "FixtureCompiler", compilerContracts.Output, 27, 27).Status != UnitStatus.Passed)
+                throw new InvalidDataException("Fixture compiler input contracts failed");
+            var hierarchyContracts = await PowerShellPayload.RunAsync(context, Id + ".window-hierarchy-diagnostic",
+                "Tools\\windows\\Tests\\WindowHierarchyDiagnostic.Tests.ps1",
+                ["-ScratchRoot", Path.Combine(captureRoot, "window-hierarchy-contracts")], cancellationToken);
+            if (EvidenceParser.Structured(Id, "WindowHierarchyDiagnostic", hierarchyContracts.Output, 32, 32).Status != UnitStatus.Passed)
+                throw new InvalidDataException("Window hierarchy diagnostic contracts failed");
+            var createContracts = await PowerShellPayload.RunAsync(context, Id + ".wire-create-observation",
+                "Tools\\windows\\Tests\\WireCreateObservation.Tests.ps1",
+                ["-ScratchRoot", Path.Combine(captureRoot, "wire-create-contracts")], cancellationToken);
+            if (EvidenceParser.Structured(Id, "WireCreateObservation", createContracts.Output, 15, 15).Status != UnitStatus.Passed)
+                throw new InvalidDataException("Wire Create observation contracts failed");
+            var imageContracts = await PowerShellPayload.RunAsync(context, Id + ".native-image-buffer",
+                "Tools\\windows\\Tests\\NativeImageBuffer.Tests.ps1",
+                ["-ScratchRoot", Path.Combine(captureRoot, "native-image-contracts")], cancellationToken);
+            if (EvidenceParser.Structured(Id, "NativeImageBuffer", imageContracts.Output, 9, 9).Status != UnitStatus.Passed)
+                throw new InvalidDataException("Native image buffer contracts failed");
+            string[] compilerArguments = context.FixtureCompilerInput is null ? [] :
+                ["-FixtureCompilerInput", context.FixtureCompilerInput,
+                 "-FixtureCompilerInputSha256", context.FixtureCompilerInputSha256!];
             await PowerShellPayload.RunAsync(context, Id + ".prepare", script,
-                ["-PrepareFixturesOnly", "-ScratchRoot", prebuilt], cancellationToken);
+                ["-PrepareFixturesOnly", "-ScratchRoot", prebuilt, .. compilerArguments], cancellationToken);
             var manifest = Path.Combine(prebuilt, "fixtures.json");
             var hash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(manifest, cancellationToken)));
             var suiteRoot = Path.Combine(captureRoot, "suite");

@@ -13,6 +13,7 @@ param(
     [switch]$ActionBudgetContractOnly,
     [switch]$PreflightReportContractOnly,
     [switch]$NativeBindingsContractOnly,
+    [switch]$StaticNativeExportsContractOnly,
     [switch]$NativePipePeerContractOnly,
     [ValidateSet('All','SourceOnly')][string]$NativePipePeerCase = 'All',
     [ValidateSet('All','Accepted')][string]$NativeBindingCase = 'All',
@@ -22,6 +23,7 @@ param(
     [switch]$DescendantMetadataContractOnly,
     [switch]$DescendantLifetimeContractOnly,
     [switch]$AdvisoryOlderContractOnly,
+    [switch]$AdvisoryDiagnosticContractOnly,
     [switch]$DAdapterContractOnly,
     [switch]$MatchedScenarioContractOnly,
     [switch]$LiveTransitionRehearsalContractOnly,
@@ -32,6 +34,8 @@ param(
     [ValidateSet('All','SceneContract','ActualAdmission','FixtureDirectory')][string]$DAdapterCase = 'All',
     [string]$PrebuiltFixtureManifest = '',
     [string]$PrebuiltFixtureManifestSha256 = '',
+    [string]$FixtureCompilerInput = '',
+    [string]$FixtureCompilerInputSha256 = '',
     [switch]$RequireRealSeed,
     [switch]$RealSeedContractOnly,
     [string]$RealSeedZmxPath = '',
@@ -47,6 +51,10 @@ $supervisorPath = Join-Path $driverDirectory 'Invoke-UiCapture.ps1'
 $workerPath = Join-Path $driverDirectory 'Invoke-UiCaptureWorker.ps1'
 $baselineWindowSourcePath = Join-Path $PSScriptRoot 'fixtures\c8r-window-before.zig'
 $currentWindowSourcePath = Join-Path $PSScriptRoot 'fixtures\c8r-window-after.zig'
+$fixtureCompilerPath = Join-Path $driverDirectory 'FixtureCompiler.ps1'
+if (($FixtureCompilerInput -or $FixtureCompilerInputSha256) -and -not $PrepareFixturesOnly) {
+    throw 'FixtureCompilerInput: explicit compiler selection is preparation-only.'
+}
 
 function Write-JournalContractJson {
     param([string]$Path, $Value)
@@ -195,9 +203,10 @@ if (Test-Path -LiteralPath $scratch) { throw "Refusing to replace capture test e
 $null = New-Item -ItemType Directory -Path $scratch
 $sourceHashesBefore = [ordered]@{}
 foreach ($path in @($modulePath, $supervisorPath, $workerPath, $PSCommandPath,
-    $baselineWindowSourcePath, $currentWindowSourcePath)) {
+    $baselineWindowSourcePath, $currentWindowSourcePath, $fixtureCompilerPath)) {
     $sourceHashesBefore[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
 }
+. $fixtureCompilerPath
 Import-Module $modulePath -Force -WarningAction SilentlyContinue
 Set-CapTracePath -Path (Join-Path $scratch 'test-calls.jsonl')
 
@@ -749,16 +758,16 @@ function Assert-CapRejects {
         }
         Invoke-CapTest 'journal native bindings match the exact job-ownership declaration contract' {
             $expected = @(
-                'GraphCodeUiaGateState|PostMessage|user32.dll|PostMessageA',
-                'GraphCodeUiaGateState|ScreenToClient|user32.dll|ScreenToClient',
-                'GraphCodeUiaGateState|SetCursorPos|user32.dll|SetCursorPos',
-                'GraphCodeUiaGateState|GetCursorPos|user32.dll|GetCursorPos',
-                'GraphCodeUiaGateState|WindowFromPoint|user32.dll|WindowFromPoint',
-                'GraphCodeUiaGateState|SendKeyInputs|user32.dll|SendInput',
-                'GraphCodeUiaGateState|EnumWindows|user32.dll|EnumWindows',
-                'GraphCodeUiaGateState|GetWindowThreadProcessId|user32.dll|GetWindowThreadProcessId',
-                'GraphCodeUiaGateState|GetForegroundWindow|user32.dll|GetForegroundWindow',
-                'GraphCodeUiaGateState|GetClassName|user32.dll|GetClassNameW',
+                'CapUiaGateState|PostMessage|user32.dll|PostMessageA',
+                'CapUiaGateState|ScreenToClient|user32.dll|ScreenToClient',
+                'CapUiaGateState|SetCursorPos|user32.dll|SetCursorPos',
+                'CapUiaGateState|GetCursorPos|user32.dll|GetCursorPos',
+                'CapUiaGateState|WindowFromPoint|user32.dll|WindowFromPoint',
+                'CapUiaGateState|SendKeyInputs|user32.dll|SendInput',
+                'CapUiaGateState|EnumWindows|user32.dll|EnumWindows',
+                'CapUiaGateState|GetWindowThreadProcessId|user32.dll|GetWindowThreadProcessId',
+                'CapUiaGateState|GetForegroundWindow|user32.dll|GetForegroundWindow',
+                'CapUiaGateState|GetClassName|user32.dll|GetClassNameW',
                 'CapNative|NtQueryInformationProcess|ntdll.dll|NtQueryInformationProcess',
                 'CapNative|NtQueryInformationProcess|ntdll.dll|NtQueryInformationProcess',
                 'CapNative|CommandLineToArgvW|shell32.dll|CommandLineToArgvW',
@@ -769,6 +778,7 @@ function Assert-CapRejects {
                 'CapNative|WaitForSingleObject|kernel32.dll|WaitForSingleObject',
                 'CapNative|TerminateProcess|kernel32.dll|TerminateProcess',
                 'CapNative|WaitNamedPipeW|kernel32.dll|WaitNamedPipeW',
+                'CapNative|GetNamedPipeServerProcessId|kernel32.dll|GetNamedPipeServerProcessId',
                 'CapNative|GetWindowThreadProcessId|user32.dll|GetWindowThreadProcessId',
                 'CapNative|GetWindowRect|user32.dll|GetWindowRect',
                 'CapNative|GetClientRect|user32.dll|GetClientRect',
@@ -806,9 +816,24 @@ function Assert-CapRejects {
                 'CapProcessJob|GetStdHandle|kernel32.dll|GetStdHandle',
                 'CapProcessJob|SetHandleInformation|kernel32.dll|SetHandleInformation'
             )
-            $actual = @(Test-CapNativeBindings | ForEach-Object { "$($_.Type)|$($_.Method)|$($_.Library)|$($_.EntryPoint)" })
-            Assert-CapTest ($actual.Count -eq 56 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static56 export contract differs.'
-            return @{ subcases = 39; evidence = 'API export resolution only, no native window or GUI action.' }
+            $bindings = @(Test-CapNativeBindings)
+            $actual = @($bindings | ForEach-Object { "$($_.Type)|$($_.Method)|$($_.Library)|$($_.EntryPoint)" })
+            Assert-CapTest ($expected.Count -eq 57 -and $actual.Count -eq $expected.Count -and
+                @(Compare-Object $expected $actual -CaseSensitive).Count -eq 0) 'Exact static57 export contract differs.'
+            $peer = @([CapNative].GetMethods([Reflection.BindingFlags]'Static,NonPublic') |
+                Where-Object Name -CEQ 'GetNamedPipeServerProcessId')
+            Assert-CapTest ($peer.Count -eq 1) 'Exact safe-handle pipe peer declaration differs.'
+            $parameters = @($peer[0].GetParameters())
+            $imports = @($peer[0].GetCustomAttributes([Runtime.InteropServices.DllImportAttribute], $false))
+            Assert-CapTest ($peer[0].ReturnType -eq [bool] -and $parameters.Count -eq 2 -and
+                $parameters[0].ParameterType -eq [Microsoft.Win32.SafeHandles.SafePipeHandle] -and
+                $parameters[1].ParameterType.FullName -ceq 'System.UInt32&' -and $parameters[1].IsOut -and
+                $imports.Count -eq 1 -and $imports[0].Value -ceq 'kernel32.dll' -and
+                $imports[0].EntryPoint -ceq 'GetNamedPipeServerProcessId' -and
+                $imports[0].SetLastError -and $imports[0].CharSet -eq [Runtime.InteropServices.CharSet]::None -and
+                -not $imports[0].ExactSpelling) 'Exact safe-handle pipe peer declaration differs.'
+            return @{ exports = $actual.Count; pipePeerDeclarations = $peer.Count
+                evidence = 'Exact declaration and API export resolution only; no native function, window or GUI action.' }
         }
         Invoke-CapTest 'legacy mutable seed journal proof is refused and exact numbered terminal proof is accepted' {
             $f = New-JournalTerminalFixture 'seed-reference'
@@ -1006,19 +1031,10 @@ int wmain(int argc, wchar_t **argv) {
 '@
     $sourcePath = Join-Path $fixture 'capture-target.c'
     [IO.File]::WriteAllText($sourcePath, $source, [Text.UTF8Encoding]::new($false))
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
-        throw 'Existing MSVC discovery is unavailable; this offline suite does not install a compiler.'
-    }
-    $discovery = Invoke-CapBoundedChild -FilePath $vswhere -Arguments @(
-        '-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-        '-property', 'installationPath'
-    ) -Directory $fixture -Role 'fixture-compiler-discovery'
-    Assert-CapTest ($discovery.exitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($discovery.stdout)) 'Existing MSVC was not found.'
-    $installation = $discovery.stdout.Trim()
-    $vcvars = Join-Path $installation 'VC\Auxiliary\Build\vcvars64.bat'
-    $version = [IO.File]::ReadAllText((Join-Path $installation 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt')).Trim()
-    $compiler = Join-Path $installation "VC\Tools\MSVC\$version\bin\Hostx64\x64\cl.exe"
+    $selection = Resolve-CapFixtureCompiler $FixtureCompilerInput $FixtureCompilerInputSha256 $fixture 'fixture-compiler-discovery'
+    $vcvars = $selection.vcvars
+    $version = $selection.msvcVersion
+    $compiler = $selection.compiler
     $exe = Join-Path $fixture 'capture-target.exe'
     $object = Join-Path $fixture 'capture-target.obj'
     $compileStdout = Join-Path $fixture 'compile-stdout.log'
@@ -1026,6 +1042,9 @@ int wmain(int argc, wchar_t **argv) {
     $compileStdoutRaw = Join-Path $fixture 'compile-stdout.raw.log'
     $compileStderrRaw = Join-Path $fixture 'compile-stderr.raw.log'
     $command = 'call "{0}" -vcvars_ver={1} >nul && "{2}" /nologo /W4 /WX /O2 /utf-8 /Fe:"{3}" /Fo:"{5}" "{4}" /link /SUBSYSTEM:CONSOLE' -f $vcvars, $version, $compiler, $exe, $sourcePath, $object
+    if ($selection.mode -ceq 'explicit') {
+        $command = $command.Replace(" -vcvars_ver=$version >nul &&", " $($selection.sdkVersion) -vcvars_ver=$version >nul && set VCToolsVersion && set VCToolsInstallDir && set WindowsSdkDir && set WindowsSDKVersion && set INCLUDE && set LIB &&")
+    }
     # Redirect the whole compile group's stdout/stderr to owned files so the real
     # compiler and any toolchain telemetry helpers it spawns inherit file handles,
     # never the module's redirected pipe. Only the short-lived cmd.exe then holds
@@ -1033,7 +1052,7 @@ int wmain(int argc, wchar_t **argv) {
     # robustness fix; it does not touch any runtime/kernel/EOF/release guard.
     $redirectedCommand = '({0}) > "{1}" 2> "{2}"' -f $command, $compileStdoutRaw, $compileStderrRaw
     [IO.File]::WriteAllText((Join-Path $fixture 'compile.cmd'), "@echo off`r`n$redirectedCommand`r`nexit /b %errorlevel%`r`n", [Text.UTF8Encoding]::new($false))
-    $compilerEnvironment = @{ PATH = (Split-Path -Parent $vswhere) + ';' + $env:PATH; VSCMD_SKIP_SENDTELEMETRY = '1' }
+    $compilerEnvironment = @{ PATH = $selection.discoveryDirectory + ';' + $env:PATH; VSCMD_SKIP_SENDTELEMETRY = '1' }
     foreach ($key in @('VSCMD_VER', '__VSCMD_PREINIT_PATH', 'VSINSTALLDIR', 'VCINSTALLDIR',
         'VCToolsInstallDir', 'VCToolsVersion', 'WindowsSdkDir', 'WindowsSDKVersion', 'INCLUDE', 'LIB', 'LIBPATH')) {
         $compilerEnvironment[$key] = ''
@@ -1050,7 +1069,9 @@ int wmain(int argc, wchar_t **argv) {
     $compileStderrText = $compileStderrSnapshot.Text
     Assert-CapTest ($compilerExitCode -eq 0 -and (Test-Path -LiteralPath $exe -PathType Leaf)) `
         "Harmless target compilation failed (not launch evidence): $compileStdoutText $compileStderrText"
+    Assert-CapFixtureCompilerEnvironment $selection $compileStdoutText
     $provenance = [ordered]@{
+        compilerSelection = $selection
         compiler = $compiler; compilerVersion = (Get-Item -LiteralPath $compiler).VersionInfo.FileVersion
         compilerSha256 = (Get-FileHash -LiteralPath $compiler -Algorithm SHA256).Hash
         compilerCommand = $command; compilerExitCode = $compilerExitCode
@@ -1112,19 +1133,10 @@ int wmain(void) {
 '@
     $sourcePath = Join-Path $fixture 'cim-race-target.c'
     [IO.File]::WriteAllText($sourcePath, $source, [Text.UTF8Encoding]::new($false))
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
-        throw 'Existing MSVC discovery is unavailable; this offline suite does not install a compiler.'
-    }
-    $discovery = Invoke-CapBoundedChild -FilePath $vswhere -Arguments @(
-        '-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-        '-property', 'installationPath'
-    ) -Directory $fixture -Role 'cim-race-compiler-discovery'
-    Assert-CapTest ($discovery.exitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($discovery.stdout)) 'Existing MSVC was not found.'
-    $installation = $discovery.stdout.Trim()
-    $vcvars = Join-Path $installation 'VC\Auxiliary\Build\vcvars64.bat'
-    $version = [IO.File]::ReadAllText((Join-Path $installation 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt')).Trim()
-    $compiler = Join-Path $installation "VC\Tools\MSVC\$version\bin\Hostx64\x64\cl.exe"
+    $selection = Resolve-CapFixtureCompiler $FixtureCompilerInput $FixtureCompilerInputSha256 $fixture 'cim-race-compiler-discovery'
+    $vcvars = $selection.vcvars
+    $version = $selection.msvcVersion
+    $compiler = $selection.compiler
     $exe = Join-Path $fixture 'cim-race-target.exe'
     $object = Join-Path $fixture 'cim-race-target.obj'
     $compileStdout = Join-Path $fixture 'compile-stdout.log'
@@ -1132,12 +1144,15 @@ int wmain(void) {
     $compileStdoutRaw = Join-Path $fixture 'compile-stdout.raw.log'
     $compileStderrRaw = Join-Path $fixture 'compile-stderr.raw.log'
     $command = 'call "{0}" -vcvars_ver={1} >nul && "{2}" /nologo /W3 /O2 /utf-8 /Fe:"{3}" /Fo:"{5}" "{4}" /link /SUBSYSTEM:CONSOLE' -f $vcvars, $version, $compiler, $exe, $sourcePath, $object
+    if ($selection.mode -ceq 'explicit') {
+        $command = $command.Replace(" -vcvars_ver=$version >nul &&", " $($selection.sdkVersion) -vcvars_ver=$version >nul && set VCToolsVersion && set VCToolsInstallDir && set WindowsSdkDir && set WindowsSDKVersion && set INCLUDE && set LIB &&")
+    }
     # Same owned-file redirection as New-CapHarmlessTarget: the compiler and any
     # telemetry helpers inherit file handles, so only the short-lived cmd.exe holds
     # the module's redirected pipe and it reaches bounded EOF on exit.
     $redirectedCommand = '({0}) > "{1}" 2> "{2}"' -f $command, $compileStdoutRaw, $compileStderrRaw
     [IO.File]::WriteAllText((Join-Path $fixture 'compile.cmd'), "@echo off`r`n$redirectedCommand`r`nexit /b %errorlevel%`r`n", [Text.UTF8Encoding]::new($false))
-    $compilerEnvironment = @{ PATH = (Split-Path -Parent $vswhere) + ';' + $env:PATH; VSCMD_SKIP_SENDTELEMETRY = '1' }
+    $compilerEnvironment = @{ PATH = $selection.discoveryDirectory + ';' + $env:PATH; VSCMD_SKIP_SENDTELEMETRY = '1' }
     foreach ($key in @('VSCMD_VER', '__VSCMD_PREINIT_PATH', 'VSINSTALLDIR', 'VCINSTALLDIR',
         'VCToolsInstallDir', 'VCToolsVersion', 'WindowsSdkDir', 'WindowsSDKVersion', 'INCLUDE', 'LIB', 'LIBPATH')) {
         $compilerEnvironment[$key] = ''
@@ -1154,7 +1169,9 @@ int wmain(void) {
     $compileStderrText = $compileStderrSnapshot.Text
     Assert-CapTest ($compilerExitCode -eq 0 -and (Test-Path -LiteralPath $exe -PathType Leaf)) `
         "CIM race target compilation failed (not launch evidence): $compileStdoutText $compileStderrText"
+    Assert-CapFixtureCompilerEnvironment $selection $compileStdoutText
     $provenance = [pscustomobject]@{
+        compilerSelection = $selection
         executable = $exe
         source = $sourcePath
         sourceSha256 = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
@@ -1631,6 +1648,57 @@ function Invoke-CapDescendantLifetimeContract {
     }
 }
 
+function Invoke-CapAdvisoryDiagnosticContract {
+    $tokens=$null;$errors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile($modulePath,[ref]$tokens,[ref]$errors)
+    Assert-CapTest ($errors.Count -eq 0) 'Diagnostic source must parse.'
+    $owner=$ast.Find({param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-CapOwnedDescendants'
+    },$false)
+    $boundary=@($owner.Body.FindAll({param($node)
+        $node -is [Management.Automation.Language.PipelineAst] -and (
+            $node.Extent.Text -ceq '$exclusion | ConvertTo-Json -Depth 12 -Compress' -or
+            $node.Extent.Text -match '^Get-CapAdvisoryExclusionDiagnostic -Exclusion \$exclusion \| ConvertTo-Json')
+    },$true))
+    Assert-CapTest ($boundary.Count -eq 1) 'Expected the actual exclusion diagnostic serialization boundary.'
+    $script:CapDiagnosticGetterVisits=0
+    $target=[pscustomobject]@{}
+    $target|Add-Member ScriptProperty LiveObjectGetter {
+        $script:CapDiagnosticGetterVisits++
+        'SYNTHETIC_GETTER_NOT_ORIGINAL_LIVE_RECEIVER'
+    }
+    $errorRecord=[Management.Automation.ErrorRecord]::new(
+        [InvalidOperationException]::new('SYNTHETIC diagnostic failure'),'SyntheticDiagnostic',
+        [Management.Automation.ErrorCategory]::InvalidOperation,$target)
+    $exclusion=[pscustomobject]@{
+        Pid=123;ParentPid=456;ParentCreationFileTimeUtc=200L;ParentExitFileTimeUtc=0L
+        CandidateCreationFileTimeUtc=100L;CandidateCreationSource='ADVISORY_CIM_NOT_NATIVE'
+        ParentCreationSource='HELD_NATIVE_SNAPSHOT';NativeWin32Error=5
+        NativeFailure=('n'*5000);Reason='predates held parent generation (advisory, native unavailable)'
+        Disposition='EXCLUDED_ADVISORY_PREDATES_NATIVE_PARENT_NATIVE_UNAVAILABLE'
+        RawCimRow=[pscustomobject]@{ProcessId=123;ParentProcessId=456;SessionId=0
+            CreationDate=[DateTimeOffset]::Parse('2026-11-06T00:00:00Z');ExecutablePath=$null;CommandLine=('c'*5000)}
+        OriginalErrorRecord=$errorRecord
+    }
+    $json=& ([scriptblock]::Create($boundary[0].Extent.Text))
+    Assert-CapTest ($script:CapDiagnosticGetterVisits -eq 0) `
+        "Diagnostic serialization traversed a retained live-object graph: getters=$script:CapDiagnosticGetterVisits"
+    $diagnostic=$json|ConvertFrom-Json
+    Assert-CapTest ([object]::ReferenceEquals($exclusion.OriginalErrorRecord,$errorRecord) -and
+        $exclusion.Disposition -ceq 'EXCLUDED_ADVISORY_PREDATES_NATIVE_PARENT_NATIVE_UNAVAILABLE' -and
+        $diagnostic.errorType -ceq 'System.InvalidOperationException' -and
+        $diagnostic.fullyQualifiedErrorId -ceq 'SyntheticDiagnostic' -and
+        $diagnostic.message -ceq 'SYNTHETIC diagnostic failure' -and
+        $diagnostic.NativeWin32Error -eq 5 -and $diagnostic.CimSessionId -eq 0 -and
+        $diagnostic.NativeFailure.Length -eq 2048 -and $diagnostic.CimCommandLine.Length -eq 2048 -and
+        $diagnostic.truncatedFields.Count -eq 2 -and
+        $diagnostic.omittedGraphs -ccontains 'OriginalErrorRecord.TargetObject' -and
+        -not $diagnostic.PSObject.Properties['OriginalErrorRecord']) `
+        'Bounded diagnostic lost useful scalar facts, explicit omissions/truncation, or original in-memory error.'
+    return [pscustomobject]@{getterVisits=0;originalErrorRetained=$true;scalarDiagnostic=$diagnostic
+        evidenceMode='SYNTHETIC_GETTER_QUALIFICATION_NOT_ORIGINAL_BLOCKED_STACK'}
+}
+
 function Invoke-CapAdvisoryOlderContract {
     $caseRoot = Join-Path $scratch 'advisory-older'
     $null = New-Item -ItemType Directory -Path $caseRoot
@@ -1639,7 +1707,8 @@ function Invoke-CapAdvisoryOlderContract {
     $run = $null
     $jobHandle = [CapProcessJob]::Create()
     $originalAccess = & $module { (Get-Item Function:Read-CapProcessAccess).ScriptBlock }
-    $detail = [ordered]@{ subcases = @(); jobEmpty = $false; stdoutEof = $false; stderrEof = $false }
+    $detail = [ordered]@{ subcases = @(); jobEmpty = $false; stdoutEof = $false; stderrEof = $false
+        diagnosticQualification=(Invoke-CapAdvisoryDiagnosticContract) }
     try {
         $parent = Get-CapProcessIdentity -Process $self -ExpectedImagePath $self.MainModule.FileName `
             -Role 'graphcode-app-before-normal'
@@ -1722,7 +1791,19 @@ function Invoke-CapAdvisoryOlderContract {
             $record.OriginalErrorRecord -is [Management.Automation.ErrorRecord] -and
             [object]::ReferenceEquals($record.OriginalErrorRecord.Exception, $ownFailures[0])) `
             'Advisory exclusion lost raw row, original native failure, timestamp sources or actual held parent proof.'
-        $detail.subcases += @{ name = 'strictly older advisory time and native getter access-denied excluded'; evidence = $record }
+        $diagnostics=@(Get-Content -LiteralPath (Join-Path $scratch 'test-calls.jsonl') |
+            ForEach-Object {$_|ConvertFrom-Json} |
+            Where-Object command -CEQ 'CapDescendantAdvisoryExcluded' |
+            ForEach-Object {$_.parameters.diagnosticJson|ConvertFrom-Json} |
+            Where-Object {$_.Pid -eq $run.Identity.Pid -and $_.ParentPid -eq $parent.Pid -and
+                $_.ParentCreationFileTimeUtc -eq $parent.CreationFileTimeUtc})
+        Assert-CapTest ($diagnostics.Count -eq 1 -and $diagnostics[0].NativeWin32Error -eq 5 -and
+            $diagnostics[0].CimSessionId -eq 0 -and $diagnostics[0].fullyQualifiedErrorId -and
+            $diagnostics[0].omittedGraphs -ccontains 'OriginalErrorRecord.TargetObject' -and
+            -not $diagnostics[0].PSObject.Properties['OriginalErrorRecord']) `
+            'Actual exclusion did not emit useful bounded native/CIM/error diagnostics.'
+        $detail.subcases += @{ name = 'strictly older advisory time and native getter access-denied excluded'
+            evidence = (Get-CapAdvisoryExclusionDiagnostic -Exclusion $record) }
         $null = Get-CapOwnedDescendants -Roots @($parent) @arguments
         Assert-CapTest (@(Get-CapExcludedDescendants | Where-Object $ownExclusion).Count -eq 1) `
             'Repeated advisory-older observation duplicated exclusion evidence.'
@@ -3097,7 +3178,7 @@ function Invoke-CapMatchedContracts {
             $workerSource.Contains('function Get-CapWorkerExpectedImageCount') -and
             $workerSource.Contains('$images.Count -eq (Get-CapWorkerExpectedImageCount)') -and
             $workerSource.Contains('function Wait-CapMatchedWireMode') -and
-            $workerSource.Contains('[GraphCodeUiaGateState]::PostKeyboard') -and
+            $workerSource.Contains('[CapUiaGateState]::PostKeyboard') -and
             $workerSource.Contains('function Invoke-CapMatchedTerminalSceneSupplement') -and
             $workerSource.Contains('function Invoke-CapWireCompletionSupplement') -and
             $workerSource.Contains('NATIVE_SENDINPUT_TO_FOCUSED_LOCAL_CONSOLE_WITH_SHELL_COMPUTED_NONCE_PID_ARITHMETIC') -and
@@ -5359,7 +5440,7 @@ function Invoke-CapReceiptReadControl {
             [IO.File]::WriteAllText($temporary, (ConvertTo-Json $PublishValue -Compress), [Text.UTF8Encoding]::new($false))
             $publishDeadline=[DateTime]::UtcNow.AddSeconds(2)
             while ($true) {
-                try {[IO.File]::Move($temporary,$Path,$true);break}
+                try {[IO.File]::Replace($temporary,$Path,[System.Management.Automation.Language.NullString]::Value);break}
                 catch [UnauthorizedAccessException] {
                     if ([DateTime]::UtcNow -ge $publishDeadline) {throw}
                     Start-Sleep -Milliseconds 25
@@ -5427,7 +5508,13 @@ function Invoke-CapReceiptIoCase {
             }
             'partial-json' {
                 [IO.File]::WriteAllText($path, '{', [Text.UTF8Encoding]::new($false))
-                $read = Invoke-CapReceiptReadControl $run $path $deadline -PublishValue $value
+                $snapshot = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+                    ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                try {
+                    $read = Invoke-CapReceiptReadControl $run $path $deadline -PublishValue $value
+                    Assert-CapTest ($snapshot.ReadByte() -eq 123 -and $snapshot.ReadByte() -eq -1) `
+                        'Atomic publication did not preserve the held partial receipt snapshot.'
+                } finally { $snapshot.Dispose() }
                 if (-not $read.Outcome.Succeeded) { throw $read.Outcome.Failure }
                 Assert-CapTest (-not $read.CompletedBeforeRelease -and $read.Outcome.Record.creationFileTimeUtc -eq 100000000L) `
                     'A partial JSON receipt was accepted before complete atomic publication.'
@@ -7885,6 +7972,48 @@ if ($SelectorRefusalContractOnly) {
     exit 0
 }
 
+if ($StaticNativeExportsContractOnly) {
+    $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($PSCommandPath, [ref]$null, [ref]$parseErrors)
+    Assert-CapTest ($parseErrors.Count -eq 0) 'Static export source must parse without errors.'
+    $cases = @($ast.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -ceq 'Invoke-CapTest' -and $node.CommandElements.Count -ge 3 -and
+            $node.CommandElements[1].Extent.Text -ceq "'journal native bindings match the exact job-ownership declaration contract'"
+    }, $true))
+    Assert-CapTest ($cases.Count -eq 1) 'Expected one canonical static export contract.'
+    $contract = [scriptblock]::Create($cases[0].CommandElements[2].ScriptBlock.EndBlock.Extent.Text)
+    $resolved = @(Test-CapNativeBindings)
+    Invoke-CapTest 'actual exact static exports and safe-handle peer declaration' { & $contract }
+    foreach ($scenario in @('missing','extra','duplicate','wrong-library','wrong-case')) {
+        Invoke-CapTest "static exports refuse $scenario without relaxing the allowlist" {
+            $bindings = @($resolved | ForEach-Object {
+                [pscustomobject]@{ Name = $_.Name; Type = $_.Type; Method = $_.Method
+                    Library = $_.Library; EntryPoint = $_.EntryPoint }
+            })
+            switch ($scenario) {
+                'missing' { $bindings = @($bindings | Where-Object Method -CNE 'GetNamedPipeServerProcessId') }
+                'extra' { $bindings += [pscustomobject]@{ Type='CapNative'; Method='UnknownExport'; Library='kernel32.dll'; EntryPoint='UnknownExport' } }
+                'duplicate' { $bindings[0] = $bindings[-1] }
+                'wrong-library' { $bindings[0].Library = 'foreign.dll' }
+                'wrong-case' { $bindings[0].Method = $bindings[0].Method.ToLowerInvariant() }
+            }
+            function Test-CapNativeBindings { return $bindings }
+            $null = Assert-CapRejects { & $contract } 'Exact static57 export contract differs.'
+            return @{ nativeFunctionCalls = 0; mutation = $scenario }
+        }
+    }
+    $passed = @($results | Where-Object passed -EQ $true).Count
+    $failed = @($results | Where-Object passed -EQ $false).Count
+    $report = [pscustomobject]@{ suite='UiCaptureStaticNativeExports'; executed=$results.Count
+        passed=$passed; failed=$failed; skipped=0; cases=@($results); mode='DECLARATION_EXPORT_RESOLUTION_NO_NATIVE_FUNCTION_CALLS' }
+    $report | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
+    $report | Select-Object suite,executed,passed,failed,skipped | ConvertTo-Json -Compress
+    if ($results.Count -ne 6 -or $passed -ne 6 -or $failed -ne 0) { exit 1 }
+    exit 0
+}
+
 if ($NativeBindingsContractOnly) {
     Invoke-CapLiveNativeBindingContracts
     $passed = @($results | Where-Object passed -EQ $true).Count
@@ -7988,6 +8117,17 @@ if ($DAdapterContractOnly -and $DAdapterCase -cin @('SceneContract','FixtureDire
     Write-CapDContractReport
 }
 
+if ($AdvisoryDiagnosticContractOnly) {
+    Invoke-CapTest 'advisory diagnostic preserves original errors without traversing live graphs' { Invoke-CapAdvisoryDiagnosticContract }
+    $passed=@($results|Where-Object passed -EQ $true).Count
+    $failed=@($results|Where-Object passed -EQ $false).Count
+    [pscustomobject]@{suite='UiCaptureAdvisoryDiagnosticContract';executed=$results.Count
+        passed=$passed;failed=$failed;skipped=0;cases=@($results);gui='NotExecuted';images=0}|
+        ConvertTo-Json -Depth 20|Set-Content -LiteralPath (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
+    [ordered]@{suite='UiCaptureAdvisoryDiagnosticContract';executed=$results.Count;passed=$passed;failed=$failed}|ConvertTo-Json -Compress
+    if ($results.Count -ne 1 -or $passed -ne 1 -or $failed -ne 0) {exit 1}
+    exit 0
+}
 if ($AdvisoryOlderContractOnly) {
     Invoke-CapTest 'advisory older candidate excludes only with unavailable native access and proved native parent' { Invoke-CapAdvisoryOlderContract }
     $passed = @($results | Where-Object passed -EQ $true).Count
@@ -8032,6 +8172,10 @@ if ($PrepareFixturesOnly) {
     }
     $null = New-CapHarmlessTarget
     $null = New-CapCimRaceTarget
+    foreach ($path in $sourceHashesBefore.Keys) {
+        Assert-CapTest ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ceq $sourceHashesBefore[$path]) `
+            "Source changed during fixture preparation: $path"
+    }
     $reference = Write-CapPrebuiltFixtureManifest
     $null = Read-CapPrebuiltFixtures $reference.path $reference.sha256
     $reference | ConvertTo-Json -Depth 8 -Compress

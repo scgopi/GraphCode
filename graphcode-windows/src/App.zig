@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const build_options = if (builtin.is_test)
     struct {
         pub const version = "dev";
+        pub const wire_receiver_trace = false;
     }
 else
     @import("build_options");
@@ -1610,6 +1611,7 @@ pub const App = struct {
     selected_edge_project_path: []u8 = &.{},
     selected_edge_id: []u8 = &.{},
     edge_drag_source_id: []u8 = &.{},
+    wire_receiver_trace: Diagnostics.WireReceiverTrace = .{},
     selection_initialized: bool = false,
     worktree_inspection: ?WorktreeStatus.Inspection = null,
     worktree_inspection_attempt_count: usize = 0,
@@ -10530,6 +10532,23 @@ fn onContextAction(context: ?*anyopaque, action: GraphContextMenu.Action, target
     app.handleContextAction(action, target);
 }
 
+fn logWireReceiver(app: *App, event: u32, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM, after: bool) void {
+    const point = if (message == c.WM_MOUSEMOVE or message == c.WM_LBUTTONDOWN or message == c.WM_LBUTTONUP)
+        CanvasInput.decodeMouseMessage(lparam)
+    else
+        CanvasInput.decodeMouseMessage(0);
+    var buffer: [512]u8 = undefined;
+    const line = app.wire_receiver_trace.project(&buffer, event, message, after, .{
+        .x = point.x, .y = point.y, .buttons = wparam, .raw_lparam = lparam, .source = app.edge_drag_source_id,
+        .edge_dragging = app.canvas.edge_dragging, .node_dragging = app.canvas.node_dragging,
+        .panning = app.canvas.dragging, .surface = @tagName(app.surface),
+    }) catch |err| {
+        std.log.err("Wire receiver diagnostic projection failed: {s}", .{@errorName(err)});
+        return;
+    };
+    std.log.warn("{s}", .{line});
+}
+
 fn onWindowMessage(
     context: ?*anyopaque,
     hwnd: c.HWND,
@@ -10539,12 +10558,19 @@ fn onWindowMessage(
     result: *c.LRESULT,
 ) callconv(.c) bool {
     const app: *App = @ptrCast(@alignCast(context.?));
+    const trace_event = if (build_options.wire_receiver_trace and Diagnostics.WireReceiverTrace.relevant(message))
+        app.wire_receiver_trace.begin()
+    else
+        null;
+    if (trace_event) |event| logWireReceiver(app, event, message, wparam, lparam, false);
+    defer if (trace_event) |event| logWireReceiver(app, event, message, wparam, lparam, true);
     if (TrayModule.taskbar_created != 0 and message == TrayModule.taskbar_created) {
         app.tray.readd();
         if (!app.tray.added) app.setStatus("System tray unavailable; retrying");
         result.* = 0;
         return true;
     }
+
     if (MainWindow.restore_message != 0 and message == MainWindow.restore_message) {
         if (app.ensureWorkspaceIdentity()) restoreShellWindow(hwnd);
         result.* = 0;
@@ -11188,7 +11214,15 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
-        c.WM_CAPTURECHANGED, c.WM_CANCELMODE => {
+        c.WM_CAPTURECHANGED => {
+            const recipient = Win32.messagePointer(c.HWND, lparam);
+            // SetCapture can synchronously notify a window that already owns capture.
+            if (hwnd == null or recipient != hwnd or c.GetCapture() != hwnd)
+                app.cancelCanvasInteraction();
+            result.* = 0;
+            return true;
+        },
+        c.WM_CANCELMODE => {
             app.cancelCanvasInteraction();
             result.* = 0;
             return true;
@@ -23635,6 +23669,299 @@ test "closed cycle UIA separates the footer reason from Inspect and preserves se
                 try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
                 try std.testing.expectEqualStrings("main", app.model.selected().?.id);
             }
+        }
+    }
+}
+
+const WireRouteSheet = struct {
+    var owner: c.HWND = null;
+    var timer: c.UINT_PTR = 0;
+    var observed: bool = false;
+    var endpoints_match: bool = false;
+    var accept: bool = true;
+    var ticks: usize = 0;
+    var timed_out: bool = false;
+    const source_id = "60000000-0000-4000-8000-000000000001";
+    const target_id = "60000000-0000-4000-8000-000000000002";
+
+    fn arm(parent: c.HWND, create: bool) !void {
+        owner = parent;
+        observed = false;
+        endpoints_match = false;
+        accept = create;
+        ticks = 0;
+        timed_out = false;
+        timer = c.SetTimer(null, 0, 100, &fire);
+        if (timer == 0) return error.TestTimerUnavailable;
+    }
+
+    fn disarm() void {
+        if (timer != 0) _ = c.KillTimer(null, timer);
+        timer = 0;
+        owner = null;
+    }
+
+    fn textIs(hwnd: c.HWND, comptime expected: []const u8) bool {
+        var buffer: [128]u16 = undefined;
+        const length = c.GetWindowTextW(hwnd, &buffer, buffer.len);
+        const wide = std.unicode.utf8ToUtf16LeStringLiteral(expected);
+        return length == wide.len and std.mem.eql(u16, buffer[0..@intCast(length)], wide);
+    }
+
+    fn child(hwnd: c.HWND, _: c.LPARAM) callconv(.winapi) c.BOOL {
+        var name: [64]u16 = undefined;
+        const length = c.GetClassNameW(hwnd, &name, name.len);
+        const expected = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeNativeForm");
+        if (length != expected.len or !std.mem.eql(u16, name[0..@intCast(length)], expected)) return 1;
+        observed = true;
+        endpoints_match = textIs(c.GetDlgItem(hwnd, 9100), source_id) and
+            textIs(c.GetDlgItem(hwnd, 9101), target_id);
+        return 0;
+    }
+
+    fn fire(_: c.HWND, _: c.UINT, _: c.UINT_PTR, _: c.DWORD) callconv(.winapi) void {
+        var sheet: c.HWND = null;
+        while (true) {
+            sheet = c.FindWindowExW(null, sheet, std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeSheetHost"), null);
+            if (sheet == null) return;
+            var pid: c.DWORD = 0;
+            _ = c.GetWindowThreadProcessId(sheet, &pid);
+            if (pid != c.GetCurrentProcessId() or c.GetWindow(sheet, c.GW_OWNER) != owner) continue;
+            ticks += 1;
+            if (ticks >= 50) {
+                timed_out = true;
+                _ = c.PostMessageW(sheet, c.WM_CLOSE, 0, 0);
+                return;
+            }
+            _ = c.EnumChildWindows(sheet, &child, 0);
+            _ = c.PostMessageW(sheet, c.WM_COMMAND, if (accept and endpoints_match) 1 else 2, 0);
+            return;
+        }
+    }
+};
+
+fn wireRouteTestApp(dpi: u32) !App {
+    var app = try overviewTestApp(dpi);
+    errdefer deinitOverviewTestApp(&app);
+    app.surface = .project;
+    app.workspace_controls.rail_visible = false;
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\wire-route","name":"Wire route"},"nodes":[{"id":"60000000-0000-4000-8000-000000000001","title":"Wire source","loopType":"turnBased","state":"idle"},{"id":"60000000-0000-4000-8000-000000000002","title":"Wire target","loopType":"turnBased","state":"idle"}],"edges":[]}}}
+    );
+    try std.testing.expect(app.model.selectProject("C:\\wire-route"));
+    try std.testing.expect(app.refreshCanvasLayout(logicalClientRect(app.window.hwnd, dpi)));
+    return app;
+}
+
+fn wireRouteTitlePoint(app: *App, index: usize) c.POINT {
+    const card = GraphCanvas.nodeBounds(index, &app.canvas);
+    const actions = GraphCanvas.unwiredActionBounds(card, &app.canvas);
+    return .{
+        .x = @divTrunc(actions.wire.left + actions.mark_entry.right, 2),
+        .y = @divTrunc(card.top + actions.wire.top, 2),
+    };
+}
+
+test "wire capture real window procedure preserves reentrant same-window SetCapture on connector down" {
+    var app = try wireRouteTestApp(96);
+    defer deinitOverviewTestApp(&app);
+    defer app.cancelCanvasInteraction();
+    const original = app.window.hwnd;
+    const instance = c.GetModuleHandleW(null);
+    try MainWindow.registerClass(instance);
+    app.window.hwnd = null;
+    app.window.context = &app;
+    const hwnd = c.CreateWindowExW(0, app.window.class_name, app.window.class_name,
+        c.WS_POPUP, 0, 0, 1200, 700, null, null, instance, &app.window) orelse {
+        app.window.hwnd = original;
+        return error.WindowCreationFailed;
+    };
+    defer {
+        app.window.callback = null;
+        if (c.GetCapture() == hwnd) _ = c.ReleaseCapture();
+        _ = c.DestroyWindow(hwnd);
+        app.window.hwnd = original;
+    }
+    app.window.callback = &onWindowMessage;
+    try std.testing.expect(c.IsWindowVisible(hwnd) == 0);
+    const foreground = c.GetForegroundWindow();
+    app.beginWireSelectedNode(0);
+    try std.testing.expectEqual(hwnd, c.GetCapture());
+    try std.testing.expect(app.canvas.edge_dragging);
+    const source = GraphCanvas.nodeBounds(0, &app.canvas);
+    const position: c.LPARAM = @intCast(source.right | (@divTrunc(source.top + source.bottom, 2) << 16));
+    _ = c.SendMessageW(hwnd, c.WM_LBUTTONDOWN, c.MK_LBUTTON, position);
+    try std.testing.expect(app.canvas.edge_dragging);
+    try std.testing.expectEqualStrings(WireRouteSheet.source_id, app.edge_drag_source_id);
+    try std.testing.expectEqual(hwnd, c.GetCapture());
+    try std.testing.expectEqual(foreground, c.GetForegroundWindow());
+    _ = c.ReleaseCapture();
+    try std.testing.expect(!app.canvas.edge_dragging);
+    try std.testing.expectEqual(@as(usize, 0), app.edge_drag_source_id.len);
+    app.beginWireSelectedNode(0);
+    _ = c.SendMessageW(hwnd, c.WM_CANCELMODE, 0, @intCast(@intFromPtr(hwnd)));
+    try std.testing.expect(!app.canvas.edge_dragging);
+    try std.testing.expectEqual(@as(usize, 0), app.edge_drag_source_id.len);
+    app.beginWireSelectedNode(0);
+    _ = c.SendMessageW(hwnd, c.WM_ACTIVATEAPP, 0, 0);
+    try std.testing.expect(!app.canvas.edge_dragging);
+    try std.testing.expectEqual(@as(usize, 0), app.edge_drag_source_id.len);
+    const foreign = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
+        std.unicode.utf8ToUtf16LeStringLiteral("Capture peer"), c.WS_POPUP,
+        0, 0, 100, 100, null, null, instance, null) orelse return error.WindowCreationFailed;
+    defer _ = c.DestroyWindow(foreign);
+    app.beginWireSelectedNode(0);
+    _ = c.SetCapture(foreign);
+    try std.testing.expect(!app.canvas.edge_dragging);
+    try std.testing.expectEqual(@as(usize, 0), app.edge_drag_source_id.len);
+    try std.testing.expect(c.GetCapture() != hwnd);
+    app.edge_drag_source_id = try app.allocator.dupe(u8, WireRouteSheet.source_id);
+    app.canvas.beginEdgeDrag(app.edge_drag_source_id, 10, 10);
+    _ = c.SendMessageW(hwnd, c.WM_CAPTURECHANGED, 0, @intCast(@intFromPtr(hwnd)));
+    try std.testing.expect(!app.canvas.edge_dragging);
+    try std.testing.expectEqual(@as(usize, 0), app.edge_drag_source_id.len);
+    try std.testing.expect(c.IsWindowVisible(hwnd) == 0 and c.IsWindowVisible(foreign) == 0);
+    try std.testing.expectEqual(foreground, c.GetForegroundWindow());
+}
+
+test "wire completion target press is node activation while connector drag owns edge completion" {
+    for ([_]u32{ 96, 192 }) |dpi| {
+        var app = try wireRouteTestApp(dpi);
+        defer deinitOverviewTestApp(&app);
+        defer app.cancelCanvasInteraction();
+        const source = GraphCanvas.nodeBounds(0, &app.canvas);
+        const source_id = "60000000-0000-4000-8000-000000000001";
+        const target_id = "60000000-0000-4000-8000-000000000002";
+        try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload(
+            "wire-node:C:\\wire-route:" ++ source_id,
+        )));
+        try std.testing.expectEqualStrings(source_id, app.edge_drag_source_id);
+        const target_point = wireRouteTitlePoint(&app, 1);
+        const target_message: c.LPARAM = @intCast(
+            physicalCoordinate(target_point.x, dpi) | (physicalCoordinate(target_point.y, dpi) << 16),
+        );
+        var result: c.LRESULT = 0;
+        _ = onWindowMessage(&app, app.window.hwnd, c.WM_MOUSEMOVE, 0, target_message, &result);
+        try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_LBUTTONDOWN, c.MK_LBUTTON, target_message, &result));
+        try std.testing.expect(app.canvas.node_dragging);
+        try std.testing.expectEqualStrings(target_id, app.canvas_press_node_id);
+        try std.testing.expect(app.canvas.edge_dragging);
+        try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_LBUTTONUP, 0, target_message, &result));
+        try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+        try std.testing.expectEqual(@as(usize, 0), app.model.graph.?.edges.items.len);
+        try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+        try std.testing.expect(std.mem.indexOf(u8, app.client.outbound[app.client.outbound_head], "resumeSession") != null);
+        app.cancelCanvasInteraction();
+
+        app.surface = .project;
+        app.workspace_controls.panel_visible = false;
+        const source_message: c.LPARAM = @intCast(
+            physicalCoordinate(source.right, dpi) |
+                (physicalCoordinate(@divTrunc(source.top + source.bottom, 2), dpi) << 16),
+        );
+        try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload(
+            "wire-node:C:\\wire-route:" ++ source_id,
+        )));
+        _ = onWindowMessage(&app, app.window.hwnd, c.WM_MOUSEMOVE, 0, source_message, &result);
+        try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_LBUTTONDOWN, c.MK_LBUTTON, source_message, &result));
+        try std.testing.expect(!app.canvas.node_dragging);
+        try std.testing.expect(app.canvas.edge_dragging);
+        try std.testing.expectEqualStrings(source_id, app.edge_drag_source_id);
+        _ = onWindowMessage(&app, app.window.hwnd, c.WM_MOUSEMOVE, c.MK_LBUTTON, target_message, &result);
+        try std.testing.expectEqual(target_point.x, app.canvas.edge_drag_x);
+        try std.testing.expectEqual(target_point.y, app.canvas.edge_drag_y);
+    }
+}
+
+test "wire completion harness connector gesture reaches owned native form and Create command" {
+    for ([_]u32{ 96, 192 }) |dpi| {
+        for ([_]bool{ false, true }) |armed| {
+            for ([_]bool{ false, true }) |accept| {
+                var app = try wireRouteTestApp(dpi);
+                defer deinitOverviewTestApp(&app);
+                defer app.cancelCanvasInteraction();
+                if (armed) try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload(
+                    "wire-node:C:\\wire-route:" ++ WireRouteSheet.source_id,
+                )));
+                const source = GraphCanvas.nodeBounds(0, &app.canvas);
+                const source_message: c.LPARAM = @intCast(
+                    physicalCoordinate(source.right, dpi) |
+                        (physicalCoordinate(@divTrunc(source.top + source.bottom, 2), dpi) << 16),
+                );
+                const target = wireRouteTitlePoint(&app, 1);
+                const target_message: c.LPARAM = @intCast(
+                    physicalCoordinate(target.x, dpi) | (physicalCoordinate(target.y, dpi) << 16),
+                );
+                try WireRouteSheet.arm(app.window.hwnd, accept);
+                defer WireRouteSheet.disarm();
+                var result: c.LRESULT = 0;
+                _ = onWindowMessage(&app, app.window.hwnd, c.WM_MOUSEMOVE, 0, source_message, &result);
+                _ = onWindowMessage(&app, app.window.hwnd, c.WM_LBUTTONDOWN, c.MK_LBUTTON, source_message, &result);
+                _ = onWindowMessage(&app, app.window.hwnd, c.WM_MOUSEMOVE, c.MK_LBUTTON, target_message, &result);
+                _ = onWindowMessage(&app, app.window.hwnd, c.WM_LBUTTONUP, 0, target_message, &result);
+                try std.testing.expect(WireRouteSheet.observed);
+                try std.testing.expect(WireRouteSheet.endpoints_match);
+                try std.testing.expect(!WireRouteSheet.timed_out);
+                try std.testing.expect(!app.canvas.edge_dragging and !app.canvas.node_dragging);
+                try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+                try std.testing.expectEqual(@as(usize, 0), app.edge_drag_source_id.len);
+                if (!accept) {
+                    try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+                    continue;
+                }
+                try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+                const frame = app.client.outbound[app.client.outbound_head];
+                try std.testing.expect(std.mem.indexOf(u8, frame, "\"createEdge\"") != null);
+                try std.testing.expect(std.mem.indexOf(u8, frame, "\"from\":\"" ++ WireRouteSheet.source_id ++ "\"") != null);
+                try std.testing.expect(std.mem.indexOf(u8, frame, "\"to\":\"" ++ WireRouteSheet.target_id ++ "\"") != null);
+            }
+        }
+    }
+}
+
+test "wire completion self empty and cancelled drops create nothing and preserve inline action priority" {
+    for ([_]u32{ 96, 192 }) |dpi| {
+        for ([_]enum { self, empty, cancel, mark }{ .self, .empty, .cancel, .mark }) |drop| {
+            var app = try wireRouteTestApp(dpi);
+            defer deinitOverviewTestApp(&app);
+            defer app.cancelCanvasInteraction();
+            try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload(
+                "wire-node:C:\\wire-route:" ++ WireRouteSheet.source_id,
+            )));
+            const source = GraphCanvas.nodeBounds(0, &app.canvas);
+            const target = GraphCanvas.nodeBounds(1, &app.canvas);
+            const start: c.LPARAM = @intCast(
+                physicalCoordinate(source.right, dpi) |
+                    (physicalCoordinate(@divTrunc(source.top + source.bottom, 2), dpi) << 16),
+            );
+            const point = switch (drop) {
+                .self => wireRouteTitlePoint(&app, 0),
+                .empty, .cancel => c.POINT{ .x = 1100, .y = 800 },
+                .mark => c.POINT{ .x = target.left + 100, .y = target.top + 40 },
+            };
+            const end: c.LPARAM = @intCast(
+                physicalCoordinate(point.x, dpi) | (physicalCoordinate(point.y, dpi) << 16),
+            );
+            var result: c.LRESULT = 0;
+            if (drop == .mark) {
+                _ = onWindowMessage(&app, app.window.hwnd, c.WM_LBUTTONDOWN, c.MK_LBUTTON, end, &result);
+                try std.testing.expect(app.nodeIsDeclaredEntry(WireRouteSheet.target_id));
+                try std.testing.expect(!app.canvas.node_dragging);
+                app.cancelCanvasInteraction();
+                for (app.declared_entry_ids.items) |id| app.allocator.free(id);
+                app.declared_entry_ids.clearRetainingCapacity();
+            } else {
+                _ = onWindowMessage(&app, app.window.hwnd, c.WM_LBUTTONDOWN, c.MK_LBUTTON, start, &result);
+                _ = onWindowMessage(&app, app.window.hwnd, c.WM_MOUSEMOVE, c.MK_LBUTTON, end, &result);
+                if (drop == .cancel) {
+                    _ = onWindowMessage(&app, app.window.hwnd, c.WM_CANCELMODE, 0, 0, &result);
+                }
+                _ = onWindowMessage(&app, app.window.hwnd, c.WM_LBUTTONUP, 0, end, &result);
+            }
+            try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+            try std.testing.expectEqual(@as(usize, 0), app.model.graph.?.edges.items.len);
+            try std.testing.expect(!app.canvas.edge_dragging and !app.canvas.node_dragging and !app.canvas.dragging);
+            try std.testing.expectEqual(@as(usize, 0), app.edge_drag_source_id.len);
         }
     }
 }
