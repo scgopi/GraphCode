@@ -254,7 +254,7 @@ $terminalAst = [Management.Automation.Language.Parser]::ParseFile(
   (Join-Path $repoRoot "Tools\windows\terminal-gate.ps1"), [ref]$null, [ref]$null)
 foreach ($name in @("Get-TerminalRemaining", "New-TerminalStartInfo", "Invoke-TerminalOwnedCommand",
     "Complete-TerminalSeeds", "Invoke-GateProcess", "Write-OwnedResourceMetrics", "Resolve-TerminalApplication",
-    "Get-TerminalArtifactRoot")) {
+    "Get-TerminalArtifactRoot", "Write-TerminalDiagnostic", "Throw-TerminalHealthFailure")) {
   $definition = $terminalAst.Find({
     param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -262,6 +262,10 @@ foreach ($name in @("Get-TerminalRemaining", "New-TerminalStartInfo", "Invoke-Te
   Assert-Contract ($null -ne $definition) "missing canonical owned terminal helper: $name"
   . ([scriptblock]::Create($definition.Extent.Text))
 }
+$workflow = Get-Content (Join-Path $repoRoot ".github\workflows\windows-port-validation.yml") -Raw
+Assert-Contract ($workflow.Contains('${{ runner.temp }}\terminal-owned-*\**\*') -and
+  $workflow.Contains('- name: Retain UIA failure diagnostics' + "`n" + '        if: always()')) `
+  "spikes-other must always retain original terminal raw diagnostics in its existing upload step"
 $script:terminalOwnershipCases = 0
 function Test-TerminalOwnership([scriptblock] $case) {
   function Write-Host { }
@@ -428,6 +432,86 @@ foreach ($invalid in @("", " ", "relative-root", "D:\missing-directory")) {
 }
 Assert-Contract ($script:terminalScratchCases -eq 7) "expected seven pure scratch selection/budget cases"
 Write-Output "Terminal scratch contracts: PASS executed=$script:terminalScratchCases pure-path-only"
+
+$script:terminalDiagnosticCases = 0
+foreach ($breakOutput in @($false, $true)) {
+  & {
+    $script:diagnosticLines = [Collections.Generic.List[string]]::new()
+    function Write-Host([string] $text) {
+      if ($breakOutput) { throw "actual diagnostic transport failure" }
+      $script:diagnosticLines.Add($text)
+    }
+    $first = @{ StandardError="first actual error"; ExitCode=1 }
+    $last = @{ StandardError=("last actual error" * 300); ExitCode=2 }
+    $failure = $null
+    try { Throw-TerminalHealthFailure "original health deadline" $first $last } catch { $failure = $_ }
+    Assert-Contract ($failure.Exception.Message -ceq "original health deadline" -and
+      [Object]::ReferenceEquals($failure.Exception.Data["TerminalHealthFirst"], $first) -and
+      [Object]::ReferenceEquals($failure.Exception.Data["TerminalHealthLast"], $last)) `
+      "diagnostic reporting must retain original primary and actual completed command results"
+    if ($breakOutput) {
+      Assert-Contract ($null -ne $failure.Exception.Data["TerminalHealthDiagnosticFailure"]) `
+        "transport failure must remain attached without replacing health failure"
+    } else {
+      $parsed = $diagnosticLines[1].Substring("TERMINAL_DIAGNOSTIC=".Length) | ConvertFrom-Json
+      Assert-Contract ($diagnosticLines.Count -eq 2 -and $parsed.truncated -and $parsed.text.Length -eq 2048 -and
+        $parsed.originalCharacters -eq $last.StandardError.Length) "bounded excerpts must declare truncation and retain original length"
+    }
+    $script:terminalDiagnosticCases++
+  }
+}
+$retention = $terminalAst.Find({
+  param($node)
+  $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq "Complete-TerminalSeeds"
+}, $true).Extent.Text
+Assert-Contract ($retention.IndexOf('original-seed-stderr-after-held-cleanup') -gt
+  $retention.IndexOf('if (-not $proof.CanRelease') -and $retention.Contains('$taskSeeds[$task]') -and
+  $retention.Contains('TaskStatus]::RanToCompletion')) "seed stderr diagnostics require matching original task and proven held cleanup"
+$script:terminalDiagnosticCases++
+foreach ($invalid in @($null, 42)) {
+  $failure = $null
+  try { Write-TerminalDiagnostic "invalid-actual-text" $invalid } catch { $failure = $_ }
+  Assert-Contract ($null -ne $failure -and $failure.Exception.Message.Contains("Actual diagnostic text is unavailable")) `
+    "unavailable/nonstring diagnostic text must not become an actual empty string"
+  $script:terminalDiagnosticCases++
+}
+& {
+  $script:diagnosticLines = [Collections.Generic.List[string]]::new()
+  function Write-Host([string] $text) { $script:diagnosticLines.Add($text) }
+  Write-TerminalDiagnostic "actual-empty" ""
+  $record = $diagnosticLines[0].Substring("TERMINAL_DIAGNOSTIC=".Length) | ConvertFrom-Json
+  Assert-Contract ($diagnosticLines.Count -eq 1 -and $record.originalCharacters -eq 0 -and
+    $record.text -ceq "" -and -not $record.truncated) "legitimate completed empty stderr must remain an actual empty diagnostic"
+  $script:terminalDiagnosticCases++
+}
+& {
+  $ownedSeeds = [Collections.Generic.List[object]]::new()
+  $primary = [InvalidOperationException]::new("original seed health failure")
+  $taskIds = [Collections.Generic.List[int]]::new()
+  foreach ($index in 0..2) {
+    $child = [pscustomobject]@{ StandardError=[Threading.Tasks.Task]::FromResult([string]"actual error") }
+    $child | Add-Member ScriptMethod StopAsync {
+      param($original)
+      $task = [Threading.Tasks.Task]::FromResult([object]@{ CanRelease=$true; ResourcesClosed=$true })
+      $taskIds.Add($task.Id)
+      return $task
+    }
+    $ownedSeeds.Add(@{ child=$child })
+  }
+  function Write-TerminalDiagnostic { throw "diagnostic transport refused" }
+  function Write-Host { }
+  Complete-TerminalSeeds $primary
+  $retained = @($primary.Data.Keys | Where-Object { $_ -like "TerminalSeedDiagnosticFailure:*" })
+  Assert-Contract ($retained.Count -eq 3 -and $taskIds.Count -eq 3 -and
+    $primary.Message -ceq "original seed health failure") "all three diagnostic failures must remain attached to the original health error"
+  foreach ($id in $taskIds) {
+    Assert-Contract ($primary.Data["TerminalSeedDiagnosticFailure:$id"].Message -ceq "diagnostic transport refused") `
+      "each original completion task must retain its distinct reporting failure"
+  }
+  $script:terminalDiagnosticCases++
+}
+Assert-Contract ($script:terminalDiagnosticCases -eq 7) "expected seven diagnostic preservation cases"
+Write-Output "Terminal diagnostic contracts: PASS executed=$script:terminalDiagnosticCases source/managed-only"
 
 $script:terminalMetricCases = 0
 function Test-TerminalMetrics([scriptblock] $case) {

@@ -138,16 +138,44 @@ function Assert-HistoryContains([string] $name, [string] $marker, [string] $labe
 
 function Assert-ZmxSessionHealthy([string] $name, [string] $label) {
   $watch = [Diagnostics.Stopwatch]::StartNew()
+  $first = $null
+  $last = $null
   for ($attempt = 0; $attempt -lt 40; $attempt++) {
     $remaining = [int][Math]::Min(5000, 10000 - $watch.ElapsedMilliseconds)
     if ($remaining -le 0) { break }
     $result = Invoke-TerminalOwnedCommand $zmx @("get", $name) "health" $remaining
-    if ($watch.ElapsedMilliseconds -ge 10000) { throw "$label exceeded its shared health deadline" }
+    if ($null -eq $first) { $first = $result }
+    $last = $result
+    if ($watch.ElapsedMilliseconds -ge 10000) {
+      Throw-TerminalHealthFailure "$label exceeded its shared health deadline" $first $last
+    }
     if ($result.ExitCode -eq 0) { return }
     Write-Host "TERMINAL_HEALTH_PENDING attempt=$attempt exit=$($result.ExitCode)"
     Start-Sleep -Milliseconds ([Math]::Min(250, [Math]::Max(0, 10000 - $watch.ElapsedMilliseconds)))
   }
-  throw "$label did not become reachable"
+  Throw-TerminalHealthFailure "$label did not become reachable" $first $last
+}
+
+function Write-TerminalDiagnostic([string] $label, [object] $text) {
+  if ($text -isnot [string]) { throw "Actual diagnostic text is unavailable: $label" }
+  $maximum = 2048
+  $excerpt = if ($text.Length -gt $maximum) { $text.Substring(0, $maximum) } else { $text }
+  Write-Host ("TERMINAL_DIAGNOSTIC=" + ([ordered]@{ label=$label; originalCharacters=$text.Length
+    truncated=($text.Length -gt $maximum); text=$excerpt } | ConvertTo-Json -Compress))
+}
+
+function Throw-TerminalHealthFailure([string] $message, $first, $last) {
+  $primary = [InvalidOperationException]::new($message)
+  try {
+    if ($null -eq $first -or $null -eq $last) { throw "Health command returned no completed result" }
+    $primary.Data["TerminalHealthFirst"] = $first
+    $primary.Data["TerminalHealthLast"] = $last
+    Write-TerminalDiagnostic "first-health-stderr" $first.StandardError
+    Write-TerminalDiagnostic "last-health-stderr" $last.StandardError
+  } catch {
+    $primary.Data["TerminalHealthDiagnosticFailure"] = $_.Exception
+  }
+  throw $primary
 }
 
 function Send-TerminalText([string] $name, [string] $text) {
@@ -207,8 +235,13 @@ function Write-OwnedResourceMetrics([string] $phase, $spike) {
 function Complete-TerminalSeeds([Exception] $primary) {
   $errors = [Collections.Generic.List[Exception]]::new()
   $tasks = [Collections.Generic.List[Threading.Tasks.Task]]::new()
+  $taskSeeds = [Collections.Generic.Dictionary[Threading.Tasks.Task, object]]::new()
   foreach ($seed in $ownedSeeds) {
-    try { $tasks.Add($seed.child.StopAsync($primary)) }
+    try {
+      $task = $seed.child.StopAsync($primary)
+      $tasks.Add($task)
+      $taskSeeds.Add($task, $seed)
+    }
     catch { $errors.Add($_.Exception) }
   }
   try {
@@ -224,6 +257,16 @@ function Complete-TerminalSeeds([Exception] $primary) {
       if (-not $proof.CanRelease -or -not $proof.ResourcesClosed) {
         $script:cleanupUnproven = $true
         throw "Terminal seed cleanup is unproved"
+      }
+      if ($primary) {
+        $seed = $taskSeeds[$task]
+        try {
+          if ($seed.child.StandardError.Status -ne [Threading.Tasks.TaskStatus]::RanToCompletion) {
+            throw "Original seed stderr completion is unavailable after cleanup"
+          }
+          Write-TerminalDiagnostic "original-seed-stderr-after-held-cleanup" `
+            $seed.child.StandardError.GetAwaiter().GetResult()
+        } catch { $primary.Data["TerminalSeedDiagnosticFailure:$($task.Id)"] = $_.Exception }
       }
     } catch { $errors.Add($_.Exception) }
   }
