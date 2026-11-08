@@ -110,6 +110,36 @@ Describe "Owned shell scope mock-only lifecycle" {
       $script:scope.Runs.Count | Should -Be 0
       $script:events | Should -Not -Contain "Assign"
     }
+    It "retains the original assignment and cleanup records at the actual Start Stop catch" -Tag "FirstFailureDiagnostic" {
+      $root = Join-Path $TestDrive ([guid]::NewGuid().ToString("N"))
+      New-Item -ItemType Directory -Path $root | Out-Null
+      $env:GRAPHCODE_VALIDATION_ROOT = $root
+      try {
+        $script:assignFailure = [ComponentModel.Win32Exception]::new(5, "primary assignment")
+        $script:assignFailure.Data["NativeResult"] = [uint32]11
+        $script:stopFailure = [ComponentModel.Win32Exception]::new(6, "secondary stop")
+        $script:stopFailure.Data["NativeResult"] = [uint32]22
+        Mock Invoke-ShellJob { throw $script:assignFailure } -ParameterFilter { $Operation -eq "Assign" }
+        $script:run | Add-Member ScriptMethod Stop { throw $script:stopFailure } -Force
+        $failure = $null
+        try { Start-ShellOwnedProcess $script:scope ([Diagnostics.ProcessStartInfo]::new()) } catch { $failure = $_ }
+        $failure.Exception | Should -BeOfType ([InvalidOperationException])
+        [object]::ReferenceEquals($failure.Exception.InnerException, $script:assignFailure) | Should -BeTrue
+        $evidence = Get-Content (Join-Path $root "ownership-first-failure.json") -Raw | ConvertFrom-Json
+        $first = @($evidence.exceptionChain | Where-Object { $_.path -like "primary*" -and $_.nativeErrorAvailable -and $_.nativeErrorCode -eq 5 })
+        $second = @($evidence.exceptionChain | Where-Object { $_.path -like "secondaryCleanup*" -and $_.nativeErrorAvailable -and $_.nativeErrorCode -eq 6 })
+        $first.Count | Should -Be 1
+        $second.Count | Should -Be 1
+        $first[0].availableFailureOperands.NativeResult | Should -Be 11
+        $second[0].availableFailureOperands.NativeResult | Should -Be 22
+        $evidence.scriptStackTrace | Should -Not -BeExactly $evidence.secondaryCleanup.scriptStackTrace
+        $evidence.secondaryCleanupAvailable | Should -BeTrue
+        $script:scope.Runs.Count | Should -Be 1
+        Should -Invoke Invoke-ShellJob -Times 1 -Exactly -ParameterFilter { $Operation -eq "Assign" }
+      } finally {
+        Remove-Item Env:\GRAPHCODE_VALIDATION_ROOT -ErrorAction SilentlyContinue
+      }
+    }
     It "refuses a newly reopened or stale PID object" {
       $script:scope.Runs.Add($script:run)
       $other = [Diagnostics.Process]::new()
@@ -989,5 +1019,193 @@ Describe "Ownership-unproven root retention contract (filesystem only)" {
     Test-ShellOwnershipUnproven $outer | Should -BeTrue
     $inner.Data["GraphCodeValidationRootRetentionRequired"] = "true"
     Test-ShellOwnershipUnproven $outer | Should -BeFalse
+  }
+  It "flushes first-failure evidence before the sentinel while preserving the actual ErrorRecord" -Tag "FirstFailureDiagnostic" {
+    $exception = [ComponentModel.Win32Exception]::new(5, "controlled native refusal")
+    $exception.Data["NativeResult"] = [uint32]4294967295
+    try { throw $exception } catch { $original = $_ }
+    Mock Write-Host {
+      Test-Path (Join-Path $env:GRAPHCODE_VALIDATION_ROOT "ownership-first-failure.json") | Should -BeTrue
+    } -ModuleName ShellProcessOwnership -ParameterFilter {
+      $Object -eq "GRAPHCODE_VALIDATION_ROOT_RETENTION_REQUIRED=ownership_unproven"
+    }
+    $returned = Set-ShellOwnershipUnproven $exception -FailureRecord $original
+    [object]::ReferenceEquals($returned, $exception) | Should -BeTrue
+    [object]::ReferenceEquals($returned.Data["GraphCodeValidationOriginalFailureRecord"], $original) | Should -BeTrue
+    $evidence = Get-Content (Join-Path $root "ownership-first-failure.json") -Raw | ConvertFrom-Json
+    $evidence.errorRecordAvailable | Should -BeTrue
+    $evidence.exceptionChain[0].nativeErrorCode | Should -Be 5
+    $evidence.availableFailureOperands.NativeResult | Should -Be 4294967295
+    $evidence.scriptStackTrace | Should -BeExactly $original.ScriptStackTrace
+    (Get-Content (Join-Path $root "ownership-unproven.json") -Raw | ConvertFrom-Json).reason | Should -BeExactly "ownership_unproven"
+    $registry = Get-Content (Join-Path $repo "Tools\windows\ValidationRunner\Manifests\host.json") -Raw | ConvertFrom-Json
+    $required = @($registry.units | Where-Object id -CEQ "host.legacy-ownership.shell-scope")
+    $required.Count | Should -Be 1
+    $required[0].minimumCount | Should -Be 77
+    $required[0].exactCount | Should -Be 77
+    @($required[0].requiredGroups).Count | Should -Be 7
+    $adapter = Join-Path $repo "Tools\windows\ValidationRunner\Adapters\LegacyOwnership.Contracts.ps1"
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($adapter, [ref]$tokens, [ref]$errors)
+    $helpers = @($ast.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq "Get-ShellScopeDiagnosticGroups"
+    }, $true))
+    $errors.Count | Should -Be 0
+    $helpers.Count | Should -Be 1
+    . ([scriptblock]::Create($helpers[0].Extent.Text))
+    $cases = @($required[0].requiredGroups | ForEach-Object {
+      [pscustomobject]@{ Name = $_; Tag = @("FirstFailureDiagnostic"); Executed = $true; Result = "Passed" }
+    })
+    $run = [pscustomobject]@{ TotalCount = 77; Tests = $cases }
+    $groups = @(Get-ShellScopeDiagnosticGroups $run $required[0])
+    $groups.Count | Should -Be 7
+    foreach ($mutation in @("missing", "extra", "duplicate", "failed", "unexecuted", "wrong-count", "duplicate-required")) {
+      $invalidCases = @($cases | ForEach-Object {
+        [pscustomobject]@{ Name = $_.Name; Tag = $_.Tag; Executed = $_.Executed; Result = $_.Result }
+      })
+      $expected = [pscustomobject]@{ minimumCount = 77; exactCount = 77; requiredGroups = @($required[0].requiredGroups) }
+      $total = 77
+      switch ($mutation) {
+        "missing" { $invalidCases = $invalidCases[1..6] }
+        "extra" { $invalidCases += [pscustomobject]@{ Name = "unexpected diagnostic"; Tag = @("FirstFailureDiagnostic"); Executed = $true; Result = "Passed" } }
+        "duplicate" { $invalidCases += $invalidCases[0] }
+        "failed" { $invalidCases[0].Result = "Failed" }
+        "unexecuted" { $invalidCases[0].Executed = $false }
+        "wrong-count" { $total = 70 }
+        "duplicate-required" { $expected.requiredGroups += $expected.requiredGroups[0] }
+      }
+      $invalidRun = [pscustomobject]@{ TotalCount = $total; Tests = $invalidCases }
+      { Get-ShellScopeDiagnosticGroups $invalidRun $expected } | Should -Throw
+    }
+    $unitTokens = $null
+    $unitErrors = $null
+    $unitAst = [Management.Automation.Language.Parser]::ParseFile(
+      (Join-Path $repo "Tools\windows\Tests\WindowsShell.Tests.ps1"), [ref]$unitTokens, [ref]$unitErrors)
+    $entrypoints = @($unitAst.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq "Invoke-Native" -and
+        $node.CommandElements.Count -eq 3 -and
+        $node.CommandElements[1] -is [Management.Automation.Language.StringConstantExpressionAst] -and
+        $node.CommandElements[1].Value -ceq "Shell process ownership mock contracts"
+    }, $true))
+    $unitErrors.Count | Should -Be 0
+    $entrypoints.Count | Should -Be 1
+    $bodyText = $entrypoints[0].CommandElements[2].ScriptBlock.Extent.Text
+    $body = [scriptblock]::Create('param([string]$PSScriptRoot)' + "`n" +
+      $bodyText.Substring(1, $bodyText.Length - 2))
+    $unitRoot = Join-Path $repo "Tools\windows\Tests"
+    $repoRoot = $repo
+    $script:controlledOwnershipRun = [pscustomobject]@{
+      TotalCount = 77; PassedCount = 77; FailedCount = 0; SkippedCount = 0; NotRunCount = 0; Tests = $cases
+    }
+    Mock Invoke-Pester { $script:controlledOwnershipRun }
+    Mock Write-Host {}
+    # Negative control from the failing 131 unit entrypoint, not another live count contract.
+    $oldBody = [scriptblock]::Create('param([string]$PSScriptRoot)' + "`n" + @'
+. (Join-Path $PSScriptRoot "..\Import-PinnedPester.ps1")
+$ownershipResults = Invoke-Pester -Path (Join-Path $PSScriptRoot "ShellProcessOwnership.Tests.ps1") -PassThru
+if ($ownershipResults.TotalCount -ne 70 -or
+    $ownershipResults.PassedCount -ne $ownershipResults.TotalCount -or
+    $ownershipResults.FailedCount -ne 0 -or $ownershipResults.SkippedCount -ne 0) {
+  throw "Shell process ownership mock contracts did not pass all 70 unskipped cases"
+}
+'@)
+    { & $oldBody $unitRoot } | Should -Throw "*all 70 unskipped cases*"
+    & $body $unitRoot
+    foreach ($mutation in @("missing", "extra", "duplicate", "unexecuted", "wrong-count", "not-run")) {
+      $invalidCases = @($cases | ForEach-Object {
+        [pscustomobject]@{ Name = $_.Name; Tag = $_.Tag; Executed = $_.Executed; Result = $_.Result }
+      })
+      $total = 77
+      $notRun = 0
+      switch ($mutation) {
+        "missing" { $invalidCases = $invalidCases[1..6] }
+        "extra" { $invalidCases += [pscustomobject]@{ Name = "unexpected diagnostic"; Tag = @("FirstFailureDiagnostic"); Executed = $true; Result = "Passed" } }
+        "duplicate" { $invalidCases += $invalidCases[0] }
+        "unexecuted" { $invalidCases[0].Executed = $false }
+        "wrong-count" { $total = 70 }
+        "not-run" { $notRun = 1 }
+      }
+      $script:controlledOwnershipRun = [pscustomobject]@{
+        TotalCount = $total; PassedCount = $total; FailedCount = 0; SkippedCount = 0; NotRunCount = $notRun; Tests = $invalidCases
+      }
+      { & $body $unitRoot } | Should -Throw
+    }
+  }
+  It "never overwrites the immutable first failure or replaces its primary on write refusal" -Tag "FirstFailureDiagnostic" {
+    $path = Join-Path $root "ownership-first-failure.json"
+    [IO.File]::WriteAllText($path, "original failure evidence")
+    $before = (Get-FileHash $path).Hash
+    $primary = [InvalidOperationException]::new("keep this primary")
+    try { throw $primary } catch { $original = $_ }
+    $returned = Set-ShellOwnershipUnproven $primary -FailureRecord $original
+    [object]::ReferenceEquals($returned, $primary) | Should -BeTrue
+    (Get-FileHash $path).Hash | Should -BeExactly $before
+    $returned.Data["GraphCodeValidationFirstFailureDiagnosticFailure"] | Should -BeOfType ([Management.Automation.ErrorRecord])
+    Test-Path (Join-Path $root "ownership-unproven.json") | Should -BeTrue
+    Test-ShellOwnershipUnproven $returned | Should -BeTrue
+  }
+  It "reports absent records and native operands as unavailable without invented zeros" -Tag "FirstFailureDiagnostic" {
+    $returned = Set-ShellOwnershipUnproven ([InvalidOperationException]::new("no native result"))
+    $evidence = Get-Content (Join-Path $root "ownership-first-failure.json") -Raw | ConvertFrom-Json
+    $evidence.errorRecordAvailable | Should -BeFalse
+    $evidence.scriptStackTrace | Should -BeNullOrEmpty
+    $evidence.nativeResultAvailable | Should -BeFalse
+    $evidence.ownershipPredicateAvailable | Should -BeFalse
+    $evidence.exceptionChain[0].nativeErrorCode | Should -BeNullOrEmpty
+    $evidence.secondaryCleanupAvailable | Should -BeFalse
+  }
+  It "preserves all available aggregate branches and signed COM HRESULTs" -Tag "FirstFailureDiagnostic" {
+    $primary = [AggregateException]::new("both branches", [Exception[]]@(
+      [InvalidOperationException]::new("primary branch"),
+      [Runtime.InteropServices.COMException]::new("cleanup branch", -2147467259)))
+    $returned = Set-ShellOwnershipUnproven $primary
+    [object]::ReferenceEquals($returned, $primary) | Should -BeTrue
+    $evidence = Get-Content (Join-Path $root "ownership-first-failure.json") -Raw | ConvertFrom-Json
+    $evidence.exceptionChain.Count | Should -Be 3
+    $evidence.exceptionChain[1].message | Should -BeExactly "primary branch"
+    $evidence.exceptionChain[2].message | Should -BeExactly "cleanup branch"
+    $evidence.exceptionChain[2].exceptionHResult | Should -Be -2147467259
+    $evidence.exceptionChain[2].nativeErrorAvailable | Should -BeFalse
+    $evidence.innerChainTruncated | Should -BeFalse
+  }
+  It "preserves distinct primary and secondary cleanup records, stacks and native results" -Tag "FirstFailureDiagnostic" {
+    function Invoke-PrimaryFailure { throw [ComponentModel.Win32Exception]::new(5, "primary assignment") }
+    function Invoke-CleanupFailure { throw [ComponentModel.Win32Exception]::new(6, "secondary stop") }
+    try { Invoke-PrimaryFailure } catch { $original = $_ }
+    try { Invoke-CleanupFailure } catch { $cleanup = $_ }
+    $original.Exception.Data["NativeResult"] = [uint32]11
+    $cleanup.Exception.Data["NativeResult"] = [uint32]22
+    $primary = [InvalidOperationException]::new("unchanged wrapper", $original.Exception)
+    $returned = Set-ShellOwnershipUnproven $primary -FailureRecord $original -SecondaryCleanupFailureRecord $cleanup
+    [object]::ReferenceEquals($returned, $primary) | Should -BeTrue
+    [object]::ReferenceEquals($returned.InnerException, $original.Exception) | Should -BeTrue
+    [object]::ReferenceEquals($returned.Data["GraphCodeValidationOriginalCleanupFailureRecord"], $cleanup) | Should -BeTrue
+    $evidence = Get-Content (Join-Path $root "ownership-first-failure.json") -Raw | ConvertFrom-Json
+    $evidence.primaryRecordExceptionMessage | Should -BeExactly "primary assignment"
+    $evidence.secondaryCleanup.exceptionMessage | Should -BeExactly "secondary stop"
+    $evidence.secondaryCleanup.label | Should -BeExactly "ACTUAL_SECONDARY_CLEANUP_ERROR_NOT_PRIMARY"
+    $evidence.scriptStackTrace | Should -Not -BeExactly $evidence.secondaryCleanup.scriptStackTrace
+    $first = @($evidence.exceptionChain | Where-Object path -CEQ "primary.inner")
+    $second = @($evidence.exceptionChain | Where-Object path -CEQ "secondaryCleanup")
+    $first.Count | Should -Be 1
+    $second.Count | Should -Be 1
+    $first[0].nativeErrorCode | Should -Be 5
+    $second[0].nativeErrorCode | Should -Be 6
+    $first[0].availableFailureOperands.NativeResult | Should -Be 11
+    $second[0].availableFailureOperands.NativeResult | Should -Be 22
+  }
+  It "refuses oversized projection without replacing the primary or suppressing retention" -Tag "FirstFailureDiagnostic" {
+    $primary = [InvalidOperationException]::new(("x" * 70000))
+    $returned = Set-ShellOwnershipUnproven $primary
+    [object]::ReferenceEquals($returned, $primary) | Should -BeTrue
+    $returned.Data["GraphCodeValidationFirstFailureDiagnosticFailure"] | Should -Not -BeNullOrEmpty
+    Test-Path (Join-Path $root "ownership-first-failure.json") | Should -BeFalse
+    Test-Path (Join-Path $root "ownership-unproven.json") | Should -BeTrue
+    Test-ShellOwnershipUnproven $returned | Should -BeTrue
   }
 }

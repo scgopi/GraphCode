@@ -58,6 +58,7 @@ const WorkspaceControls = @import("WorkspaceControls.zig");
 const WorkspaceLifecycle = @import("WorkspaceLifecycle.zig");
 const WorkspaceManager = @import("WorkspaceManager.zig");
 const WorkspaceManagerForm = @import("WorkspaceManagerForm.zig");
+const NewWorkspaceForm = @import("NewWorkspaceForm.zig");
 const WorkspaceTeardown = @import("WorkspaceTeardown.zig");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
@@ -10154,18 +10155,40 @@ pub const App = struct {
     }
 
     fn createWorkspace(self: *App) void {
-        const result = self.showWorkspaceText("New Workspace", &.{"Name"}, &.{""}) orelse return;
-        defer {
-            var owned = result;
-            owned.deinit(self.allocator);
-        }
         if (!self.ensureWorkspaceIdentity()) return;
         const home = std.process.getEnvVarOwned(self.allocator, "USERPROFILE") catch {
             self.setStatus("User profile could not be resolved");
             return;
         };
         defer self.allocator.free(home);
-        var workspace = WorkspaceLifecycle.create(self.allocator, result.values[0], home) catch |err| {
+        const current_name: []const u8 = name: {
+            if (self.workspace_list) |list| {
+                for (list.items) |workspace| {
+                    if (std.mem.eql(u8, workspace.identity, self.workspace_identity))
+                        break :name workspace.name;
+                }
+            }
+            const basename = std.fs.path.basenameWindows(self.workspace_path);
+            if (std.mem.eql(u8, basename, WorkspaceLifecycle.default_directory_name))
+                break :name "Default";
+            if (std.mem.startsWith(u8, basename, WorkspaceLifecycle.directory_prefix) and
+                basename.len > WorkspaceLifecycle.directory_prefix.len)
+                break :name basename[WorkspaceLifecycle.directory_prefix.len..];
+            break :name if (basename.len == 0) self.workspace_path else basename;
+        };
+        var result = (NewWorkspaceForm.show(self.window.hwnd, self.allocator, .{
+            .home = home,
+            .current_name = current_name,
+        }) catch |err| {
+            self.setStatus(if (err == error.FormAlreadyOpen)
+                "Close the current dialog before managing workspaces"
+            else
+                "Workspace dialog could not be completed");
+            return;
+        }) orelse return;
+        defer result.deinit(self.allocator);
+        if (!self.ensureWorkspaceIdentity()) return;
+        var workspace = WorkspaceLifecycle.create(self.allocator, result.name, home) catch |err| {
             self.setStatus(switch (err) {
                 error.EmptyName => "Workspace name is required",
                 error.NameTooLong => "Workspace name is too long",
