@@ -2,6 +2,7 @@
 param(
   [switch] $List,
   [switch] $ResourceCountersOnly,
+  [switch] $OwnedDirectoryContractsOnly,
   [string] $ProductPinsPath,
   [string] $GatePinsPath
 )
@@ -85,6 +86,116 @@ if ($ResourceCountersOnly) {
   $executed++
   Assert-Contract ($executed -eq 11) "expected eleven source/managed held-resource cases"
   Write-Output "Terminal held resource counters: PASS executed=$executed source/managed-only"
+  exit 0
+}
+
+if ($OwnedDirectoryContractsOnly) {
+  if ([string]::IsNullOrWhiteSpace($env:GRAPHCODE_VALIDATION_ASSEMBLY)) {
+    throw "Owned directory contracts require the explicit current compiled assembly"
+  }
+  & (Join-Path $PSScriptRoot "..\Import-CompiledValidationAssembly.ps1") `
+    -AssemblyPath (Join-Path (Split-Path $env:GRAPHCODE_VALIDATION_ASSEMBLY) "ValidationFixtureBindings.dll") `
+    -RequiredType "GraphCode.ValidationFixtureDirectoryNative" | Out-Null
+  $executed = 0
+  $sid = "S-1-5-21-1-2-3-1001"
+  $descriptor = [GraphCode.ValidationFixtureDirectoryNative]::CurrentUserDescriptor($sid)
+  $parsed = [Security.AccessControl.RawSecurityDescriptor]::new($descriptor)
+  Assert-Contract ($parsed.Owner.Value -ceq $sid -and $parsed.DiscretionaryAcl.Count -eq 1 -and
+    ($parsed.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0) `
+    "fresh private descriptor requires exact current-user owner and one protected rule"
+  $ace = $parsed.DiscretionaryAcl[0]
+  Assert-Contract ($ace.SecurityIdentifier.Value -ceq $sid -and
+    $ace.AccessMask -eq [int][Security.AccessControl.FileSystemRights]::FullControl -and
+    $ace.AceFlags -eq ([Security.AccessControl.AceFlags]::ContainerInherit -bor [Security.AccessControl.AceFlags]::ObjectInherit) -and
+    $ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessAllowed) `
+    "only the current user may receive inheritable FullControl; no other principal"
+  $executed++
+  $script:directoryCalls = [Collections.Generic.List[string]]::new()
+  $getSid = [Func[byte[]]]{ return [byte[]]@(1,2,3,4,5,6,7,8) }
+  $create = [Func[string,byte[],int]]{
+    param($path,$bytes)
+    $script:directoryCalls.Add("create")
+    Assert-Contract ($path -ceq "D:\owned-new" -and $bytes.Length -eq 8) "actual path/SID must reach creation unchanged"
+    return 0
+  }
+  $verify = [Action[string,byte[]]]{ param($path,$bytes) $script:directoryCalls.Add("verify") }
+  [GraphCode.ValidationFixtureDirectoryNative]::CreateOwnedWith("D:\owned-new", $getSid, $create, $verify)
+  Assert-Contract (($directoryCalls -join "|") -ceq "create|verify") "verification must follow one successful exclusive create"
+  $executed++
+  foreach ($errorCode in @(183,5)) {
+    $script:directoryCalls.Clear()
+    $failedCreate = [Func[string,byte[],int]]{ param($path,$bytes) return $errorCode }
+    $failure = $null
+    try { [GraphCode.ValidationFixtureDirectoryNative]::CreateOwnedWith("D:\owned-new",$getSid,$failedCreate,$verify) }
+    catch { $failure = $_ }
+    $cause = $failure.Exception
+    while ($cause.InnerException) { $cause = $cause.InnerException }
+    Assert-Contract ($cause -is [ComponentModel.Win32Exception] -and $cause.NativeErrorCode -eq $errorCode -and
+      $directoryCalls.Count -eq 0) "existing/refused creation must preserve native error and never adopt/verify the directory"
+    $executed++
+  }
+  $failVerify = [Action[string,byte[]]]{ param($path,$bytes) throw "actual owner verification failure" }
+  $failure = $null
+  try { [GraphCode.ValidationFixtureDirectoryNative]::CreateOwnedWith("D:\owned-new",$getSid,$create,$failVerify) }
+  catch { $failure = $_ }
+  Assert-Contract ($failure.Exception.Message.Contains("actual owner verification failure")) "owner mismatch must fail without deletion/fallback"
+  $executed++
+  foreach ($path in @("relative", "D:\owned-new\..\other")) {
+    $failure = $null
+    try { [GraphCode.ValidationFixtureDirectoryNative]::CreateOwnedWith($path,$getSid,$create,$verify) }
+    catch { $failure = $_ }
+    Assert-Contract ($null -ne $failure) "invalid fresh target path must refuse before creation"
+    $executed++
+  }
+  $missingSid = [Func[byte[]]]{ return [byte[]]@() }
+  $failure = $null
+  try { [GraphCode.ValidationFixtureDirectoryNative]::CreateOwnedWith("D:\owned-new",$missingSid,$create,$verify) }
+  catch { $failure = $_ }
+  Assert-Contract ($null -ne $failure) "unavailable current user identity must fail"
+  $executed++
+  $nativeSource = Get-Content (Join-Path $PSScriptRoot "..\ValidationFixtureDirectoryNative.cs") -Raw
+  Assert-Contract ($nativeSource.Contains('bool created = CreateDirectoryWithOwner(path, ref attributes);') -and
+    $nativeSource.Contains('int error = created ? 0 : Marshal.GetLastWin32Error();') -and
+    $nativeSource.Contains('pin.Free();') -and $nativeSource.Contains('GetSecurityInfo(handle, 1, 1') -and
+    $nativeSource.Contains('EqualSid(owner, pin.AddrOfPinnedObject())') -and
+    -not ($nativeSource -match 'SetNamedSecurityInfo|SetFileSecurity|AdjustTokenPrivileges|SetAcl')) `
+    "native descriptor lifetime/error/held-directory verification must not edit existing ACLs or enable privileges"
+  $executed++
+  Assert-Contract ($nativeSource.Contains('CreateDirectoryW(path, IntPtr.Zero)')) "existing Create semantics must remain unchanged"
+  $executed++
+  $script:releaseCalls = [Collections.Generic.List[string]]::new()
+  $releases = [Action[]]@(
+    [Action]{ $script:releaseCalls.Add("descriptor"); throw "descriptor free failed" },
+    [Action]{ $script:releaseCalls.Add("pin") },
+    [Action]{ $script:releaseCalls.Add("handle"); throw "handle close failed" }
+  )
+  $primary = [InvalidOperationException]::new("primary owner refusal")
+  [GraphCode.ValidationFixtureDirectoryNative]::ReleaseOwnedWith($primary, $releases)
+  Assert-Contract (($releaseCalls -join "|") -ceq "descriptor|pin|handle" -and
+    $primary.Data["OwnedFixtureReleaseFailures"].InnerExceptions.Count -eq 2 -and
+    $primary.Message -ceq "primary owner refusal") "all cleanup actions must run and retain every failure without replacing primary"
+  $executed++
+  $failure = $null
+  try { [GraphCode.ValidationFixtureDirectoryNative]::ReleaseOwnedWith($null, $releases) } catch { $failure = $_ }
+  Assert-Contract ($null -ne $failure -and $failure.Exception.Message.Contains("Owned fixture resource release failed")) `
+    "native release failure without primary must refuse a success result"
+  $executed++
+  $script:releaseCalls.Clear()
+  [GraphCode.ValidationFixtureDirectoryNative]::ReleaseOwnedWith($null, [Action[]]@([Action]{ $script:releaseCalls.Add("all-released") }))
+  Assert-Contract (($releaseCalls -join "|") -ceq "all-released") "successful release must execute its actual actions"
+  $executed++
+  $verifySource = $nativeSource.Substring($nativeSource.IndexOf("private static void VerifyOwner"))
+  Assert-Contract ($verifySource.Contains("GCHandle pin = default;") -and
+    $verifySource.IndexOf("pin = GCHandle.Alloc") -gt $verifySource.IndexOf("try") -and
+    $verifySource.Contains("if (pin.IsAllocated) pin.Free()") -and
+    $verifySource.Contains("CloseOwnedHandle(handle)") -and
+    $nativeSource.Contains('[DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr LocalFree') -and
+    $nativeSource.Contains("if (remaining == IntPtr.Zero) return;") -and
+    $nativeSource.Contains("Owned LocalFree failed without a native error.")) `
+    "pin allocation failures must still close directory handles and native free failures must remain explicit"
+  $executed++
+  Assert-Contract ($executed -eq 14) "expected fourteen owner-at-creation source/managed cases"
+  Write-Output "Terminal owned directory contracts: PASS executed=$executed source/managed-only nativeCreates=0"
   exit 0
 }
 
@@ -205,6 +316,9 @@ Assert-Contract (-not $source.Contains("app.tick == 6")) `
   "surface recreation still depends on a fixed startup tick"
 
 $harness = Get-Content -LiteralPath (Join-Path $gateRoot "..\..\..\Tools\windows\terminal-gate.ps1") -Raw
+Assert-Contract ($harness.Contains('[GraphCode.ValidationFixtureDirectoryNative]::CreateOwnedByCurrentUser($artifactRoot)') -and
+  $harness.Contains('[GraphCode.ValidationFixtureDirectoryNative]::CreateOwnedByCurrentUser($env:ZMX_DIR)')) `
+  "fresh terminal artifact and configured zmx roots require explicit current-user owner at creation"
 foreach ($token in @(
     "Send-TerminalText",
     "history",

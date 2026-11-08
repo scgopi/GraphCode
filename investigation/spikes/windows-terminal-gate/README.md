@@ -87,6 +87,16 @@ process-image observations are never termination authority.
 `GRAPHCODE_TERMINAL_GATE_INJECT_CLEANUP_FAILURE=1` is a failure-injection
 contract used to prove cleanup errors cannot produce a green result.
 
+The harness creates only its new artifact root and configured ZMX child with
+`ValidationFixtureDirectoryNative.CreateOwnedByCurrentUser`. A creation-time
+security descriptor assigns the token's current user as owner and grants
+inheritable FullControl only to that user. Existing directory collisions or
+reparse parents refuse; the created directory handle's owner is checked before
+launch. There is no post-create SetACL, privilege enabling, or adoption of an
+existing/shared directory. A mismatch preserves the new diagnostic path and
+fails; read-back is not an atomic adversarial-race proof. The pinned provider's
+current-user owner guard stays unchanged.
+
 Every control command has a finite deadline; history/health retries share their
 original 10-second budget rather than resetting it per subprocess. Work is
 bounded at 1800 seconds and seed cleanup shares a separate 9-second reserve.

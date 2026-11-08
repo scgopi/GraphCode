@@ -20,6 +20,9 @@ $assembly = $env:GRAPHCODE_VALIDATION_ASSEMBLY
 if (-not $assembly) { $assembly = & (Join-Path $PSScriptRoot "Build-CompiledValidationRunner.ps1") }
 & (Join-Path $PSScriptRoot "Import-CompiledValidationAssembly.ps1") `
   -AssemblyPath $assembly -RequiredType "GraphCode.Validation.Ownership.OwnedChildSupervisor" | Out-Null
+& (Join-Path $PSScriptRoot "Import-CompiledValidationAssembly.ps1") `
+  -AssemblyPath (Join-Path (Split-Path $assembly) "ValidationFixtureBindings.dll") `
+  -RequiredType "GraphCode.ValidationFixtureDirectoryNative" | Out-Null
 $workClock = [Diagnostics.Stopwatch]::StartNew()
 function Get-TerminalArtifactRoot(
   [Collections.IDictionary] $environment, [string] $processTemp, [string] $nonce,
@@ -35,7 +38,7 @@ function Get-TerminalArtifactRoot(
 }
 $artifactRoot = Get-TerminalArtifactRoot ([Environment]::GetEnvironmentVariables("Process")) `
   ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString("N"))
-$null = New-Item -ItemType Directory -Path $artifactRoot -ErrorAction Stop
+[GraphCode.ValidationFixtureDirectoryNative]::CreateOwnedByCurrentUser($artifactRoot)
 $ownedSessionNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $ownedSeeds = [Collections.Generic.List[object]]::new()
 $launchSequence = 0
@@ -286,6 +289,13 @@ try {
   Assert-PinnedCleanWorktree $WinghosttyRoot $pins.winghostty.sha "Winghostty"
   Assert-PinnedCleanWorktree $ZmxRoot $pins.zmx.sha "zmx"
   $pwsh = Resolve-TerminalApplication "pwsh"
+  $ownerContracts = Invoke-TerminalOwnedCommand $pwsh @(
+    "-NoProfile", "-NonInteractive", "-File", (Join-Path $PSScriptRoot "Tests\TerminalGate.Tests.ps1"),
+    "-OwnedDirectoryContractsOnly") "owner-contracts" 60000
+  if ($ownerContracts.ExitCode -ne 0 -or
+      $ownerContracts.StandardOutput -notmatch 'Terminal owned directory contracts: PASS executed=14 source/managed-only nativeCreates=0') {
+    throw "Canonical owner-at-creation contracts failed or executed an incomplete count"
+  }
   $resourceContracts = Invoke-TerminalOwnedCommand $pwsh @(
     "-NoProfile", "-NonInteractive", "-File", (Join-Path $PSScriptRoot "Tests\TerminalGate.Tests.ps1"),
     "-ResourceCountersOnly") "resource-contracts" 60000
@@ -322,7 +332,7 @@ try {
   if ($lease.Length -gt 232) {
     throw "Terminal owned provider path exceeds the 232-character lease budget; use an admitted shorter TEMP root"
   }
-  $null = New-Item -ItemType Directory -Path $env:ZMX_DIR
+  [GraphCode.ValidationFixtureDirectoryNative]::CreateOwnedByCurrentUser($env:ZMX_DIR)
   foreach ($name in $names) {
     $start = New-TerminalStartInfo $zmx @("--daemon", $name,
       (Join-Path ([Environment]::SystemDirectory) "cmd.exe"), "/Q") $repoRoot
