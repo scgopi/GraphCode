@@ -76,10 +76,43 @@ The gate never calls GraphCode canvas/sidebar code and does not duplicate daemon
 orchestration; the existing Windows daemon remains an independent service.
 Each attach child is spawned with `GRAPHCODE_GATE_CWD`; the first-session
 smoke sends the shell's `cd`/pwd query and verifies the repository root.
-Cleanup checks every `zmx kill` exit, confirms the named registrations and
-reported processes disappear, and fails the gate if cleanup is incomplete.
+The canonical harness starts persistent sessions in separate suspended,
+held-original non-breakaway jobs using the existing `OwnedChildSupervisor`.
+Every spike, provider control/history command, pin query and build command
+uses that same owned-launch API. Spike completion closes only its attach job;
+the separately held zmx session roots survive the restart stages. Cleanup
+terminates only those owned seed jobs and requires root exit, job emptiness,
+both raw-stream EOFs and resource closure. Session names, CIM/ancestry and
+process-image observations are never termination authority.
 `GRAPHCODE_TERMINAL_GATE_INJECT_CLEANUP_FAILURE=1` is a failure-injection
 contract used to prove cleanup errors cannot produce a green result.
+
+Every control command has a finite deadline; history/health retries share their
+original 10-second budget rather than resetting it per subprocess. Work is
+bounded at 1800 seconds and seed cleanup shares a separate 9-second reserve.
+The existing owned supervisor's cleanup jobs each retain their original
+5-second deadline, started together. These limits do not turn OS scheduling
+into a hard latency guarantee.
+
+The spike uses the already-held Windows `Child.id` handle for finite
+`WaitForSingleObject` and `TerminateProcess` calls. It calls normal Child
+finalization only after the original handle signals. Unknown attach exit
+retains the Child/app and emits the existing lifetime-retention sentinel;
+the supervisor observes it and refuses termination/resource closure. Final
+teardown proves both attach exits before provider destruction/deinitialization
+and runs before a successful return. Restart cannot launch a replacement after
+failed retirement. Provider destruction/deinitialization failures remain errors.
+
+All independent raw stdout/stderr logs remain under the reported
+`TERMINAL_GATE_ARTIFACT_ROOT`, including failure and partial output. The final
+smoke/stress PASS is emitted only after cleanup. Resource diagnostics use the
+existing supervisor's retained-root `ReadResources` API: handle count and
+private bytes come from native queries on that original live handle, with
+PID/generation/liveness guards before and after. The active spike and all three
+held zmx roots are sampled before spike completion; snapshot IDs have a unique
+monotonic sequence even when phase labels repeat. A failed/exited-root query
+refuses the measurement, never returns zero counters or reopens a PID.
+The sample label is active invocation, not a claim of post-typed-workload memory.
 
 The provider owns the rendering/input/IME/clipboard/per-monitor-DPI/UIA
 semantics. The gate owns the caller-side renderer lifecycle, focus policy,
@@ -101,6 +134,12 @@ GREEN after the Zig host, provider pins, and smoke harness were added.
 contract check. The harness sends shell commands through zmx, verifies
 `zmx history --vt` before and after independent and same-session restarts, and
 runs the destroy/recreate stress cycle.
+`src\AttachCleanup.zig` supplies the pure retained-handle/restart/teardown
+contracts. Canonical gate builds run this root with a positive test-count
+assertion before the native workload; the existing PowerShell entry point
+also checks the source-bound owned command and cleanup orchestration.
+Pure/injected tests and a successful compile are not real-provider runtime
+qualification of the repaired harness.
 
 At the accepted provider SHA, the Winghostty API lifecycle, input, pixel cell
 render, and three-process renderer stress contracts pass. GraphCode full

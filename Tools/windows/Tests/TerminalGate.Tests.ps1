@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
   [switch] $List,
+  [switch] $ResourceCountersOnly,
   [string] $ProductPinsPath,
   [string] $GatePinsPath
 )
@@ -26,6 +27,65 @@ function Assert-Contract([object] $condition, [string] $message) {
   if ($values.Count -ne 1 -or -not [bool] $values[0]) {
     throw "Windows terminal gate contract: $message"
   }
+}
+
+if ($ResourceCountersOnly) {
+  if ([string]::IsNullOrWhiteSpace($env:GRAPHCODE_VALIDATION_ASSEMBLY)) {
+    throw "Resource contracts require the explicit current source-bound compiled validation assembly"
+  }
+  & (Join-Path $PSScriptRoot "..\Import-CompiledValidationAssembly.ps1") `
+    -AssemblyPath $env:GRAPHCODE_VALIDATION_ASSEMBLY `
+    -RequiredType "GraphCode.Validation.Ownership.OwnedChildSupervisor" | Out-Null
+  $positive = [GraphCode.Validation.Ownership.OwnedChildSupervisor]::ValidateResourceSnapshot(42, 123, 42, 123, $false, 10, 65536)
+  Assert-Contract ($positive.ProcessId -eq 42 -and $positive.CreationFileTime -eq 123 -and
+    $positive.Handles -eq 10 -and $positive.PrivateBytes -eq 65536) "actual resource counter fields were lost"
+  $executed = 1
+  foreach ($arguments in @(
+      @(0, 123, 42, 123, $false, 10, 65536),
+      @(42, 0, 42, 123, $false, 10, 65536),
+      @(42, 123, 99, 123, $false, 10, 65536),
+      @(42, 123, 42, 124, $false, 10, 65536),
+      @(42, 123, 42, 123, $true, 10, 65536),
+      @(42, 123, 42, 123, $false, 0, 65536),
+      @(42, 123, 42, 123, $false, 10, 0),
+      @(42, 123, 42, 123, $false, 10, [ulong]::MaxValue)
+    )) {
+    $failure = $null
+    try {
+      [GraphCode.Validation.Ownership.OwnedChildSupervisor]::ValidateResourceSnapshot(
+        $arguments[0], $arguments[1], $arguments[2], $arguments[3], $arguments[4], $arguments[5], $arguments[6]) | Out-Null
+    } catch { $failure = $_ }
+    Assert-Contract ($null -ne $failure -and $failure.Exception.Message.Contains("Held original resource identity or counters are invalid")) `
+      "invalid metric identity/exit/counter must be refused"
+    $executed++
+  }
+  $resourceSource = Get-Content (Join-Path $PSScriptRoot "..\ValidationRunner\Ownership\OwnedChildSupervisor.cs") -Raw
+  Assert-Contract ($resourceSource.Contains('K32GetProcessMemoryInfo(root, ref counters, counters.Size)') -and
+    $resourceSource.Contains('GetProcessHandleCount(root, out uint handles)') -and
+    $resourceSource.Contains('Marshal.SizeOf<ProcessMemoryCounters>()') -and
+    ([regex]::Matches($resourceSource, 'RequireResourceRoot\(\);')).Count -eq 2 -and
+    -not $resourceSource.Contains('GetProcessById') -and -not $resourceSource.Contains('OpenProcess(')) `
+    "resource native queries must use only the original held root with exact struct size and live identity guards"
+  $executed++
+  $type = [GraphCode.Validation.Ownership.OwnedChildSupervisor]
+  $memoryType = $type.GetNestedType("ProcessMemoryCounters", [Reflection.BindingFlags]::NonPublic)
+  $sizeOfType = [Runtime.InteropServices.Marshal].GetMethod("SizeOf", [type[]]@([type]))
+  $memorySize = $sizeOfType.Invoke($null, @($memoryType))
+  $query = $type.GetMethod("K32GetProcessMemoryInfo", [Reflection.BindingFlags]'Static,NonPublic')
+  $handleQuery = $type.GetMethod("GetProcessHandleCount", [Reflection.BindingFlags]'Static,NonPublic')
+  Assert-Contract ($null -ne $memoryType -and $memoryType.IsLayoutSequential -and
+    $memorySize -eq $(if ([IntPtr]::Size -eq 8) { 80 } else { 44 }) -and
+    $query.ReturnType -eq [bool] -and $handleQuery.ReturnType -eq [bool] -and
+    $query.GetParameters()[0].ParameterType -eq [IntPtr] -and
+    $handleQuery.GetParameters()[0].ParameterType -eq [IntPtr] -and
+    $handleQuery.GetParameters()[1].IsOut -and
+    $query.GetCustomAttributes([Runtime.InteropServices.DllImportAttribute], $false)[0].SetLastError -and
+    $handleQuery.GetCustomAttributes([Runtime.InteropServices.DllImportAttribute], $false)[0].SetLastError) `
+    "compiled metric native signatures and architecture-correct structure size must remain exact"
+  $executed++
+  Assert-Contract ($executed -eq 11) "expected eleven source/managed held-resource cases"
+  Write-Output "Terminal held resource counters: PASS executed=$executed source/managed-only"
+  exit 0
 }
 
 foreach ($path in @(
@@ -146,16 +206,17 @@ Assert-Contract (-not $source.Contains("app.tick == 6")) `
 
 $harness = Get-Content -LiteralPath (Join-Path $gateRoot "..\..\..\Tools\windows\terminal-gate.ps1") -Raw
 foreach ($token in @(
-    "zmx send",
+    "Send-TerminalText",
     "history",
     "--vt",
     "Assert-ZmxSessionHealthy",
-    "pwd",
+    "pwd/cwd",
     "same-session restart",
     "Assert-PinnedCleanWorktree",
-    "status --porcelain",
-    "Get-CimInstance",
-    "Get-ZmxSessionProcessIds",
+    '"status", "--porcelain"',
+    "OwnedChildSupervisor",
+    "Start-TerminalOwnedChild",
+    "Complete-TerminalSeeds",
     "RedirectStandardOutput",
     "RedirectStandardError",
     "NewGuid",
@@ -170,6 +231,195 @@ foreach ($token in @(
 }
 Assert-Contract (-not $harness.Contains("& `$zmx list")) `
   "smoke harness still performs an unbounded zmx list"
+Assert-Contract (-not ($harness -match 'Get-CimInstance|Get-ZmxSessionProcessIds|Get-ProcessTreeIds|Stop-Process|\.WaitForExit\(\)')) `
+  "terminal harness must not discover cleanup authority or wait without a deadline"
+Assert-Contract (-not $harness.Contains('Remove-Item -LiteralPath $path')) `
+  "terminal harness must retain original stdout and stderr on failure"
+Assert-Contract ($harness.Contains('HoldRetainedResourcesAsync') -and
+  $harness.Contains('CompleteAsync().GetAwaiter().GetResult()') -and
+  $harness.Contains('StopAsync($primary)') -and
+  $harness.Contains('WaitAll($tasks.ToArray(), 9000)') -and
+  $harness.IndexOf('Windows terminal gate smoke/stress: PASS') -gt $harness.IndexOf('finally {')) `
+  "terminal success must follow held-job cleanup, with shared reserve and UNKNOWN hold"
+Assert-Contract ($harness.Contains('"test", "src\AttachCleanup.zig"') -and
+  $harness.Contains('All [1-9][0-9]* tests passed')) "pure attach contracts must run in canonical gate builds with a positive count"
+Assert-Contract ($source.Contains('AttachCleanup.stopWith(api, child.id)') -and
+  $source.Contains('c.WaitForSingleObject') -and $source.Contains('c.TerminateProcess') -and
+  -not $source.Contains('child.kill() catch {}') -and -not $source.Contains('child.wait() catch {}') -and
+  $source.Contains('AttachCleanup.cleanupWith(&api)') -and
+  $source.Contains('try cleanup(app);') -and $source.Contains('retainUnknownAttach')) `
+  "spike must retain unknown child authority and require bounded teardown before success"
+
+$terminalAst = [Management.Automation.Language.Parser]::ParseFile(
+  (Join-Path $repoRoot "Tools\windows\terminal-gate.ps1"), [ref]$null, [ref]$null)
+foreach ($name in @("Get-TerminalRemaining", "New-TerminalStartInfo", "Invoke-TerminalOwnedCommand",
+    "Complete-TerminalSeeds", "Invoke-GateProcess", "Write-OwnedResourceMetrics")) {
+  $definition = $terminalAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+  }, $true)
+  Assert-Contract ($null -ne $definition) "missing canonical owned terminal helper: $name"
+  . ([scriptblock]::Create($definition.Extent.Text))
+}
+$script:terminalOwnershipCases = 0
+function Test-TerminalOwnership([scriptblock] $case) {
+  & $case
+  $script:terminalOwnershipCases++
+}
+Test-TerminalOwnership {
+  $workClock = @{ ElapsedMilliseconds = 1794999L }
+  Assert-Contract ((Get-TerminalRemaining 5000) -eq 1) "shared terminal work clock must clamp each call"
+  $workClock.ElapsedMilliseconds = 1795000L
+  $failure = $null
+  try { Get-TerminalRemaining 5000 } catch { $failure = $_ }
+  Assert-Contract ($null -ne $failure) "expired terminal clock must refuse another command"
+}
+Test-TerminalOwnership {
+  $info = New-TerminalStartInfo $PSCommandPath @("one argument", 'literal"quote') $repoRoot.Path
+  Assert-Contract ($info.UseShellExecute -eq $false -and $info.RedirectStandardOutput -and
+    $info.RedirectStandardError -and $info.ArgumentList.Count -eq 2 -and
+    $info.ArgumentList[0] -ceq "one argument" -and $info.ArgumentList[1] -ceq 'literal"quote') `
+    "owned child must preserve argv boundaries and independent raw stream capture"
+}
+Test-TerminalOwnership {
+  $script:terminalStartCalled = 0
+  $workClock = @{ ElapsedMilliseconds = 0L }
+  function Start-TerminalOwnedChild($start, $role, $milliseconds) {
+    Assert-Contract ($role -ceq "history" -and $milliseconds -eq 1234) "owned command must preserve its supplied remaining deadline"
+    $script:terminalStartCalled++
+    $child = [pscustomobject]@{}
+    $child | Add-Member ScriptMethod CompleteAsync {
+      return [Threading.Tasks.Task]::FromResult([object]@{ ExitCode=0; StandardOutput="retained"; StandardError="separate" })
+    }
+    return $child
+  }
+  $result = Invoke-TerminalOwnedCommand $PSCommandPath @("history", "exact session") "history" 1234
+  Assert-Contract ($terminalStartCalled -eq 1 -and $result.StandardOutput -ceq "retained" -and
+    $result.StandardError -ceq "separate") "one owned command must consume its original completion only once"
+}
+foreach ($failCleanup in @($false, $true)) {
+  Test-TerminalOwnership {
+    $ownedSeeds = [Collections.Generic.List[object]]::new()
+    $script:terminalStops = 0
+    $cleanupUnproven = $false
+    $primary = [InvalidOperationException]::new("original failure")
+    foreach ($index in 0..2) {
+      $child = [pscustomobject]@{ Fail = ($failCleanup -and $index -eq 1) }
+      $child | Add-Member ScriptMethod StopAsync {
+        param($original)
+        $script:terminalStops++
+        if ($this.Fail) {
+          return [Threading.Tasks.Task]::FromException[object]([InvalidOperationException]::new("held job refusal"))
+        }
+        return [Threading.Tasks.Task]::FromResult([object]@{ CanRelease=$true; ResourcesClosed=$true })
+      }
+      $ownedSeeds.Add(@{ child=$child })
+    }
+    Complete-TerminalSeeds $primary
+    Assert-Contract ($terminalStops -eq 3 -and
+      ($null -ne $primary.Data["TerminalCleanupFailure"]) -eq $failCleanup) `
+      "all independently held seeds must be cleaned and cleanup errors retained on the original failure"
+  }
+}
+Test-TerminalOwnership {
+  $ownedSeeds = @(@{ child=[pscustomobject]@{} }) * 3
+  $ownedSeeds[0].child | Add-Member ScriptMethod Observe { return @{ RootExited=$true; ActiveJobProcesses=0 } }
+  function Invoke-TerminalOwnedCommand { throw "UNEXPECTED_SPIKE_LAUNCH" }
+  $failure = $null
+  try { Invoke-GateProcess @("--smoke") "refused" } catch { $failure = $_ }
+  Assert-Contract ($failure.Exception.Message.Contains("Original terminal seed root is not live")) `
+    "spike must refuse a dead original seed instead of silently recreating the session"
+}
+Test-TerminalOwnership {
+  $ownedSeeds = [Collections.Generic.List[object]]::new()
+  $script:cleanupUnproven = $false
+  $child = [pscustomobject]@{}
+  $child | Add-Member ScriptMethod StopAsync {
+    param($original)
+    return [Threading.Tasks.Task]::FromResult([object]@{ CanRelease=$false; ResourcesClosed=$false })
+  }
+  $ownedSeeds.Add(@{ child=$child })
+  $original = [InvalidOperationException]::new("primary retained")
+  Complete-TerminalSeeds $original
+  Assert-Contract ($script:cleanupUnproven -and $null -ne $original.Data["TerminalCleanupFailure"] -and
+    $original.Message -ceq "primary retained") "unproved cleanup must retain original failure and select lifetime hold"
+}
+Assert-Contract ($script:terminalOwnershipCases -eq 7) "expected seven owned terminal source/managed cases"
+Write-Output "Terminal ownership contracts: PASS executed=$script:terminalOwnershipCases source/managed-only"
+
+$script:terminalMetricCases = 0
+function Test-TerminalMetrics([scriptblock] $case) {
+  & $case
+  $script:terminalMetricCases++
+}
+Test-TerminalMetrics {
+  $script:metricSequence = 0
+  $sessionPrefix = "synthetic-owned-metrics"
+  $ownedSessionNames = @("synthetic-session")
+  $child = [pscustomobject]@{}
+  $child | Add-Member ScriptMethod ReadResources {
+    return @{ ProcessId=42; CreationFileTime=123; Handles=10; PrivateBytes=65536 }
+  }
+  $ownedSeeds = @(@{ child=$child }) * 3
+  $script:metricLines = [Collections.Generic.List[string]]::new()
+  function Write-Host([string]$Object) { $script:metricLines.Add($Object) }
+  Write-OwnedResourceMetrics "terminal-gate:typed-input" $child
+  Write-OwnedResourceMetrics "terminal-gate:typed-input" $child
+  $first = $metricLines[0].Substring("PRODUCT_RESOURCE_METRICS_JSON=".Length) | ConvertFrom-Json
+  $second = $metricLines[1].Substring("PRODUCT_RESOURCE_METRICS_JSON=".Length) | ConvertFrom-Json
+  Assert-Contract ($metricLines.Count -eq 2 -and $first.snapshotId -cne $second.snapshotId -and
+    @($first.processes).Count -eq 4 -and
+    @($first.processes.role) -ccontains "winghostty" -and @($first.processes.role) -ccontains "zmx" -and
+    @($first.processes | Where-Object { $_.handles -ne 10 -or $_.privateBytes -ne 65536 }).Count -eq 0) `
+    "actual counter fields and both hardening roles must survive with unique repeated-phase snapshots"
+}
+Test-TerminalMetrics {
+  $child = [pscustomobject]@{}
+  $child | Add-Member ScriptMethod ReadResources { throw "original held metric query failed" }
+  $ownedSeeds = @(@{ child=$child }) * 3
+  $sessionPrefix = "synthetic-refusal"
+  $ownedSessionNames = @()
+  $script:metricLines = [Collections.Generic.List[string]]::new()
+  function Write-Host([string]$Object) { $script:metricLines.Add($Object) }
+  $failure = $null
+  try { Write-OwnedResourceMetrics "terminal-gate:stress" $child } catch { $failure = $_ }
+  Assert-Contract ($metricLines.Count -eq 0 -and $failure.Exception.Message.Contains("held metric query failed")) `
+    "failed original metric reads must not publish zero-filled or empty success evidence"
+}
+Test-TerminalMetrics {
+  $function = $terminalAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq "Invoke-GateProcess"
+  }, $true).Extent.Text
+  Assert-Contract ($function.IndexOf('Write-OwnedResourceMetrics $phase $child') -lt
+    $function.IndexOf('$child.CompleteAsync()') -and $function.Contains('StopAsync($primary)') -and
+    $function.Contains('TerminalMetricCleanupFailure')) `
+    "active spike metrics must precede completion and metric failures preserve owned cleanup"
+}
+Test-TerminalMetrics {
+  $app = $PSCommandPath
+  $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
+  $assembly = "synthetic-source-bound-assembly"
+  $workClock = @{ ElapsedMilliseconds=0 }
+  $script:metricCleanupCalls = 0
+  $seed = [pscustomobject]@{}
+  $seed | Add-Member ScriptMethod Observe { return @{ RootExited=$false; ActiveJobProcesses=1 } }
+  $ownedSeeds = @(@{ child=$seed }) * 3
+  $child = [pscustomobject]@{}
+  $child | Add-Member ScriptMethod StopAsync {
+    param($original)
+    $script:metricCleanupCalls++
+    return [Threading.Tasks.Task]::FromResult([object]@{ CanRelease=$true; ResourcesClosed=$true })
+  }
+  function Start-TerminalOwnedChild { return $child }
+  function Write-OwnedResourceMetrics { throw "actual metric refusal" }
+  $failure = $null
+  try { Invoke-GateProcess @("--smoke") "terminal-gate:typed-input" } catch { $failure = $_ }
+  Assert-Contract ($metricCleanupCalls -eq 1 -and $failure.Exception.Message -ceq "actual metric refusal") `
+    "pre-completion metric refusal must clean its original spike once and preserve the primary failure"
+}
+Assert-Contract ($script:terminalMetricCases -eq 4) "expected four managed metric orchestration cases"
+Write-Output "Terminal metric contracts: PASS executed=$script:terminalMetricCases source/managed-only"
 
 $runner = Get-Content -LiteralPath (Join-Path $gateRoot "..\..\..\Tools\windows\validate.ps1") -Raw
 foreach ($token in @(
