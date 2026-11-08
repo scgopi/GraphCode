@@ -849,6 +849,36 @@ so the two run in parallel.
 - `Assert-ProviderCheckout.ps1` re-verifies each provider's pinned SHA and
   clean tree after a restore.
 
+**Official gobject prefetch for the required Swift real-zmx test.**
+`Initialize-GobjectPackageCache.ps1` downloads only official release asset
+493157198 through GitHub's asset API using the existing read-only job token.
+It requires 1,867,503 bytes and SHA-256
+`D572886E8672A46AC6C740E3FE3A1F1C9D9A1A9F09D59FD62328A41FCDB70196`
+before the pinned Zig 0.16.0 performs a local, no-save fetch. Network and
+fetch deadlines are 60 and 120 seconds respectively, without retries.
+
+Zig 0.16.0 requires a build-root context even for `fetch`, so this helper uses
+a fresh private directory with a zero-byte `build.zig`, not a provider checkout.
+The fetch must return exactly
+`gobject-0.3.2-Skun7F6HogCMynX2JqeSHS7xr-8pK4ob-qRFIcEasVi3`
+with complete original held-job cleanup. Only then does it publish its fresh
+job-owned `ZIG_GLOBAL_CACHE_DIR`. Zig's normal provider build reads the
+hash-addressed `p/HASH.tar.gz` there before a remote fetch and verifies the
+package content again. No local cache is transferred, manifest or pin is
+changed, or acquired build script is executed during prefetch. The existing
+required `Test-RealZmxEmptyList.ps1` build/test remains unchanged and mandatory.
+The Swift job compiles existing ownership bindings but does not execute another
+validation runner. Verification receipts, private context writes and original
+worker streams are retained on failure as well as success. The headless
+helper announces and flushes the existing root-retention marker before an
+unknown-ownership lifetime hold. Its managed propagation contract uses the
+source-bound observer (`WindowsCiTopology.Tests.ps1 -RetentionPropagationOnly`
+with `GRAPHCODE_VALIDATION_ASSEMBLY` set to the current canonical build);
+it does not start a native lifetime hold. The headless
+byte/hash, argument transport, refusal and job-order contracts run through
+`pwsh -NoProfile -File Tools\windows\Tests\WindowsCiTopology.Tests.ps1`;
+they do not establish a successful current-head provider build or XCTest run.
+
 **Timeouts and cancellation.**
 - Every Windows job has a `timeout-minutes`.
 - A newer push to the same pull request cancels the older in-flight run.
