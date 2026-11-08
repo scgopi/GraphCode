@@ -585,6 +585,14 @@ app instance using a child-only `GRAPHCODE_SUPPORT_DIR` environment. The child
 does not inherit `GRAPHCODE_DAEMON_PIPE`: it derives its daemon endpoint from
 the new support directory rather than reusing the parent's explicit override.
 The parent's environment and other inherited variables remain unchanged.
+The native New Workspace sheet shows the resolved directory, a separate-window
+diagram titled with the typed name, and workspace-isolation details. Invalid or
+colliding names stay inline with Create & Open disabled; an empty draft stays
+quiet, and Cancel discards it. Ctrl+A selects the complete focused name field
+without changing ordinary typing or AltGr handling. Creation and launch still
+use the existing workspace lifecycle and identity guards. Windows keeps its
+existing ASCII normalization and 48-character limit rather than adopting the
+macOS transliteration and truncation rules.
 Selecting the current workspace does nothing; selecting an identified running
 workspace restores its exact window rather than the first GraphCode window.
 `Ctrl+Alt+PageUp` / `Ctrl+Alt+PageDown` and Previous/Next Workspace cycle only
