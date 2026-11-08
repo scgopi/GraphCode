@@ -10189,12 +10189,22 @@ pub const App = struct {
         defer result.deinit(self.allocator);
         if (!self.ensureWorkspaceIdentity()) return;
         var workspace = WorkspaceLifecycle.create(self.allocator, result.name, home) catch |err| {
-            self.setStatus(switch (err) {
-                error.EmptyName => "Workspace name is required",
-                error.NameTooLong => "Workspace name is too long",
-                error.NameTaken, error.PathAlreadyExists => "That workspace already exists",
-                else => "Workspace could not be created",
-            });
+            const problem: ?WorkspaceLifecycle.NameError = switch (err) {
+                error.EmptyName => error.EmptyName,
+                error.InvalidName => error.InvalidName,
+                error.NameTooLong => error.NameTooLong,
+                error.NameTaken, error.PathAlreadyExists => error.NameTaken,
+                else => null,
+            };
+            if (problem) |name_problem| {
+                const message = WorkspaceLifecycle.nameProblemMessage(self.allocator, name_problem, result.name) catch |message_error| {
+                    std.log.err("Workspace creation failed ({s}); naming error message failed: {s}", .{ @errorName(err), @errorName(message_error) });
+                    self.setStatus("Workspace name error could not be displayed");
+                    return;
+                };
+                defer self.allocator.free(message);
+                self.setStatus(message);
+            } else self.setStatus("Workspace could not be created");
             return;
         };
         defer workspace.deinit(self.allocator);

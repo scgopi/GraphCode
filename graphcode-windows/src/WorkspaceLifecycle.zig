@@ -132,6 +132,19 @@ pub const NameError = error{
     NameTaken,
 };
 
+pub fn nameProblemMessage(allocator: std.mem.Allocator, problem: NameError, input: []const u8) ![]u8 {
+    return switch (problem) {
+        error.EmptyName => allocator.dupe(u8, "Give the workspace a name — letters and numbers."),
+        error.InvalidName => allocator.dupe(u8, "Use letters or numbers in the workspace name"),
+        error.NameTooLong => allocator.dupe(u8, "Workspace name is too long"),
+        error.NameTaken => message: {
+            const slug = try normalizeCreationName(allocator, input);
+            defer allocator.free(slug);
+            break :message std.fmt.allocPrint(allocator, "A workspace named {s} already exists.", .{slug});
+        },
+    };
+}
+
 pub fn defaultPath(allocator: std.mem.Allocator) ![]u8 {
     const home = std.process.getEnvVarOwned(allocator, "USERPROFILE") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return error.UserProfileMissing,
@@ -640,6 +653,34 @@ test "workspace creation naming parity closes ICU failure handles and retains ac
     try std.testing.expectError(error.WorkspaceNamingCharactersFailed, icu.characters(&.{'a'}));
     try std.testing.expectEqual(@as(usize, 1), Probe.break_closed);
     try std.testing.expectEqual(@as(i32, 2), icu.last_status);
+}
+
+test "workspace creation naming messages use macOS empty and actual creation collision slugs" {
+    const cases = [_]struct { problem: NameError, input: []const u8, message: []const u8 }{
+        .{ .problem = error.EmptyName, .input = " \t", .message = "Give the workspace a name — letters and numbers." },
+        .{ .problem = error.NameTaken, .input = "Café Zürich", .message = "A workspace named cafe-zurich already exists." },
+        .{ .problem = error.NameTaken, .input = "a" ** 31 ++ " bb", .message = "A workspace named " ++ "a" ** 31 ++ "- already exists." },
+        .{ .problem = error.InvalidName, .input = "\xff", .message = "Use letters or numbers in the workspace name" },
+        .{ .problem = error.NameTooLong, .input = "long", .message = "Workspace name is too long" },
+    };
+    for (cases) |case| {
+        const message = try nameProblemMessage(std.testing.allocator, case.problem, case.input);
+        defer std.testing.allocator.free(message);
+        try std.testing.expectEqualStrings(case.message, message);
+    }
+}
+
+test "workspace creation naming messages release every allocation and propagate failures" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            for ([_]NameError{ error.EmptyName, error.InvalidName, error.NameTooLong, error.NameTaken }) |problem| {
+                const message = try nameProblemMessage(allocator, problem, "東京 Café");
+                defer allocator.free(message);
+                try std.testing.expect(message.len != 0);
+            }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
 test "workspace creation naming parity preserves existing raw directory identities" {

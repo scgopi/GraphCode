@@ -1,5 +1,6 @@
 const std = @import("std");
 const Lifecycle = @import("WorkspaceLifecycle.zig");
+const SketchPromotion = @import("SketchPromotion.zig");
 const Sheet = @import("SheetFramework.zig");
 const Dpi = @import("Dpi.zig");
 const Win32 = @import("Win32.zig");
@@ -25,37 +26,44 @@ pub const State = struct {
     validator: Validator = &Lifecycle.validateCreationName,
     draft: []u8 = &.{},
     path: []u8 = &.{},
-    problem: ?[]const u8 = null,
+    problem: ?[]u8 = null,
+    preview: []const u8 = "Client Work",
 
     pub fn deinit(self: *State) void {
         self.allocator.free(self.draft);
         self.allocator.free(self.path);
+        if (self.problem) |problem| self.allocator.free(problem);
     }
 
     pub fn update(self: *State, input: []const u8) !void {
         const draft = try self.allocator.dupe(u8, input);
         errdefer self.allocator.free(draft);
+        const typed = try SketchPromotion.trim(draft, false);
         var path: []u8 = &.{};
         errdefer self.allocator.free(path);
-        var problem: ?[]const u8 = null;
-        if (std.mem.trim(u8, input, " \t\r\n").len != 0) {
+        var problem: ?[]u8 = null;
+        errdefer if (problem) |message| self.allocator.free(message);
+        if (input.len != 0) {
             if (self.validator(self.allocator, input, self.home)) |normalized| {
                 defer self.allocator.free(normalized);
                 path = try Lifecycle.workspacePath(self.allocator, normalized, self.home);
             } else |err| {
-                problem = switch (err) {
-                    error.EmptyName, error.InvalidName => "Use letters or numbers in the workspace name",
-                    error.NameTooLong => "Workspace name is too long",
-                    error.NameTaken, error.PathAlreadyExists => "That workspace already exists",
+                problem = try Lifecycle.nameProblemMessage(self.allocator, switch (err) {
+                    error.EmptyName => error.EmptyName,
+                    error.InvalidName => error.InvalidName,
+                    error.NameTooLong => error.NameTooLong,
+                    error.NameTaken, error.PathAlreadyExists => error.NameTaken,
                     else => return err,
-                };
+                }, input);
             }
         }
         self.allocator.free(self.draft);
         self.allocator.free(self.path);
+        if (self.problem) |message| self.allocator.free(message);
         self.draft = draft;
         self.path = path;
         self.problem = problem;
+        self.preview = if (typed.len == 0) "Client Work" else typed;
     }
 
     pub fn canCreate(self: *const State) bool {
@@ -63,8 +71,7 @@ pub const State = struct {
     }
 
     pub fn previewName(self: *const State) []const u8 {
-        const typed = std.mem.trim(u8, self.draft, " \t\r\n");
-        return if (typed.len == 0) "Client Work" else typed;
+        return self.preview;
     }
 
     pub fn submit(self: *State) !?Result {
@@ -524,13 +531,158 @@ const TestValidation = struct {
 test "new workspace empty draft is quiet and cannot submit" {
     var state = TestValidation.state();
     defer state.deinit();
-    try state.update("   ");
+    try state.update("");
     try std.testing.expect(state.problem == null);
     try std.testing.expect(!state.canCreate());
     try std.testing.expectEqualStrings("Client Work", state.previewName());
     try std.testing.expectEqualStrings("", state.path);
     try std.testing.expect((try state.submit()) == null);
     try std.testing.expectEqual(@as(usize, 0), TestValidation.calls);
+}
+
+test "new workspace naming whitespace parity matches actual Foundation preview and raw validation" {
+    const cases = [_]struct { input: []const u8, preview: []const u8, empty_slug: bool }{
+        .{ .input = "", .preview = "Client Work", .empty_slug = true },
+        .{ .input = " ", .preview = "Client Work", .empty_slug = true },
+        .{ .input = "\t", .preview = "Client Work", .empty_slug = true },
+        .{ .input = "\n", .preview = "\n", .empty_slug = true },
+        .{ .input = "\r\n", .preview = "\r\n", .empty_slug = true },
+        .{ .input = "\u{85}", .preview = "\u{85}", .empty_slug = true },
+        .{ .input = "\u{200b}", .preview = "Client Work", .empty_slug = true },
+        .{ .input = "\u{200b}Café\u{200b}", .preview = "Café", .empty_slug = false },
+        .{ .input = "\u{a0}\u{2000}Client Work\u{3000}\t", .preview = "Client Work", .empty_slug = false },
+        .{ .input = "\u{2028}Café\u{2029}", .preview = "\u{2028}Café\u{2029}", .empty_slug = false },
+        .{ .input = "\u{202f}東京\u{205f}", .preview = "東京", .empty_slug = false },
+        .{ .input = "\u{180e}Café\u{feff}", .preview = "\u{180e}Café\u{feff}", .empty_slug = false },
+    };
+    try std.testing.expectEqual(@as(usize, 12), cases.len);
+    for (cases) |case| {
+        var state = TestValidation.state();
+        defer state.deinit();
+        try state.update(case.input);
+        try std.testing.expectEqualStrings(case.input, state.draft);
+        try std.testing.expectEqualStrings(case.preview, state.previewName());
+        if (case.empty_slug) {
+            try std.testing.expect(!state.canCreate());
+            try std.testing.expectEqualStrings("", state.path);
+            if (case.input.len == 0) {
+                try std.testing.expect(state.problem == null);
+            } else {
+                try std.testing.expect(state.problem != null);
+                try std.testing.expectEqualStrings("Give the workspace a name — letters and numbers.", state.problem.?);
+            }
+            try std.testing.expect((try state.submit()) == null);
+        } else {
+            try std.testing.expect(state.canCreate());
+            try std.testing.expect(state.problem == null);
+            var result = (try state.submit()).?;
+            defer result.deinit(std.testing.allocator);
+            try std.testing.expectEqualStrings(case.input, result.name);
+        }
+        try std.testing.expectEqual(@as(usize, if (case.input.len == 0) 0 else 2), TestValidation.calls);
+    }
+}
+
+test "new workspace naming whitespace parity trims all19Foundation whitespace scalars but not newlines" {
+    const spaces = [_]u21{ 0x09, 0x20, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x200b, 0x202f, 0x205f, 0x3000 };
+    try std.testing.expectEqual(@as(usize, 19), spaces.len);
+    for (spaces) |scalar| {
+        var encoded: [4]u8 = undefined;
+        const count = try std.unicode.utf8Encode(scalar, &encoded);
+        var buffer: [64]u8 = undefined;
+        const input = try std.fmt.bufPrint(&buffer, "{s}Client Work{s}", .{ encoded[0..count], encoded[0..count] });
+        var state = TestValidation.state();
+        defer state.deinit();
+        try state.update(input);
+        try std.testing.expectEqualStrings("Client Work", state.previewName());
+        try std.testing.expect(state.canCreate());
+    }
+    for ([_]u21{ 0x0a, 0x0b, 0x0c, 0x0d, 0x85, 0x2028, 0x2029, 0x180e, 0xfeff }) |scalar| {
+        var encoded: [4]u8 = undefined;
+        const count = try std.unicode.utf8Encode(scalar, &encoded);
+        var buffer: [64]u8 = undefined;
+        const input = try std.fmt.bufPrint(&buffer, "{s}Client Work{s}", .{ encoded[0..count], encoded[0..count] });
+        var state = TestValidation.state();
+        defer state.deinit();
+        try state.update(input);
+        try std.testing.expectEqualStrings(input, state.previewName());
+        try std.testing.expect(state.canCreate());
+    }
+}
+
+test "new workspace naming whitespace parity reports submit create races with actual normalized slug" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const home = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+    var state = State{ .allocator = allocator, .home = home, .current_name = "Default" };
+    defer state.deinit();
+    try state.update("Café Zürich");
+    var result = (try state.submit()).?;
+    defer result.deinit(allocator);
+    var other = try Lifecycle.create(allocator, "CAFE ZURICH", home);
+    defer other.deinit(allocator);
+    try std.testing.expectError(error.NameTaken, Lifecycle.create(allocator, result.name, home));
+    try state.update(result.name);
+    try std.testing.expectEqualStrings("A workspace named cafe-zurich already exists.", state.problem.?);
+    const race_message = try Lifecycle.nameProblemMessage(allocator, error.NameTaken, result.name);
+    defer allocator.free(race_message);
+    try std.testing.expectEqualStrings(state.problem.?, race_message);
+    try std.testing.expect(!state.canCreate());
+    try std.testing.expectEqualStrings("", state.path);
+    try std.testing.expect((try state.submit()) == null);
+}
+
+test "new workspace naming whitespace parity owns preview problem and collision lifetimes on allocation failure" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            TestValidation.collision = false;
+            TestValidation.failure = false;
+            var state = State{ .allocator = allocator, .home = "C:\\OwnedHome", .current_name = "Default", .validator = &TestValidation.validate };
+            defer state.deinit();
+            try state.update("\u{200b}Client Work\u{200b}");
+            try std.testing.expectEqualStrings("Client Work", state.previewName());
+            try state.update(" \t");
+            try std.testing.expect(state.problem != null);
+            TestValidation.collision = true;
+            try state.update("東京");
+            try std.testing.expectEqualStrings("A workspace named dong-jing already exists.", state.problem.?);
+            try state.update("");
+            try std.testing.expect(state.problem == null);
+            try std.testing.expectEqualStrings("Client Work", state.previewName());
+            try std.testing.expect(!state.canCreate());
+        }
+    };
+    defer TestValidation.collision = false;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+test "new workspace naming whitespace parity invalid drafts never create directories or rewrite valid state" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const home = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+    var state = State{ .allocator = allocator, .home = home, .current_name = "Default" };
+    defer state.deinit();
+    for ([_][]const u8{ "", " \t", "\r\n", "\u{200b}", "///" }) |input| {
+        try state.update(input);
+        try std.testing.expect((try state.submit()) == null);
+        try std.testing.expect(!state.canCreate());
+        var directory = try std.fs.openDirAbsolute(home, .{ .iterate = true });
+        defer directory.close();
+        var iterator = directory.iterate();
+        try std.testing.expect((try iterator.next()) == null);
+    }
+    try state.update("Valid");
+    const path = try allocator.dupe(u8, state.path);
+    defer allocator.free(path);
+    try std.testing.expectError(error.InvalidUtf8, state.update("\xff"));
+    try std.testing.expectEqualStrings("Valid", state.draft);
+    try std.testing.expectEqualStrings("Valid", state.previewName());
+    try std.testing.expectEqualStrings(path, state.path);
+    try std.testing.expect(state.canCreate());
 }
 
 test "new workspace typed title and resolved directory remain distinct" {
@@ -565,7 +717,7 @@ test "new workspace collision at submit stays inline without a creation result" 
     TestValidation.collision = true;
     try std.testing.expect((try state.submit()) == null);
     try std.testing.expect(state.problem != null);
-    try std.testing.expectEqualStrings("That workspace already exists", state.problem.?);
+    try std.testing.expectEqualStrings("A workspace named client-work already exists.", state.problem.?);
     try std.testing.expect(!state.canCreate());
     TestValidation.collision = false;
     try state.update("Client Work 2");
@@ -656,7 +808,9 @@ test "new workspace production validator preview submit and create agree on Unic
         defer workspace.deinit(allocator);
         try std.testing.expectEqualStrings(workspace.path, state.path);
         try std.testing.expect((try state.submit()) == null);
-        try std.testing.expectEqualStrings("That workspace already exists", state.problem.?);
+        const expected = try std.fmt.allocPrint(allocator, "A workspace named {s} already exists.", .{workspace.name});
+        defer allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, state.problem.?);
         try std.testing.expectEqualStrings("", state.path);
     }
 }
