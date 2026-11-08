@@ -253,7 +253,7 @@ Assert-Contract ($source.Contains('AttachCleanup.stopWith(api, child.id)') -and
 $terminalAst = [Management.Automation.Language.Parser]::ParseFile(
   (Join-Path $repoRoot "Tools\windows\terminal-gate.ps1"), [ref]$null, [ref]$null)
 foreach ($name in @("Get-TerminalRemaining", "New-TerminalStartInfo", "Invoke-TerminalOwnedCommand",
-    "Complete-TerminalSeeds", "Invoke-GateProcess", "Write-OwnedResourceMetrics")) {
+    "Complete-TerminalSeeds", "Invoke-GateProcess", "Write-OwnedResourceMetrics", "Resolve-TerminalApplication")) {
   $definition = $terminalAst.Find({
     param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -263,6 +263,7 @@ foreach ($name in @("Get-TerminalRemaining", "New-TerminalStartInfo", "Invoke-Te
 }
 $script:terminalOwnershipCases = 0
 function Test-TerminalOwnership([scriptblock] $case) {
+  function Write-Host { }
   & $case
   $script:terminalOwnershipCases++
 }
@@ -346,6 +347,56 @@ Test-TerminalOwnership {
 }
 Assert-Contract ($script:terminalOwnershipCases -eq 7) "expected seven owned terminal source/managed cases"
 Write-Output "Terminal ownership contracts: PASS executed=$script:terminalOwnershipCases source/managed-only"
+
+$script:terminalApplicationCases = 0
+function Test-TerminalApplication([scriptblock] $case) {
+  & $case
+  $script:terminalApplicationCases++
+}
+Test-TerminalApplication {
+  $scratch = Join-Path ([IO.Path]::GetTempPath()) ("terminal application " + [guid]::NewGuid().ToString("N"))
+  $null = New-Item -ItemType Directory -Path $scratch
+  try {
+    $first = Join-Path $scratch "first git.exe"
+    $second = Join-Path $scratch "second git.exe"
+    [IO.File]::WriteAllText($first, "HEADLESS_NOT_EXECUTABLE")
+    [IO.File]::WriteAllText($second, "HEADLESS_NOT_EXECUTABLE")
+    $discover = {
+      @(
+        [pscustomobject]@{ CommandType=[Management.Automation.CommandTypes]::Application; Source=$first },
+        [pscustomobject]@{ CommandType=[Management.Automation.CommandTypes]::Application; Source=$second }
+      )
+    }
+    $selected = @(Resolve-TerminalApplication "git" $discover)
+    Assert-Contract ($selected.Count -eq 1 -and $selected[0] -ceq $first) `
+      "multiple application candidates must select exactly the first path including spaces"
+  } finally { Remove-Item -LiteralPath $scratch -Recurse -Force }
+}
+Test-TerminalApplication {
+  $failure = $null
+  try { Resolve-TerminalApplication "git" { @() } } catch { $failure = $_ }
+  Assert-Contract ($failure.Exception.Message.Contains("application is absent")) "absent application must fail explicitly"
+}
+Test-TerminalApplication {
+  $failure = $null
+  try {
+    Resolve-TerminalApplication "pwsh" {
+      @(
+        [pscustomobject]@{ CommandType=[Management.Automation.CommandTypes]::Application; Source="Z:\absent-first.exe" },
+        [pscustomobject]@{ CommandType=[Management.Automation.CommandTypes]::Application; Source=$PSCommandPath }
+      )
+    }
+  } catch { $failure = $_ }
+  Assert-Contract ($failure.Exception.Message.Contains("First terminal application candidate")) `
+    "invalid first precedence candidate must not silently fall back"
+}
+Test-TerminalApplication {
+  $selected = Resolve-TerminalApplication "git"
+  Assert-Contract ($selected -is [string] -and (Test-Path -LiteralPath $selected -PathType Leaf)) `
+    "actual current git discovery must return one existing file without launching it"
+}
+Assert-Contract ($script:terminalApplicationCases -eq 4) "expected four application selection cases"
+Write-Output "Terminal application contracts: PASS executed=$script:terminalApplicationCases managed/read-only-discovery"
 
 $script:terminalMetricCases = 0
 function Test-TerminalMetrics([scriptblock] $case) {

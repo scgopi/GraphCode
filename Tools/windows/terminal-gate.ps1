@@ -47,6 +47,23 @@ function Get-TerminalRemaining([int] $maximumMilliseconds) {
   return [int][Math]::Min($maximumMilliseconds, $remaining)
 }
 
+function Resolve-TerminalApplication(
+  [string] $name,
+  [scriptblock] $discover = { param($commandName) Get-Command -Name $commandName -CommandType Application -ErrorAction Stop }
+) {
+  if ($name -cnotin @("git", "pwsh")) { throw "Terminal application resolver only admits git and pwsh" }
+  $commands = @(& $discover $name)
+  if ($commands.Count -eq 0) { throw "Terminal application is absent: $name" }
+  $selected = $commands[0]
+  $source = $selected.Source
+  if ($selected.CommandType -ne [Management.Automation.CommandTypes]::Application -or
+      $source -isnot [string] -or -not [IO.Path]::IsPathFullyQualified($source) -or
+      -not (Test-Path -LiteralPath $source -PathType Leaf)) {
+    throw "First terminal application candidate is not an existing absolute application: $name"
+  }
+  return $source
+}
+
 function New-TerminalStartInfo([string] $file, [string[]] $arguments, [string] $directory) {
   $start = [Diagnostics.ProcessStartInfo]::new((Resolve-Path -LiteralPath $file).Path)
   $start.UseShellExecute = $false
@@ -83,7 +100,7 @@ function Invoke-Native([string] $description, [scriptblock] $command) {
 }
 
 function Assert-PinnedCleanWorktree([string] $root, [string] $sha, [string] $label) {
-  $git = (Get-Command git -CommandType Application).Source
+  $git = Resolve-TerminalApplication "git"
   $status = Invoke-TerminalOwnedCommand $git @("-C", $root, "status", "--porcelain", "--untracked-files=all") "pin-status"
   $head = Invoke-TerminalOwnedCommand $git @("-C", $root, "rev-parse", "HEAD") "pin-head"
   if ($status.ExitCode -ne 0 -or $head.ExitCode -ne 0 -or
@@ -212,7 +229,8 @@ function Complete-TerminalSeeds([Exception] $primary) {
 try {
   Assert-PinnedCleanWorktree $WinghosttyRoot $pins.winghostty.sha "Winghostty"
   Assert-PinnedCleanWorktree $ZmxRoot $pins.zmx.sha "zmx"
-  $resourceContracts = Invoke-TerminalOwnedCommand (Get-Command pwsh -CommandType Application).Source @(
+  $pwsh = Resolve-TerminalApplication "pwsh"
+  $resourceContracts = Invoke-TerminalOwnedCommand $pwsh @(
     "-NoProfile", "-NonInteractive", "-File", (Join-Path $PSScriptRoot "Tests\TerminalGate.Tests.ps1"),
     "-ResourceCountersOnly") "resource-contracts" 60000
   if ($resourceContracts.ExitCode -ne 0 -or
@@ -221,7 +239,7 @@ try {
   }
   if (-not $SkipBuild) {
     if (-not $SkipProviderBuild) {
-      $build = Invoke-TerminalOwnedCommand (Get-Command pwsh -CommandType Application).Source @(
+      $build = Invoke-TerminalOwnedCommand $pwsh @(
         "-NoProfile", "-NonInteractive", "-File", (Join-Path $PSScriptRoot "provider-build.ps1"),
         "-WinghosttyRoot", $WinghosttyRoot, "-ZmxRoot", $ZmxRoot,
         "-Zig0152", $Zig0152, "-Zig0160", $Zig0160,
