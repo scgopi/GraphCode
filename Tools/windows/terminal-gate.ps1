@@ -21,7 +21,20 @@ if (-not $assembly) { $assembly = & (Join-Path $PSScriptRoot "Build-CompiledVali
 & (Join-Path $PSScriptRoot "Import-CompiledValidationAssembly.ps1") `
   -AssemblyPath $assembly -RequiredType "GraphCode.Validation.Ownership.OwnedChildSupervisor" | Out-Null
 $workClock = [Diagnostics.Stopwatch]::StartNew()
-$artifactRoot = Join-Path ([IO.Path]::GetTempPath()) ("terminal-owned-" + [guid]::NewGuid().ToString("N"))
+function Get-TerminalArtifactRoot(
+  [Collections.IDictionary] $environment, [string] $processTemp, [string] $nonce,
+  [scriptblock] $directoryExists = { param($path) Test-Path -LiteralPath $path -PathType Container }
+) {
+  $parent = if ($environment.Contains("RUNNER_TEMP")) { $environment["RUNNER_TEMP"] } else { $processTemp }
+  if ($parent -isnot [string] -or [string]::IsNullOrWhiteSpace($parent) -or
+      -not [IO.Path]::IsPathFullyQualified($parent) -or $nonce -cnotmatch '^[0-9a-f]{32}$' -or
+      -not (& $directoryExists $parent)) {
+    throw "Terminal artifact root requires an absolute temp parent and fresh nonce"
+  }
+  return Join-Path $parent ("terminal-owned-" + $nonce)
+}
+$artifactRoot = Get-TerminalArtifactRoot ([Environment]::GetEnvironmentVariables("Process")) `
+  ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString("N"))
 $null = New-Item -ItemType Directory -Path $artifactRoot -ErrorAction Stop
 $ownedSessionNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $ownedSeeds = [Collections.Generic.List[object]]::new()

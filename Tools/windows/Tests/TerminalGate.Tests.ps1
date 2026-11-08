@@ -253,7 +253,8 @@ Assert-Contract ($source.Contains('AttachCleanup.stopWith(api, child.id)') -and
 $terminalAst = [Management.Automation.Language.Parser]::ParseFile(
   (Join-Path $repoRoot "Tools\windows\terminal-gate.ps1"), [ref]$null, [ref]$null)
 foreach ($name in @("Get-TerminalRemaining", "New-TerminalStartInfo", "Invoke-TerminalOwnedCommand",
-    "Complete-TerminalSeeds", "Invoke-GateProcess", "Write-OwnedResourceMetrics", "Resolve-TerminalApplication")) {
+    "Complete-TerminalSeeds", "Invoke-GateProcess", "Write-OwnedResourceMetrics", "Resolve-TerminalApplication",
+    "Get-TerminalArtifactRoot")) {
   $definition = $terminalAst.Find({
     param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -397,6 +398,36 @@ Test-TerminalApplication {
 }
 Assert-Contract ($script:terminalApplicationCases -eq 4) "expected four application selection cases"
 Write-Output "Terminal application contracts: PASS executed=$script:terminalApplicationCases managed/read-only-discovery"
+
+$script:terminalScratchCases = 0
+foreach ($case in @(
+    @{ environment=@{RUNNER_TEMP='D:\a\_temp'}; temp='C:\Users\runneradmin\AppData\Local\Temp'; expected='D:\a\_temp'; admissible=$true },
+    @{ environment=@{}; temp='D:\t'; expected='D:\t'; admissible=$true },
+    @{ environment=@{}; temp='C:\Users\runneradmin\AppData\Local\Temp'; expected='C:\Users\runneradmin\AppData\Local\Temp'; admissible=$false }
+  )) {
+  $root = Get-TerminalArtifactRoot $case.environment $case.temp ("a" * 32) { param($path) $true }
+  Assert-Contract ($root -ceq (Join-Path $case.expected ("terminal-owned-" + ("a" * 32)))) `
+    "artifact root must prefer existing CI runner temp, without shortening an explicitly selected path"
+  $session = "gc-" + ("b" * 32) + "-shared"
+  $lease = Join-Path (Join-Path $root "zmx") ("ipc\" + ("s" * 52) + "\" +
+    ("0" * (2 * [Text.Encoding]::UTF8.GetByteCount($session))) + ".endpoint.lease")
+  Assert-Contract (($lease.Length -le 232) -eq $case.admissible) `
+    "actual CI path formula must fit only the short root; long fallback remains refused"
+  $script:terminalScratchCases++
+}
+foreach ($invalid in @("", " ", "relative-root", "D:\missing-directory")) {
+  $failure = $null
+  try {
+    Get-TerminalArtifactRoot @{ RUNNER_TEMP=$invalid } "D:\t" ("a" * 32) {
+      param($path)
+      return $path -cne "D:\missing-directory"
+    }
+  } catch { $failure = $_ }
+  Assert-Contract ($null -ne $failure) "present empty/invalid/non-directory runner temp must refuse without fallback"
+  $script:terminalScratchCases++
+}
+Assert-Contract ($script:terminalScratchCases -eq 7) "expected seven pure scratch selection/budget cases"
+Write-Output "Terminal scratch contracts: PASS executed=$script:terminalScratchCases pure-path-only"
 
 $script:terminalMetricCases = 0
 function Test-TerminalMetrics([scriptblock] $case) {
