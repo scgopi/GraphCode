@@ -263,9 +263,31 @@ foreach ($name in @("Get-TerminalRemaining", "New-TerminalStartInfo", "Invoke-Te
   . ([scriptblock]::Create($definition.Extent.Text))
 }
 $workflow = Get-Content (Join-Path $repoRoot ".github\workflows\windows-port-validation.yml") -Raw
-Assert-Contract ($workflow.Contains('${{ runner.temp }}\terminal-owned-*\**\*') -and
-  $workflow.Contains('- name: Retain UIA failure diagnostics' + "`n" + '        if: always()')) `
-  "spikes-other must always retain original terminal raw diagnostics in its existing upload step"
+function Assert-TerminalWorkflowRetention([string] $source) {
+  $source = $source.Replace("`r`n", "`n")
+  Assert-Contract ($source.Contains('${{ runner.temp }}\terminal-owned-*\**\*') -and
+    $source.Contains('- name: Retain UIA failure diagnostics' + "`n" + '        if: always()')) `
+    "spikes-other must always retain original terminal raw diagnostics in its existing upload step"
+}
+Assert-TerminalWorkflowRetention $workflow
+$retentionFixture = '- name: Retain UIA failure diagnostics' + "`n" +
+  '        if: always()' + "`n" + '            ${{ runner.temp }}\terminal-owned-*\**\*'
+$script:workflowRetentionCases = 0
+foreach ($source in @($retentionFixture, $retentionFixture.Replace("`n", "`r`n"))) {
+  Assert-TerminalWorkflowRetention $source
+  $script:workflowRetentionCases++
+}
+foreach ($source in @(
+    $retentionFixture.Replace('if: always()', 'if: failure()'),
+    $retentionFixture.Replace('${{ runner.temp }}\terminal-owned-*\**\*', '${{ runner.temp }}\gu-*\logs\*.json')
+  )) {
+  $failure = $null
+  try { Assert-TerminalWorkflowRetention $source } catch { $failure = $_ }
+  Assert-Contract ($null -ne $failure) "missing always/raw-terminal path must remain refused"
+  $script:workflowRetentionCases++
+}
+Assert-Contract ($script:workflowRetentionCases -eq 4) "expected four workflow retention source cases"
+Write-Output "Terminal workflow retention: PASS executed=$script:workflowRetentionCases source-only"
 $script:terminalOwnershipCases = 0
 function Test-TerminalOwnership([scriptblock] $case) {
   function Write-Host { }
