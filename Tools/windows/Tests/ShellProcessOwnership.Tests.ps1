@@ -1038,6 +1038,48 @@ Describe "Ownership-unproven root retention contract (filesystem only)" {
     $evidence.availableFailureOperands.NativeResult | Should -Be 4294967295
     $evidence.scriptStackTrace | Should -BeExactly $original.ScriptStackTrace
     (Get-Content (Join-Path $root "ownership-unproven.json") -Raw | ConvertFrom-Json).reason | Should -BeExactly "ownership_unproven"
+    $registry = Get-Content (Join-Path $repo "Tools\windows\ValidationRunner\Manifests\host.json") -Raw | ConvertFrom-Json
+    $required = @($registry.units | Where-Object id -CEQ "host.legacy-ownership.shell-scope")
+    $required.Count | Should -Be 1
+    $required[0].minimumCount | Should -Be 77
+    $required[0].exactCount | Should -Be 77
+    @($required[0].requiredGroups).Count | Should -Be 7
+    $adapter = Join-Path $repo "Tools\windows\ValidationRunner\Adapters\LegacyOwnership.Contracts.ps1"
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($adapter, [ref]$tokens, [ref]$errors)
+    $helpers = @($ast.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq "Get-ShellScopeDiagnosticGroups"
+    }, $true))
+    $errors.Count | Should -Be 0
+    $helpers.Count | Should -Be 1
+    . ([scriptblock]::Create($helpers[0].Extent.Text))
+    $cases = @($required[0].requiredGroups | ForEach-Object {
+      [pscustomobject]@{ Name = $_; Tag = @("FirstFailureDiagnostic"); Executed = $true; Result = "Passed" }
+    })
+    $run = [pscustomobject]@{ TotalCount = 77; Tests = $cases }
+    $groups = @(Get-ShellScopeDiagnosticGroups $run $required[0])
+    $groups.Count | Should -Be 7
+    foreach ($mutation in @("missing", "extra", "duplicate", "failed", "unexecuted", "wrong-count", "duplicate-required")) {
+      $invalidCases = @($cases | ForEach-Object {
+        [pscustomobject]@{ Name = $_.Name; Tag = $_.Tag; Executed = $_.Executed; Result = $_.Result }
+      })
+      $expected = [pscustomobject]@{ minimumCount = 77; exactCount = 77; requiredGroups = @($required[0].requiredGroups) }
+      $total = 77
+      switch ($mutation) {
+        "missing" { $invalidCases = $invalidCases[1..6] }
+        "extra" { $invalidCases += [pscustomobject]@{ Name = "unexpected diagnostic"; Tag = @("FirstFailureDiagnostic"); Executed = $true; Result = "Passed" } }
+        "duplicate" { $invalidCases += $invalidCases[0] }
+        "failed" { $invalidCases[0].Result = "Failed" }
+        "unexecuted" { $invalidCases[0].Executed = $false }
+        "wrong-count" { $total = 70 }
+        "duplicate-required" { $expected.requiredGroups += $expected.requiredGroups[0] }
+      }
+      $invalidRun = [pscustomobject]@{ TotalCount = $total; Tests = $invalidCases }
+      { Get-ShellScopeDiagnosticGroups $invalidRun $expected } | Should -Throw
+    }
   }
   It "never overwrites the immutable first failure or replaces its primary on write refusal" -Tag "FirstFailureDiagnostic" {
     $path = Join-Path $root "ownership-first-failure.json"

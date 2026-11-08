@@ -596,6 +596,10 @@ ErrorRecords remain attached to the same exception in memory. Projection or
 write failure is attached without suppressing the independent retention
 receipt, sentinel or lifetime hold. This diagnostic does not recover lost
 authority, establish cleanup, or authorize another run.
+The canonical shell ownership unit retains its 70 existing cases and requires
+the seven named first-failure diagnostic cases exactly once (77 total). Its
+unfiltered Pester payload includes controlled native launch fixtures as well
+as mock/filesystem contracts; filtered headless results are not that full gate.
 
 ### UIA input and process ownership
 

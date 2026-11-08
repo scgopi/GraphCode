@@ -3,7 +3,16 @@
     { "id": "host.sdk-prerequisites", "owner": "Host", "minimumCount": 49, "exactCount": 49 },
     { "id": "host.admission-guards", "owner": "Host", "minimumCount": 65, "exactCount": 65 },
     { "id": "host.compiled-assembly-environment", "owner": "Host", "minimumCount": 7, "exactCount": 7 },
-    { "id": "host.legacy-ownership.shell-scope", "owner": "Host", "minimumCount": 70, "exactCount": 70 },
+    { "id": "host.legacy-ownership.shell-scope", "owner": "Host", "minimumCount": 77, "exactCount": 77,
+      "requiredGroups": [
+        "retains the original assignment and cleanup records at the actual Start Stop catch",
+        "flushes first-failure evidence before the sentinel while preserving the actual ErrorRecord",
+        "never overwrites the immutable first failure or replaces its primary on write refusal",
+        "reports absent records and native operands as unavailable without invented zeros",
+        "preserves all available aggregate branches and signed COM HRESULTs",
+        "preserves distinct primary and secondary cleanup records, stacks and native results",
+        "refuses oversized projection without replacing the primary or suppressing retention"
+      ] },
     { "id": "host.legacy-ownership.live-adapter", "owner": "Host", "minimumCount": 13, "exactCount": 13 },
     { "id": "host.legacy-ownership.live-cleanup", "owner": "Host", "minimumCount": 84, "exactCount": 84 },
     { "id": "host.provenance.current-source", "owner": "Host", "minimumCount": 1 },
