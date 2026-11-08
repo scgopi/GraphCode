@@ -57,6 +57,7 @@ zig-out/
 /docs/*
 !/docs/index.html
 !/docs/compare.html
+!/docs/conductor-alternative.html
 !/docs/shortcuts.md
 !/docs/_config.yml
 !/docs/_layouts/
