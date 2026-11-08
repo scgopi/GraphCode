@@ -70,10 +70,111 @@ function Write-ShellOwnershipDiagnostic([Exception] $Exception, [string] $Messag
   }
 }
 
-function Set-ShellOwnershipUnproven([Exception] $Exception, [string[]] $RetainedRoots = @()) {
+function Write-ShellOwnershipFirstFailure([Exception] $Exception,
+    [Management.Automation.ErrorRecord] $FailureRecord = $null,
+    [Management.Automation.ErrorRecord] $SecondaryCleanupFailureRecord = $null) {
+  if (-not [Environment]::GetEnvironmentVariables().Contains("GRAPHCODE_VALIDATION_ROOT")) {
+    throw "First-failure diagnostic root is unavailable"
+  }
+  $configured = [Environment]::GetEnvironmentVariable("GRAPHCODE_VALIDATION_ROOT")
+  if (-not $configured -or -not [IO.Path]::IsPathFullyQualified($configured)) {
+    throw "First-failure diagnostic root is not an absolute directory"
+  }
+  $root = [IO.Path]::GetFullPath($configured)
+  $directory = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+  if (-not $directory.PSIsContainer) { throw "First-failure diagnostic root is not a directory" }
+  while ($directory) {
+    if ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+      throw "First-failure diagnostic root has a reparse ancestor"
+    }
+    $directory = $directory.Parent
+  }
+  $chain = [Collections.Generic.List[object]]::new()
+  $pending=[Collections.Generic.Queue[object]]::new()
+  $pending.Enqueue(@{exception=$Exception;path='primary'})
+  if($SecondaryCleanupFailureRecord){
+    $pending.Enqueue(@{exception=$SecondaryCleanupFailureRecord.Exception;path='secondaryCleanup'})
+  }
+  $innerOmitted=$false
+  while($pending.Count -gt 0 -and $chain.Count -lt 16) {
+    $entry=$pending.Dequeue()
+    $current=$entry.exception
+    $operands=[ordered]@{}
+    foreach($key in @("NativeErrorCode", "NativeResult", "FailedOwnershipPredicate", "CallSite")){
+      if($current.Data.Contains($key)){
+        $value=$current.Data[$key]
+        if($null -eq $value -or $value -is [string] -or $value -is [bool] -or
+            $value -is [int] -or $value -is [long] -or $value -is [uint32]){
+          $operands[$key]=$value
+        }
+      }
+    }
+    $chain.Add([ordered]@{
+      path=$entry.path;type = $current.GetType().FullName; message = $current.Message
+      stackTrace = $current.StackTrace
+      exceptionHResult = $current.HResult
+      availableFailureOperands=$operands
+      nativeErrorAvailable = ($current -is [ComponentModel.Win32Exception])
+      nativeErrorCode = $(if ($current -is [ComponentModel.Win32Exception]) { $current.NativeErrorCode } else { $null })
+    })
+    if($current -is [AggregateException]){
+      for($index=0;$index -lt $current.InnerExceptions.Count;$index++){
+        if($pending.Count+$chain.Count -ge 16){$innerOmitted=$true;break}
+        $pending.Enqueue(@{exception=$current.InnerExceptions[$index];path="$($entry.path).$index"})
+      }
+    }elseif($current.InnerException){
+      if($pending.Count+$chain.Count -lt 16){
+        $pending.Enqueue(@{exception=$current.InnerException;path="$($entry.path).inner"})
+      }else{$innerOmitted=$true}
+    }
+  }
+  $available=$chain[0].availableFailureOperands
+  $payload=[ordered]@{
+    exceptionType=$Exception.GetType().FullName;exceptionMessage=$Exception.Message
+    errorRecordAvailable=($null -ne $FailureRecord)
+    errorRecordType=$(if($FailureRecord){$FailureRecord.GetType().FullName}else{$null})
+    fullyQualifiedErrorId=$(if($FailureRecord){$FailureRecord.FullyQualifiedErrorId}else{$null})
+    scriptStackTrace=$(if($FailureRecord){$FailureRecord.ScriptStackTrace}else{$null})
+    positionMessage=$(if($FailureRecord -and $FailureRecord.InvocationInfo){$FailureRecord.InvocationInfo.PositionMessage}else{$null})
+    primaryRecordExceptionType=$(if($FailureRecord){$FailureRecord.Exception.GetType().FullName}else{$null})
+    primaryRecordExceptionMessage=$(if($FailureRecord){$FailureRecord.Exception.Message}else{$null})
+    secondaryCleanupAvailable=($null -ne $SecondaryCleanupFailureRecord)
+    secondaryCleanup=$(if($SecondaryCleanupFailureRecord){[ordered]@{
+      label='ACTUAL_SECONDARY_CLEANUP_ERROR_NOT_PRIMARY'
+      errorRecordType=$SecondaryCleanupFailureRecord.GetType().FullName
+      exceptionType=$SecondaryCleanupFailureRecord.Exception.GetType().FullName
+      exceptionMessage=$SecondaryCleanupFailureRecord.Exception.Message
+      scriptStackTrace=$SecondaryCleanupFailureRecord.ScriptStackTrace
+      fullyQualifiedErrorId=$SecondaryCleanupFailureRecord.FullyQualifiedErrorId
+      positionMessage=$(if($SecondaryCleanupFailureRecord.InvocationInfo){$SecondaryCleanupFailureRecord.InvocationInfo.PositionMessage}else{$null})
+    }}else{$null})
+    exceptionChain=$chain.ToArray();innerChainTruncated=($innerOmitted -or $pending.Count -gt 0)
+    availableFailureOperands=$available
+    ownershipPredicateAvailable=$available.Contains("FailedOwnershipPredicate")
+    nativeResultAvailable=$available.Contains("NativeResult")
+    diagnosis="AVAILABLE_ORIGINAL_ERROR_ONLY_NO_NEW_NATIVE_PROBE_OR_IDENTITY_INFERENCE"
+  }
+  $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($payload|ConvertTo-Json -Depth 8))
+  if($bytes.Length -gt 65536){throw "First-failure projection exceeds 65536 bytes; original ErrorRecord remains in memory"}
+  $stream=[IO.File]::Open((Join-Path $root "ownership-first-failure.json"),
+    [IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+  try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+}
+
+function Set-ShellOwnershipUnproven([Exception] $Exception, [string[]] $RetainedRoots = @(),
+    [Management.Automation.ErrorRecord] $FailureRecord = $null,
+    [Management.Automation.ErrorRecord] $SecondaryCleanupFailureRecord = $null) {
   $Exception.Data["GraphCodeValidationRootRetentionRequired"] = $true
   $roots = @($RetainedRoots | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) })
   $Exception.Data["GraphCodeValidationRetainedRoots"] = $roots
+  if($FailureRecord -and -not $Exception.Data.Contains("GraphCodeValidationOriginalFailureRecord")){
+    $Exception.Data["GraphCodeValidationOriginalFailureRecord"]=$FailureRecord
+  }
+  if($SecondaryCleanupFailureRecord -and -not $Exception.Data.Contains("GraphCodeValidationOriginalCleanupFailureRecord")){
+    $Exception.Data["GraphCodeValidationOriginalCleanupFailureRecord"]=$SecondaryCleanupFailureRecord
+  }
+  try{Write-ShellOwnershipFirstFailure $Exception $FailureRecord $SecondaryCleanupFailureRecord}
+  catch{$Exception.Data["GraphCodeValidationFirstFailureDiagnosticFailure"]=$_}
   Write-ShellOwnershipDiagnostic $Exception "GRAPHCODE_VALIDATION_ROOT_RETENTION_REQUIRED=ownership_unproven"
   if ([Environment]::GetEnvironmentVariables().Contains("GRAPHCODE_VALIDATION_ROOT")) {
     $stream = $null
@@ -122,7 +223,7 @@ function Start-ShellOwnedProcess($Scope, [Diagnostics.ProcessStartInfo] $StartIn
   if ($Scope.Closed) { throw "Owned shell scope is closed" }
   try { $run = New-ShellSuspendedLaunch $StartInfo } catch {
     if (Test-ShellOwnershipUnproven $_) {
-      throw (Set-ShellOwnershipUnproven $_.Exception)
+      throw (Set-ShellOwnershipUnproven $_.Exception -FailureRecord $_)
     }
     throw
   }
@@ -144,10 +245,11 @@ function Start-ShellOwnedProcess($Scope, [Diagnostics.ProcessStartInfo] $StartIn
     $primary = $_
     try { $run.Stop() } catch {
       throw (Set-ShellOwnershipUnproven ([InvalidOperationException]::new(
-        "Owned launch failed: $($primary.Exception.Message); OWNED_CLEANUP_UNPROVEN: $($_.Exception.Message)", $primary.Exception)))
+        "Owned launch failed: $($primary.Exception.Message); OWNED_CLEANUP_UNPROVEN: $($_.Exception.Message)", $primary.Exception)) `
+        -FailureRecord $primary -SecondaryCleanupFailureRecord $_)
     }
     if (Test-ShellOwnershipUnproven $primary) {
-      throw (Set-ShellOwnershipUnproven $primary.Exception)
+      throw (Set-ShellOwnershipUnproven $primary.Exception -FailureRecord $primary)
     }
     throw $primary
   }
@@ -165,7 +267,7 @@ function Get-ShellOwnedMember($Scope, [int] $ProcessId) {
     return $process
   } catch {
     if ($process) { $process.Dispose() }
-    throw (Set-ShellOwnershipUnproven $_.Exception)
+    throw (Set-ShellOwnershipUnproven $_.Exception -FailureRecord $_)
   }
 }
 
@@ -204,7 +306,7 @@ function Receive-ShellOwnedOutput($Scope, [Diagnostics.Process] $Process,
       Error = $runs[0].TakeError($MaximumCharacters)
     }
   } catch {
-    throw (Set-ShellOwnershipUnproven $_.Exception)
+    throw (Set-ShellOwnershipUnproven $_.Exception -FailureRecord $_)
   }
 }
 
@@ -226,7 +328,7 @@ function Complete-ShellLaunch($Run) {
     }
     $Run.Finalized = $true
   } catch {
-    throw (Set-ShellOwnershipUnproven $_.Exception)
+    throw (Set-ShellOwnershipUnproven $_.Exception -FailureRecord $_)
   }
 }
 
@@ -267,7 +369,7 @@ function Close-ShellProcessScope($Scope) {
     $Scope.Closed = $true
     Write-Host "SHELL_OWNED_JOB_CLEANUP=verified active=0 launches=$($Scope.Runs.Count)"
   } catch {
-    throw (Set-ShellOwnershipUnproven $_.Exception)
+    throw (Set-ShellOwnershipUnproven $_.Exception -FailureRecord $_)
   }
 }
 

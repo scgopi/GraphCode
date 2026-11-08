@@ -585,6 +585,18 @@ by the runner into the Boolean exception tag, including terminating or
 incorrectly zero-exit child results. Receipt or sentinel intent never
 authorizes process termination.
 
+Before that sentinel is emitted, shell ownership failures attempt a separate
+CreateNew, flushed UTF-8 `ownership-first-failure.json` in the same validated
+root. It records scalar primary ErrorRecord details, exception stacks and
+signed HRESULTs, plus explicitly labeled secondary cleanup evidence when the
+launch and its cleanup both failed. The projection is limited to 16 exception
+branches and 64 KiB; omitted branches and unavailable native operands are
+explicit, never reconstructed from PIDs or default values. The original
+ErrorRecords remain attached to the same exception in memory. Projection or
+write failure is attached without suppressing the independent retention
+receipt, sentinel or lifetime hold. This diagnostic does not recover lost
+authority, establish cleanup, or authorize another run.
+
 ### UIA input and process ownership
 
 The gate's direct shell and stub launches use the existing assigned-job
