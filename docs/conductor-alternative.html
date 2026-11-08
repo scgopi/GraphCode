@@ -1,6 +1,6 @@
 ---
 title: A Conductor alternative for parallel coding agents on the Mac
-description: Conductor is joining Meta and Conductor Cloud shuts down on 20 November 2026. What is changing, how Conductor's workspaces, agents, goals and routines map onto GraphCode's loops, and how to start a first loop in a few minutes.
+description: Conductor Cloud shuts down on 20 November 2026. I build GraphCode, a native Mac app for running coding agents in parallel, and this is how Conductor's workspaces, goals and routines map onto it, what it does not do, and how to start.
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -130,25 +130,21 @@ description: Conductor is joining Meta and Conductor Cloud shuts down on 20 Nove
     .cta-inner h2 { font-size: 26px; }
     .brew { font-size: 11.5px; }
   }
-  .timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; max-width: 860px; }
-  .timeline li { display: grid; grid-template-columns: 120px 1fr; gap: 18px; padding: 16px 18px; border: 1px solid var(--line3); border-radius: 12px; background: var(--card); font-size: 14.5px; line-height: 1.6; color: var(--ink-soft); }
-  .timeline .when { font-family: var(--mono); font-size: 12px; letter-spacing: .04em; color: var(--amber); padding-top: 2px; }
-  .prose { max-width: 760px; font-size: 15px; line-height: 1.65; color: var(--ink-soft); }
-  .prose p { margin: 0 0 14px; }
-  .fit { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
-  .fit div { padding: 18px 20px; border: 1px solid var(--line3); border-radius: 12px; background: var(--card); font-size: 14px; line-height: 1.6; color: var(--ink-soft); }
-  .fit h3 { margin: 0 0 6px; font-size: 15px; font-weight: 600; color: var(--ink); }
+  .article { max-width: 760px; }
+  .article p { font-size: 16px; line-height: 1.7; color: var(--ink-soft); margin: 0 0 18px; text-wrap: pretty; }
+  .article h2 { margin-top: 0; }
+  .article .quiet { color: var(--ink-mid); }
+  figure.shot { max-width: 1180px; margin: 40px auto 0; padding: 0 28px; }
+  figure.shot img { display: block; width: 100%; height: auto; border: 1px solid var(--line3); border-radius: 14px; }
+  figure.shot figcaption { margin-top: 10px; font-size: 13px; line-height: 1.55; color: var(--ink-faint); max-width: 760px; }
   table.map { min-width: 760px; }
   table.map tbody td { width: 42%; }
-  .steps { margin: 0; padding-left: 0; list-style: none; counter-reset: step; max-width: 860px; }
-  .steps li { counter-increment: step; position: relative; padding: 0 0 22px 44px; font-size: 15px; line-height: 1.6; color: var(--ink-soft); }
-  .steps li::before { content: counter(step); position: absolute; left: 0; top: 0; width: 28px; height: 28px; border: 1px solid var(--line4); border-radius: 50%; font-family: var(--mono); font-size: 12px; color: var(--amber); display: flex; align-items: center; justify-content: center; }
-  .steps strong { color: var(--ink); }
-  pre { margin: 10px 0 0; padding: 14px 16px; background: var(--bg); border: 1px solid var(--line3); border-radius: 10px; font-family: var(--mono); font-size: 12.5px; line-height: 1.65; color: #d6d6d2; overflow-x: auto; }
+  .steps { margin: 0 0 18px; padding-left: 22px; font-size: 16px; line-height: 1.7; color: var(--ink-soft); }
+  .steps li { margin: 0 0 10px; padding-left: 4px; }
+  .steps code { white-space: normal; overflow-wrap: anywhere; }
+  .steps li::marker { font-family: var(--mono); color: var(--amber); font-size: 13px; }
+  pre { margin: 6px 0 18px; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line3); border-radius: 10px; font-family: var(--mono); font-size: 12.5px; line-height: 1.65; color: #d6d6d2; overflow-x: auto; white-space: pre; }
   pre .prompt { color: var(--green); user-select: none; }
-  @media (max-width: 720px) {
-    .timeline li { grid-template-columns: 1fr; gap: 4px; }
-  }
 </style>
 </head>
 <body>
@@ -174,43 +170,46 @@ description: Conductor is joining Meta and Conductor Cloud shuts down on 20 Nove
 <header class="head">
   <div class="head-grid-bg"></div>
   <div class="head-copy">
-    <div class="eyebrow"><span class="dot"></span>For Conductor users · sourced 7 Nov 2026</div>
-    <h1>Moving off Conductor? Run your parallel agents as a <span class="accent">graph of loops</span>.</h1>
-    <p class="lede">Conductor is joining Meta. Conductor Cloud goes read-only on 13 November and shuts down on 20 November 2026, and new users can no longer download the app. GraphCode is a native macOS app that runs Claude Code, Codex, Copilot CLI, OpenCode and pi side by side, each in a live terminal you can step into, kept running by a local daemon.</p>
-    <p class="method">Method: every statement about Conductor below quotes or paraphrases Conductor's own announcement, changelog or docs, fetched on 7 November 2026, and cites it. Every statement about GraphCode is checked against its README and source, linked at the bottom.</p>
+    <div class="eyebrow"><span class="dot"></span>For Conductor users · 7 November 2026</div>
+    <h1>Conductor Cloud shuts down on 20 November. Here is where your agents can go.</h1>
+    <div class="article">
+      <p>If you run your coding agents in Conductor, you have probably seen the news. Conductor is joining Meta, and its cloud stops accepting new messages on 13 November. The Mac app keeps working for a while longer, with only new models and critical bug fixes until early 2027, so you need a new home for your agents before long.</p>
+      <p>I'm Srinivasa Chaitanya, and I build GraphCode. It is a native Mac app for the same job Conductor does: running several coding agents in parallel on your own machine. I wrote this page for people deciding where to go next. What I say about Conductor comes from its own announcement and docs, linked at the bottom. What I say about GraphCode I checked against its code.</p>
+    </div>
   </div>
 </header>
 
 <section class="section" id="whats-happening">
-  <h2>What is happening to Conductor</h2>
-  <p class="sub">Conductor announced on 4 November 2026 that it is joining Meta.<sup><a href="#s1">1</a></sup><sup><a href="#s2">2</a></sup> Its announcement sets out this timeline:<sup><a href="#s1">1</a></sup></p>
-  <ol class="timeline">
-    <li><span class="when">4 Nov</span><span>No new sign-ups. "New users can no longer sign up for Conductor or download the app." Pro users keep Pro features for free, and active subscribers get a refund.</span></li>
-    <li><span class="when">13 Nov</span><span>Conductor Cloud goes read-only: "You can still read old chats and export data, but you can't send new messages."</span></li>
-    <li><span class="when">20 Nov</span><span>Conductor Cloud shuts down: "We begin deleting Conductor Cloud user data. Please export your data before this date."</span></li>
-    <li><span class="when">Early 2027</span><span>The local Mac app "will continue to receive new models and critical bug fixes until early 2027", then starts winding down.</span></li>
-  </ol>
-  <div class="prose" style="margin-top:22px">
-    <p>Before 20 November, Conductor's own guidance is to bring a cloud workspace and its chats to your Mac with <strong>right-click › Transfer to local</strong>, or to export everything from <strong>Settings › Account › Export data</strong>.<sup><a href="#s2">2</a></sup> Do that first; your branches and worktrees are ordinary git, so nothing below needs Conductor's data to get started.</p>
+  <div class="article">
+    <h2>What Conductor announced</h2>
+    <p>On 4 November 2026 Conductor announced that it is joining Meta.<sup><a href="#s1">1</a></sup><sup><a href="#s2">2</a></sup> New sign-ups and app downloads stopped that day. Existing Pro users keep Pro features for free, and active subscribers are being refunded.</p>
+    <p>The cloud goes first. From 13 November, Conductor Cloud is read-only. In Conductor's words, "You can still read old chats and export data, but you can't send new messages." On 20 November it shuts down and Conductor begins deleting Cloud user data. The local app "will continue to receive new models and critical bug fixes until early 2027", and then starts winding down.<sup><a href="#s1">1</a></sup></p>
+    <p>So export before you do anything else. Conductor documents two ways to do it: right-click a cloud workspace and choose Transfer to local, or use Settings › Account › Export data.<sup><a href="#s2">2</a></sup> Your local branches and worktrees are plain git and stay exactly where they are.</p>
   </div>
 </section>
 
-<section class="section" id="why">
-  <h2>Why GraphCode fits a Conductor workflow</h2>
-  <p class="sub">The same job, running several coding agents at once on your own Mac, organised as a graph of loops instead of a list of workspaces.</p>
-  <div class="fit">
-    <div><h3>Native macOS</h3>A Mac app for macOS 15+ on Apple Silicon, Developer ID signed and notarized. Terminals render with GhosttyKit.</div>
-    <div><h3>Live, steerable terminals</h3>Each node on the canvas is a loop running inside a real agent CLI session. Click it to open that session's terminal and type into it mid-run.</div>
-    <div><h3>Your choice of agent, per loop</h3>Claude Code, GitHub Copilot CLI, Codex, OpenCode or pi. A Codex loop can hand off to a Claude Code loop; an edge never asks which agent is on either end.</div>
-    <div><h3>Local daemon and CLI</h3><code>graphcoded</code> keeps loops alive with the app closed, fires edges and polls goal checks. The <code>graphcode</code> CLI drives the same daemon from a shell or from another loop.</div>
-    <div><h3>Sessions that outlast the app</h3>Every loop's terminal is a zmx session. It survives quitting the app; after a reboot the backend's saved session id is resumed rather than started again.</div>
-    <div><h3>Source-available, free</h3>The app and daemon are FSL-1.1-MIT, converting to MIT two years after each release. The CLI and GraphcodeKit are MIT. There is no paid tier.</div>
+<figure class="shot">
+  <img src="assets/graph-hero.png" alt="The GraphCode window: a sidebar of projects and loops, and a canvas of loop cards joined by edges, each showing its type, age and status." width="2000" height="993" loading="lazy">
+  <figcaption>One of my own projects in GraphCode. Each card is a loop running its own agent session, and the lines between cards are edges.</figcaption>
+</figure>
+
+<section class="section" id="how-it-works">
+  <div class="article">
+    <h2>How GraphCode works</h2>
+    <p>Conductor organises work as workspaces, one per branch. GraphCode organises it as a graph. Each node is a loop: a real agent CLI running in a terminal, with a job and a rule for when it is finished. Edges connect loops, so one loop can hand its work to the next when it finishes, send it a message, or spawn a new loop.</p>
+    <p>You choose the agent per loop. GraphCode drives Claude Code, GitHub Copilot CLI, Codex, OpenCode and pi, using the CLIs you already have installed and signed in. It bundles none of them. A Codex loop can hand off to a Claude Code loop, and the edge between them does not care which agent is on either end.</p>
+    <p>Clicking a node opens that agent's actual terminal, rendered with Ghostty's engine. You are typing into the live session, the same interface you would get by running <code>claude</code> or <code>codex</code> yourself, so you can correct it halfway through a task. From a shell, <code>graphcode node send</code> types a message into any loop, and loops use the same command to steer each other.</p>
+    <p>Behind the app sits a small daemon, <code>graphcoded</code>, running under launchd. It keeps loops alive while the app is closed and fires an edge when a loop resolves. Each loop's terminal is a zmx session, so it survives quitting the app, and after a reboot each loop resumes its saved agent session instead of starting over. The <code>graphcode</code> CLI talks to the same daemon. That is how I script it, and how one loop creates another.</p>
+    <p>The app and daemon are licensed FSL-1.1-MIT, and each release becomes plain MIT two years after it ships. The CLI and GraphcodeKit are MIT from the start. GraphCode is free, with no paid tier.</p>
+    <p>Some things it does not do. It needs macOS 15 or later on Apple Silicon. There is no hosted cloud; to run agents on another machine, you add a remote project over SSH and steer it from your Mac. It is single-user, with nothing like Conductor's multiplayer. There is no Cursor backend and no setup scripts for new worktrees. It also has no screen for reviewing a branch's diff and does not open pull requests for you, so that part stays with the agent and your usual git tools.</p>
   </div>
 </section>
 
 <section class="section" id="mapping">
-  <h2>Conductor concepts, in GraphCode terms</h2>
-  <p class="sub">An honest mapping. Where GraphCode has no equivalent, the row says so.</p>
+  <div class="article">
+    <h2>Conductor's concepts in GraphCode terms</h2>
+    <p>Where GraphCode has no equivalent, the row says so.</p>
+  </div>
   <div class="table-wrap">
     <table class="map">
       <thead>
@@ -224,17 +223,17 @@ description: Conductor is joining Meta and Conductor Cloud shuts down on 20 Nove
         <tr>
           <th scope="row">Workspace</th>
           <td>"An isolated copy of a project and repository for one task", one workspace to one branch, backed by a git worktree.<sup><a href="#s3">3</a></sup><sup><a href="#s4">4</a></sup></td>
-          <td class="gc">A <strong>loop</strong>: one node on the project's canvas, one live agent session. Its worktree is optional: in the create form pick none (run in the checkout), an existing worktree, or a new branch, which GraphCode creates and later offers to sweep.</td>
+          <td class="gc">A loop: one node on the canvas, one live agent session. The worktree is optional. In the create form you pick none (it runs in the checkout), an existing worktree, or a new branch, which GraphCode creates and later offers to clean up.</td>
         </tr>
         <tr>
-          <th scope="row">Repository / project</th>
+          <th scope="row">Repository</th>
           <td>The repository a workspace is cut from.<sup><a href="#s3">3</a></sup></td>
-          <td class="gc">A <strong>project</strong> in the sidebar: a local folder, a clone from a URL, or a repository on a remote host over SSH.</td>
+          <td class="gc">A project in the sidebar: a local folder, a clone from a URL, or a repository on a remote host over SSH.</td>
         </tr>
         <tr>
           <th scope="row">Several agents in one workspace</th>
           <td>Agents on the same branch in separate tabs.<sup><a href="#s5">5</a></sup><sup><a href="#s6">6</a></sup></td>
-          <td class="gc">Several loops in one project sharing a checkout or worktree, or extra tabs and splits inside one loop's terminal workspace.</td>
+          <td class="gc">Several loops in one project sharing a checkout or worktree, or extra tabs and splits inside one loop's terminal.</td>
         </tr>
         <tr>
           <th scope="row">Agent picker</th>
@@ -243,100 +242,81 @@ description: Conductor is joining Meta and Conductor Cloud shuts down on 20 Nove
         </tr>
         <tr>
           <th scope="row">Chat panel and Big Terminal</th>
-          <td>A chat panel per agent session plus a workspace terminal.<sup><a href="#s6">6</a></sup></td>
-          <td class="gc">The agent's own terminal UI, live, with tabs and splits. <code>graphcode node send</code> types into any loop from a shell or from another loop.</td>
+          <td>A chat panel per agent session, plus a workspace terminal.<sup><a href="#s6">6</a></sup></td>
+          <td class="gc">The agent's own terminal interface, live, with tabs and splits. <code>graphcode node send</code> types into any loop from a shell or from another loop.</td>
         </tr>
         <tr>
           <th scope="row">Codex goals (<code>/goal</code>)</th>
           <td>Keeps a local Codex session working across turns.<sup><a href="#s6">6</a></sup></td>
-          <td class="gc">A <strong>goal-based loop</strong>, on any backend. It resolves when the goal is met, optionally decided by a shell check that exits 0 (for example <code>make test</code>).</td>
+          <td class="gc">A goal-based loop, on any backend. It resolves when the goal is met, optionally decided by a shell check that exits 0, such as <code>make test</code>.</td>
         </tr>
         <tr>
           <th scope="row">Plan Mode</th>
           <td>An agent mode that plans before editing.<sup><a href="#s6">6</a></sup></td>
-          <td class="gc">The backend's own modes stay available in its terminal. A <strong>turn-based loop</strong> additionally pauses for your review every turn, or only before writes.</td>
+          <td class="gc">The agent's own modes stay available in its terminal. A turn-based loop also pauses for your review every turn, or only before it writes files.</td>
         </tr>
         <tr>
           <th scope="row">Routines</th>
-          <td>Agents on a schedule or from a GitHub Action, run in the cloud.<sup><a href="#s7">7</a></sup></td>
-          <td class="gc">A <strong>time-based loop</strong>, run locally. Its cadence lives in its prompt (<code>/loop 1h …</code>); for Codex, OpenCode and pi, switch on the experimental Daemon heartbeat. <span class="none">No GitHub Action trigger.</span></td>
+          <td>Agents run on a schedule or from a GitHub Action, in the cloud.<sup><a href="#s7">7</a></sup></td>
+          <td class="gc">A time-based loop, run on your Mac. The cadence lives in its prompt (<code>/loop 1h …</code>); for Codex, OpenCode and pi, switch on the experimental Daemon heartbeat in Settings. <span class="none">No GitHub Action trigger.</span></td>
         </tr>
         <tr>
           <th scope="row">Handoffs and <code>.context</code> notes</th>
           <td>A <code>.context</code> folder in the workspace for notes and handoffs.<sup><a href="#s3">3</a></sup></td>
-          <td class="gc"><strong>Edges</strong> between loops (hand-off, message, spawn), a memory log per loop that a relaunched session reads first, and the Mailroom, a board every loop in the graph can post to. Nothing is written inside your project folder.</td>
+          <td class="gc">Edges between loops (hand-off, message, spawn), a memory log per loop that a relaunched session reads first, and the Mailroom, a board any loop in the graph can post to. Nothing is written inside your project folder.</td>
         </tr>
         <tr>
           <th scope="row">Cloud workspaces</th>
-          <td>Workspaces in Vercel sandboxes that keep running with the app closed; shutting down 20 November.<sup><a href="#s1">1</a></sup><sup><a href="#s8">8</a></sup></td>
-          <td class="gc">The local daemon keeps loops running with the app closed. To run on another machine, add a remote project over SSH; loops run there and this Mac steers them. <span class="none">No hosted cloud.</span></td>
+          <td>Workspaces in Vercel sandboxes that keep running with the app closed. Shutting down on 20 November.<sup><a href="#s1">1</a></sup><sup><a href="#s8">8</a></sup></td>
+          <td class="gc">The local daemon keeps loops running with the app closed. For another machine, add a remote project over SSH; its loops run there while your Mac steers them. <span class="none">No hosted cloud.</span></td>
         </tr>
         <tr>
           <th scope="row">Multiplayer</th>
-          <td>Teammates prompting a shared cloud workspace in real time.<sup><a href="#s8">8</a></sup></td>
+          <td>Teammates prompting a shared cloud workspace together.<sup><a href="#s8">8</a></sup></td>
           <td class="gc"><span class="none">No equivalent. GraphCode is single-user.</span></td>
         </tr>
         <tr>
           <th scope="row">Setup scripts, files to copy</th>
-          <td>Gitignored files copied into each new worktree; setup scripts for the rest.<sup><a href="#s4">4</a></sup></td>
-          <td class="gc"><span class="none">No equivalent. GraphCode creates the worktree; ask the loop's prompt to run your setup.</span></td>
+          <td>Gitignored files copied into each new worktree, with setup scripts for the rest.<sup><a href="#s4">4</a></sup></td>
+          <td class="gc"><span class="none">No equivalent. GraphCode creates the worktree; put your setup steps in the loop's prompt.</span></td>
         </tr>
       </tbody>
     </table>
   </div>
 </section>
 
-<section class="section" id="quickstart">
-  <h2>Migration quickstart</h2>
-  <p class="sub">About five minutes from install to a running loop. Your existing repositories, branches and worktrees work as they are.</p>
-  <ol class="steps">
-    <li><strong>Export from Conductor first.</strong> Before 13 November if you still want to send messages in the cloud, and before 20 November at the latest: right-click a cloud workspace › Transfer to local, or Settings › Account › Export data.</li>
-    <li><strong>Install GraphCode.</strong> macOS 15+ on Apple Silicon, with at least one of <code>claude</code>, <code>codex</code>, <code>copilot</code>, <code>opencode</code> or <code>pi</code> on your PATH. GraphCode bundles none of them, so the CLIs you used under Conductor carry over with their logins.
-<pre><span class="prompt">$ </span>brew install --cask scgopi/graphcode/graphcode</pre>
-    Or drag GraphCode to Applications from the <a href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">latest .dmg</a>.</li>
-    <li><strong>Add your repository.</strong> The sidebar's ⊕ menu: a local folder (the repo you had in Conductor), a clone from a URL, or a remote repository over SSH.</li>
-    <li><strong>Create your first loop.</strong> ⊕ on the canvas. Write the prompt, pick the agent, choose <em>Goal</em>, and give it a done check; the <strong>Test</strong> button runs the check exactly as the daemon will. To mirror a Conductor workspace, set the worktree to a new branch. From a shell, the same loop is:
+<section class="section" id="getting-started">
+  <div class="article">
+    <h2>Moving over</h2>
+    <p>From install to a running loop takes a few minutes. Your repositories, branches and worktrees work as they are.</p>
+    <ol class="steps">
+      <li>Export from Conductor. Do it before 13 November if you still want to send messages in the cloud, and before 20 November at the latest.</li>
+      <li>Install GraphCode with <code>brew install --cask scgopi/graphcode/graphcode</code>, or drag it to Applications from the <a href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">latest .dmg</a>. You need at least one of <code>claude</code>, <code>codex</code>, <code>copilot</code>, <code>opencode</code> or <code>pi</code> on your PATH; the ones you used with Conductor carry over with their logins.</li>
+      <li>Add the repository you had in Conductor from the ⊕ menu in the sidebar.</li>
+      <li>Click ⊕ on the canvas to create a loop. Write the prompt, pick the agent, choose Goal and give it a done check. The Test button runs the check the same way the daemon will. If you want the Conductor habit of one branch per task, set the worktree to a new branch.</li>
+      <li>Click the node to attach to the live session.</li>
+    </ol>
+    <p>The same loop from a shell, once the project is added:</p>
 <pre><span class="prompt">$ </span>graphcode node create ~/code/my-repo --title FixBuild --type goal \
-    --goal "the test suite passes" --predicate "make test" --backend codex</pre></li>
-    <li><strong>Open it and steer.</strong> Click the node to attach to the live session. Add a second loop and drag an edge between them to hand work on when the first resolves. Close the app; the daemon keeps both running.</li>
-  </ol>
+    --goal "the test suite passes" --predicate "make test" --backend codex</pre>
+    <p>Then add a second loop, drag an edge from the first to it, and close the app. The daemon runs the first loop to its goal and hands off to the second without you.</p>
+  </div>
 </section>
 
 <section class="section sources" id="sources">
   <h2>Sources</h2>
-  <p class="sub">Fetched on 7 November 2026. If Conductor's pages change, its own pages win; open an issue on the GraphCode repo and this page gets corrected. The <a href="compare.html">full comparison</a> covers Conductor alongside Vibe Kanban, Claude Squad, Superset, Emdash and Sculptor.</p>
+  <p class="sub">Fetched on 7 November 2026. If Conductor's pages change, they win; open an issue on the GraphCode repo and I will correct this page. The <a href="compare.html">full comparison</a> covers Conductor alongside Vibe Kanban, Claude Squad, Superset, Emdash and Sculptor.</p>
   <ol>
     <li id="s1"><a href="https://conductor.build/announcement">conductor.build/announcement</a>, "Conductor is joining Meta", timeline and FAQ.</li>
-    <li id="s2"><a href="https://conductor.build/changelog/0.93.0-conductor-is-joining-meta">conductor.build/changelog</a>, 0.93.0 "Conductor is joining Meta", 4 November 2026; see also <a href="https://aiweekly.co/alerts/meta-buys-conductor-to-run-teams-of-ai-coding-agents-in-parallel">AI Weekly</a>, 4 November 2026.</li>
+    <li id="s2"><a href="https://conductor.build/changelog/0.93.0-conductor-is-joining-meta">conductor.build/changelog</a>, 0.93.0 "Conductor is joining Meta", 4 November 2026. Reported by <a href="https://aiweekly.co/alerts/meta-buys-conductor-to-run-teams-of-ai-coding-agents-in-parallel">AI Weekly</a> the same day.</li>
     <li id="s3"><a href="https://conductor.build/docs/concepts/workspaces-and-branches">conductor.build/docs/concepts/workspaces-and-branches</a>.</li>
     <li id="s4"><a href="https://conductor.build/docs/concepts/git-worktrees">conductor.build/docs/concepts/git-worktrees</a>.</li>
     <li id="s5"><a href="https://conductor.build/docs/concepts/parallel-agents">conductor.build/docs/concepts/parallel-agents</a>.</li>
     <li id="s6"><a href="https://conductor.build/docs/concepts/agent-modes">conductor.build/docs/concepts/agent-modes</a>.</li>
     <li id="s7"><a href="https://conductor.build/changelog">conductor.build/changelog</a>, 0.85.0 "Sections, routines, and a new model picker", 9 September 2026.</li>
-    <li id="s8"><a href="https://conductor.build/pricing">conductor.build/pricing</a>, plans and the Cloud FAQ, as cited on the <a href="compare.html">comparison page</a> (12 September 2026).</li>
+    <li id="s8"><a href="https://conductor.build/pricing">conductor.build/pricing</a>, plans and the Cloud FAQ, as fetched for the <a href="compare.html">comparison page</a> on 12 September 2026.</li>
   </ol>
-  <div class="gc-note">
-    <strong>The GraphCode statements</strong> are drawn from the shipped code and the README:
-    <ul>
-      <li>Backends: <a href="https://github.com/scgopi/GraphCode/blob/main/GraphcodeKit/Sources/Domain/CLISessionBackendKind.swift">CLISessionBackendKind.swift</a>; loop types: <a href="https://github.com/scgopi/GraphCode/blob/main/GraphcodeKit/Sources/Domain/LoopType.swift">LoopType.swift</a>; edge kinds: <a href="https://github.com/scgopi/GraphCode/blob/main/GraphcodeKit/Sources/Domain/EdgeKind.swift">EdgeKind.swift</a>.</li>
-      <li>Optional worktree per loop (none, existing, new branch) and the sweep: <a href="https://github.com/scgopi/GraphCode/blob/main/graphcode/Sources/Features/Project/ProjectFeatureState.swift">ProjectFeatureState.swift</a>, <a href="https://github.com/scgopi/GraphCode/blob/main/graphcode/Sources/Features/App/AppFeature+Worktrees.swift">AppFeature+Worktrees.swift</a>.</li>
-      <li>Install, platform, projects over SSH, session survival and the daemon: the <a href="https://github.com/scgopi/GraphCode#readme">README</a>; licence: <a href="https://github.com/scgopi/GraphCode/blob/main/LICENSE">LICENSE</a>.</li>
-    </ul>
-  </div>
-</section>
-
-<section class="cta">
-  <div class="cta-card">
-    <div class="cta-inner">
-      <h2>Bring your agents. Keep your Mac.</h2>
-      <p>Add the repo you had in Conductor, write a goal, pick the agent. Then close the app; the loop keeps going.</p>
-      <div class="cta-ctas">
-        <a class="btn-primary" href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">⬇ Download .dmg</a>
-        <a class="btn-ghost" href="https://github.com/scgopi/GraphCode" target="_blank" rel="noopener"><span class="star">★</span> View on GitHub</a>
-      </div>
-      <div class="brew"><span class="prompt">$</span>brew install --cask scgopi/graphcode/graphcode</div>
-    </div>
-  </div>
+  <p class="sub" style="margin-top:22px">The GraphCode statements come from the <a href="https://github.com/scgopi/GraphCode#readme">README</a> and the source: backends in <a href="https://github.com/scgopi/GraphCode/blob/main/GraphcodeKit/Sources/Domain/CLISessionBackendKind.swift">CLISessionBackendKind.swift</a>, loop types in <a href="https://github.com/scgopi/GraphCode/blob/main/GraphcodeKit/Sources/Domain/LoopType.swift">LoopType.swift</a>, edges in <a href="https://github.com/scgopi/GraphCode/blob/main/GraphcodeKit/Sources/Domain/EdgeKind.swift">EdgeKind.swift</a>, the per-loop worktree choice in <a href="https://github.com/scgopi/GraphCode/blob/main/graphcode/Sources/Features/Project/ProjectFeatureState.swift">ProjectFeatureState.swift</a>, and the licence in <a href="https://github.com/scgopi/GraphCode/blob/main/LICENSE">LICENSE</a>.</p>
 </section>
 
 <footer class="footer">
