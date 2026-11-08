@@ -3,6 +3,7 @@ const std = @import("std");
 pub const directory_prefix = ".graphcode-";
 pub const default_directory_name = ".graphcode";
 pub const max_name_length: usize = 48;
+pub const max_creation_name_length: usize = 32;
 
 pub const Workspace = struct {
     name: []const u8,
@@ -172,6 +173,134 @@ pub fn normalizeName(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return result.toOwnedSlice();
 }
 
+const NamingIcu = struct {
+    library: std.DynLib,
+    open: *const fn ([*]const u16, i32, c_int, ?[*]const u16, i32, ?*anyopaque, *i32) callconv(.c) ?*anyopaque,
+    transform: *const fn (*const anyopaque, [*]u16, *i32, i32, i32, *i32, *i32) callconv(.c) void,
+    close: *const fn (*anyopaque) callconv(.c) void,
+    break_open: *const fn (c_int, [*:0]const u8, [*]const u16, i32, *i32) callconv(.c) ?*anyopaque,
+    break_next: *const fn (*anyopaque) callconv(.c) i32,
+    break_close: *const fn (*anyopaque) callconv(.c) void,
+    last_status: i32 = 0,
+
+    fn init() !NamingIcu {
+        // ICU is an OS component on the supported Windows 11/Server 2022+ targets.
+        var library = std.DynLib{ .inner = .{ .dll = try std.os.windows.LoadLibraryExW(
+            std.unicode.utf8ToUtf16LeStringLiteral("icu.dll"),
+            .load_library_search_system32,
+        ) } };
+        errdefer library.close();
+        var result: NamingIcu = undefined;
+        inline for (.{ .{ "open", "utrans_openU" }, .{ "transform", "utrans_transUChars" }, .{ "close", "utrans_close" }, .{ "break_open", "ubrk_open" }, .{ "break_next", "ubrk_next" }, .{ "break_close", "ubrk_close" } }) |binding| {
+            @field(result, binding[0]) = library.lookup(@TypeOf(@field(result, binding[0])), binding[1]) orelse
+                return error.WorkspaceNamingIcuExportMissing;
+        }
+        result.library = library;
+        result.last_status = 0;
+        return result;
+    }
+
+    fn latin(self: *NamingIcu, allocator: std.mem.Allocator, input: []const u16) ![]u16 {
+        const id = std.unicode.utf8ToUtf16LeStringLiteral("Any-Latin; NFD; [:Nonspacing Mark:] Remove; NFC; Lower");
+        var status: i32 = 0;
+        const transliterator = self.open(id, @intCast(id.len), 0, null, 0, null, &status);
+        self.last_status = status;
+        const handle = transliterator orelse return error.WorkspaceNamingTransformFailed;
+        defer self.close(handle);
+        if (status > 0) return error.WorkspaceNamingTransformFailed;
+        const max_length = std.math.maxInt(i32);
+        var capacity = std.math.add(usize, input.len, 1) catch return error.NameTooLong;
+        while (capacity <= max_length) {
+            const text = try allocator.alloc(u16, capacity);
+            defer allocator.free(text);
+            @memcpy(text[0..input.len], input);
+            var length: i32 = @intCast(input.len);
+            var limit = length;
+            status = 0;
+            self.transform(handle, text.ptr, &length, @intCast(capacity), 0, &limit, &status);
+            self.last_status = status;
+            if (status == 15) { // U_BUFFER_OVERFLOW_ERROR: retry the original input, not partial output.
+                capacity = @max(capacity * 2, @as(usize, @intCast(@max(length, 0))) + 1);
+                continue;
+            }
+            if (status > 0 or length < 0 or length > capacity) return error.WorkspaceNamingTransformFailed;
+            return allocator.dupe(u16, text[0..@intCast(length)]);
+        }
+        return error.NameTooLong;
+    }
+
+    fn characters(self: *NamingIcu, plain: []const u16) !*anyopaque {
+        var status: i32 = 0;
+        const iterator = self.break_open(0, "", plain.ptr, @intCast(plain.len), &status);
+        self.last_status = status;
+        const handle = iterator orelse return error.WorkspaceNamingCharactersFailed;
+        if (status > 0) {
+            self.break_close(handle);
+            return error.WorkspaceNamingCharactersFailed;
+        }
+        return handle;
+    }
+};
+
+/// Creation follows Workspace.slug's transforms and Character mapping before prefix(32).
+/// Legacy normalization remains separate for explicit rename; discovered paths never use either.
+pub fn normalizeCreationName(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    if (!std.unicode.utf8ValidateSlice(input)) return error.InvalidName;
+    var icu = NamingIcu.init() catch |err| {
+        std.log.err("Workspace Unicode naming ICU could not be loaded: {s}", .{@errorName(err)});
+        return err;
+    };
+    defer icu.library.close();
+    const utf16 = try std.unicode.utf8ToUtf16LeAlloc(allocator, input);
+    defer allocator.free(utf16);
+    const plain = icu.latin(allocator, utf16) catch |err| {
+        if (err == error.WorkspaceNamingTransformFailed)
+            std.log.err("Workspace Unicode naming ICU transform failed: {d}", .{icu.last_status});
+        return err;
+    };
+    defer allocator.free(plain);
+    const iterator = icu.characters(plain) catch |err| {
+        std.log.err("Workspace Unicode naming ICU character iterator failed: {d}", .{icu.last_status});
+        return err;
+    };
+    defer icu.break_close(iterator);
+    var result: [max_creation_name_length]u8 = undefined;
+    var length: usize = 0;
+    var start: usize = 0;
+    var separator = false;
+    while (true) {
+        const end_signed = icu.break_next(iterator);
+        if (end_signed == -1) break;
+        const end: usize = @intCast(end_signed);
+        const character = plain[start..end];
+        start = end;
+        if (character.len == 1 and character[0] < 128 and std.ascii.isAlphanumeric(@intCast(character[0]))) {
+            if (separator and length != 0) {
+                result[length] = '-';
+                length += 1;
+                if (length == result.len) break;
+            }
+            result[length] = @intCast(character[0]);
+            length += 1;
+            if (length == result.len) break;
+            separator = false;
+        } else {
+            separator = true;
+        }
+    }
+    if (length == 0) return error.EmptyName;
+    return allocator.dupe(u8, result[0..length]);
+}
+
+pub fn validateCreationName(allocator: std.mem.Allocator, input: []const u8, home: []const u8) ![]u8 {
+    const identity = try pathIdentity(allocator, home);
+    defer allocator.free(identity);
+    const name = try normalizeCreationName(allocator, input);
+    errdefer allocator.free(name);
+    try checkNameAvailable(allocator, name, home);
+    return name;
+}
+
 pub fn validateName(
     allocator: std.mem.Allocator,
     input: []const u8,
@@ -179,10 +308,15 @@ pub fn validateName(
 ) ![]u8 {
     const name = try normalizeName(allocator, input);
     errdefer allocator.free(name);
+    try checkNameAvailable(allocator, name, home);
+    return name;
+}
+
+fn checkNameAvailable(allocator: std.mem.Allocator, name: []const u8, home: []const u8) !void {
     const path = try workspacePath(allocator, name, home);
     defer allocator.free(path);
     std.fs.cwd().access(path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return name,
+        error.FileNotFound => return,
         else => return err,
     };
     return NameError.NameTaken;
@@ -197,7 +331,7 @@ pub fn workspacePath(
 }
 
 pub fn create(allocator: std.mem.Allocator, input: []const u8, home: []const u8) !Workspace {
-    const name = try validateName(allocator, input, home);
+    const name = try validateCreationName(allocator, input, home);
     errdefer allocator.free(name);
     const path = try workspacePath(allocator, name, home);
     errdefer allocator.free(path);
@@ -359,6 +493,184 @@ test "workspace names normalize to safe stable directory suffixes" {
     const name = try normalizeName(std.testing.allocator, "Café / Zürich");
     defer std.testing.allocator.free(name);
     try std.testing.expectEqualStrings("caf-z-rich", name);
+}
+
+test "workspace creation naming parity matches pinned Foundation oracle fixtures" {
+    const cases = [_]struct { input: []const u8, slug: []const u8 }{
+        .{ .input = "", .slug = "" },
+        .{ .input = "///", .slug = "" },
+        .{ .input = "Client Work", .slug = "client-work" },
+        .{ .input = "  spaced  out  ", .slug = "spaced-out" },
+        .{ .input = "OSS/side—projects!", .slug = "oss-side-projects" },
+        .{ .input = "Café Zürich", .slug = "cafe-zurich" },
+        .{ .input = "Cafe\u{301} Zu\u{308}rich", .slug = "cafe-zurich" },
+        .{ .input = "Москва", .slug = "moskva" },
+        .{ .input = "東京", .slug = "dong-jing" },
+        .{ .input = "中文", .slug = "zhong-wen" },
+        .{ .input = "Αθήνα", .slug = "athena" },
+        .{ .input = "العربية", .slug = "al-rbyt" },
+        .{ .input = "नमस्ते", .slug = "namaste" },
+        .{ .input = "한국어", .slug = "hangug-eo" },
+        .{ .input = "Łódź Straße Æsir Øresund", .slug = "odz-stra-e-sir-resund" },
+        .{ .input = "İ I ı", .slug = "i-i" },
+        .{ .input = "ＡＢＣ １２３", .slug = "" },
+        .{ .input = "work👩‍💻space", .slug = "work-space" },
+        .{ .input = "a\u{93e}b", .slug = "aab" },
+        .{ .input = "a\u{200d}b", .slug = "b" },
+        .{ .input = "1️⃣ team", .slug = "team" },
+        .{ .input = "CON", .slug = "con" },
+        .{ .input = "..\\..//Outside workspace", .slug = "outside-workspace" },
+        .{ .input = "a" ** 31 ++ " bb", .slug = "a" ** 31 ++ "-" },
+        .{ .input = "a" ** 32 ++ "bb", .slug = "a" ** 32 },
+        .{ .input = "long " ** 40, .slug = "long-long-long-long-long-long-lo" },
+        .{ .input = "🚀", .slug = "" },
+    };
+    try std.testing.expectEqual(@as(usize, 27), cases.len);
+    for (cases) |case| {
+        if (case.slug.len == 0) {
+            try std.testing.expectError(error.EmptyName, normalizeCreationName(std.testing.allocator, case.input));
+        } else {
+            const slug = try normalizeCreationName(std.testing.allocator, case.input);
+            defer std.testing.allocator.free(slug);
+            try std.testing.expectEqualStrings(case.slug, slug);
+        }
+    }
+}
+
+test "workspace creation naming parity detects transliteration truncation and file collisions" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const home = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+    try temporary.dir.makeDir(".graphcode-cafe-zurich");
+    try temporary.dir.makeDir(".graphcode-" ++ "a" ** 31 ++ "-");
+    try temporary.dir.writeFile(.{ .sub_path = ".graphcode-moskva", .data = "untouched" });
+    for ([_][]const u8{ "Café Zürich", "CAFÉ ZÜRICH", "a" ** 31 ++ " bb", "Москва" }) |input| {
+        if (create(allocator, input, home)) |workspace| {
+            var unexpected = workspace;
+            unexpected.deinit(allocator);
+            return error.ExpectedNameCollision;
+        } else |err| try std.testing.expectEqual(error.NameTaken, err);
+    }
+    const untouched = try temporary.dir.readFileAlloc(allocator, ".graphcode-moskva", 100);
+    defer allocator.free(untouched);
+    try std.testing.expectEqualStrings("untouched", untouched);
+}
+
+test "workspace creation naming parity retains Windows path safety and rejects malformed UTF8" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "\xff", "\xc3", "\xed\xa0\x80" }) |input|
+        try std.testing.expectError(error.InvalidName, normalizeCreationName(allocator, input));
+    for ([_][]const u8{ "", "relative", "C:relative", "\\relative", "C:\\bad\x00home", "C:\\\xff" }) |home|
+        try std.testing.expectError(error.InvalidWorkspacePath, validateCreationName(allocator, "Valid", home));
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const home = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+    for ([_][]const u8{ "CON", "PRN", "AUX", "NUL", "COM1", "LPT1", "../outside", "valid\x00name" }) |input| {
+        var workspace = try create(allocator, input, home);
+        defer workspace.deinit(allocator);
+        try std.testing.expect(std.mem.startsWith(u8, workspace.path, home));
+        try std.testing.expect(std.mem.startsWith(u8, std.fs.path.basenameWindows(workspace.path), directory_prefix));
+        try std.testing.expect(std.mem.indexOfScalar(u8, workspace.name, 0) == null);
+    }
+}
+
+test "workspace creation naming parity owns transform expansion and all allocation failures" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const name = try normalizeCreationName(allocator, "東京 Café " ** 40);
+            defer allocator.free(name);
+            try std.testing.expectEqual(@as(usize, 32), name.len);
+            try std.testing.expect(std.mem.startsWith(u8, name, "dong-jing-cafe-"));
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+test "workspace creation naming parity closes ICU failure handles and retains actual status" {
+    const Probe = struct {
+        var fail_open: bool = true;
+        var closed: usize = 0;
+        var break_closed: usize = 0;
+
+        fn open(_: [*]const u16, _: i32, _: c_int, _: ?[*]const u16, _: i32, _: ?*anyopaque, status: *i32) callconv(.c) ?*anyopaque {
+            status.* = if (fail_open) 16 else 0;
+            return @ptrFromInt(1);
+        }
+        fn transform(_: *const anyopaque, _: [*]u16, _: *i32, _: i32, _: i32, _: *i32, status: *i32) callconv(.c) void {
+            status.* = 7;
+        }
+        fn close(handle: *anyopaque) callconv(.c) void {
+            std.debug.assert(@intFromPtr(handle) == 1);
+            closed += 1;
+        }
+        fn breakOpen(_: c_int, _: [*:0]const u8, _: [*]const u16, _: i32, status: *i32) callconv(.c) ?*anyopaque {
+            status.* = 2;
+            return @ptrFromInt(2);
+        }
+        fn breakNext(_: *anyopaque) callconv(.c) i32 {
+            unreachable;
+        }
+        fn breakClose(handle: *anyopaque) callconv(.c) void {
+            std.debug.assert(@intFromPtr(handle) == 2);
+            break_closed += 1;
+        }
+    };
+    Probe.closed = 0;
+    Probe.break_closed = 0;
+    Probe.fail_open = true;
+    var icu = NamingIcu{
+        .library = undefined,
+        .open = &Probe.open,
+        .transform = &Probe.transform,
+        .close = &Probe.close,
+        .break_open = &Probe.breakOpen,
+        .break_next = &Probe.breakNext,
+        .break_close = &Probe.breakClose,
+    };
+    try std.testing.expectError(error.WorkspaceNamingTransformFailed, icu.latin(std.testing.allocator, &.{'a'}));
+    try std.testing.expectEqual(@as(usize, 1), Probe.closed);
+    try std.testing.expectEqual(@as(i32, 16), icu.last_status);
+    Probe.fail_open = false;
+    try std.testing.expectError(error.WorkspaceNamingTransformFailed, icu.latin(std.testing.allocator, &.{'a'}));
+    try std.testing.expectEqual(@as(usize, 2), Probe.closed);
+    try std.testing.expectEqual(@as(i32, 7), icu.last_status);
+    try std.testing.expectError(error.WorkspaceNamingCharactersFailed, icu.characters(&.{'a'}));
+    try std.testing.expectEqual(@as(usize, 1), Probe.break_closed);
+    try std.testing.expectEqual(@as(i32, 2), icu.last_status);
+}
+
+test "workspace creation naming parity preserves existing raw directory identities" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const legacy_name = "Legacy-" ++ "x" ** 48;
+    for ([_][]const u8{ "caf-z-rich", "Café Zürich", legacy_name }) |name| {
+        const directory_name = try std.fmt.allocPrint(allocator, "{s}{s}", .{ directory_prefix, name });
+        defer allocator.free(directory_name);
+        try temporary.dir.makeDir(directory_name);
+    }
+    const home = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+    var before = try listFromHome(allocator, home);
+    defer before.deinit(allocator);
+    var created = try create(allocator, "Café Zürich", home);
+    defer created.deinit(allocator);
+    try std.testing.expectEqualStrings("cafe-zurich", created.name);
+    var after = try managerListFromHome(allocator, home, before.items[0].path);
+    defer after.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 4), before.items.len);
+    try std.testing.expectEqual(@as(usize, 5), after.items.len);
+    for (before.items) |original| {
+        for (after.items) |workspace| {
+            if (!std.mem.eql(u8, original.identity, workspace.identity)) continue;
+            try std.testing.expectEqualStrings(original.name, workspace.name);
+            try std.testing.expectEqualStrings(original.path, workspace.path);
+            break;
+        } else return error.ExistingWorkspaceIdentityLost;
+    }
 }
 
 test "workspace validation rejects long names" {

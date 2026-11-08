@@ -590,9 +590,27 @@ diagram titled with the typed name, and workspace-isolation details. Invalid or
 colliding names stay inline with Create & Open disabled; an empty draft stays
 quiet, and Cancel discards it. Ctrl+A selects the complete focused name field
 without changing ordinary typing or AltGr handling. Creation and launch still
-use the existing workspace lifecycle and identity guards. Windows keeps its
-existing ASCII normalization and 48-character limit rather than adopting the
-macOS transliteration and truncation rules.
+use the existing workspace lifecycle and identity guards.
+
+New workspace names follow macOS's operation order: transliterate to Latin,
+strip nonspacing diacritics, lowercase, map characters other than ASCII letters
+and numbers to separators, collapse separators, and take the first 32 characters. The cut
+can end in a hyphen. Preview, submit-time validation, and creation share this
+creation-only rule, including file/directory collisions after transliteration
+or truncation. Windows absolute-path validation and filesystem errors still
+apply; the Darwin socket-path limit does not apply to Windows named pipes.
+The native implementation uses Windows' built-in ICU C API, loaded only from
+System32 (the combined DLL is available since Windows 10 1903, before the
+Windows 11 baseline and Server 2022/2025 CI hosts). Missing ICU, missing exports,
+or failed transforms report an operational error, never an ASCII fallback.
+The 27 checked naming fixtures were produced by compiling the actual shared
+`Workspace.slug` method with pinned Swift/Foundation 6.3.3. They establish finite
+fixture equivalence, not equality for every Unicode character across OS/ICU
+versions, nor a live native input or paired macOS visual qualification.
+Existing directories retain their original names, paths, identities, and
+discovery/activation behavior; nothing is migrated or renamed. Explicit Rename
+keeps its existing ASCII normalization and 48-character limit.
+
 Selecting the current workspace does nothing; selecting an identified running
 workspace restores its exact window rather than the first GraphCode window.
 `Ctrl+Alt+PageUp` / `Ctrl+Alt+PageDown` and Previous/Next Workspace cycle only

@@ -22,7 +22,7 @@ pub const State = struct {
     allocator: std.mem.Allocator,
     home: []const u8,
     current_name: []const u8,
-    validator: Validator = &Lifecycle.validateName,
+    validator: Validator = &Lifecycle.validateCreationName,
     draft: []u8 = &.{},
     path: []u8 = &.{},
     problem: ?[]const u8 = null,
@@ -510,7 +510,7 @@ const TestValidation = struct {
         calls += 1;
         if (failure) return error.AccessDenied;
         if (collision) return error.NameTaken;
-        return Lifecycle.normalizeName(allocator, input);
+        return Lifecycle.normalizeCreationName(allocator, input);
     }
 
     fn state() State {
@@ -580,15 +580,16 @@ test "new workspace validation operational failures propagate" {
     try std.testing.expectError(error.AccessDenied, state.update("Client Work"));
 }
 
-test "new workspace name limit follows existing lifecycle without truncation" {
+test "new workspace creation name truncates without rejecting the typed title" {
     var state = TestValidation.state();
     defer state.deinit();
-    try state.update(&(.{'a'} ** Lifecycle.max_name_length));
+    try state.update(&(.{'a'} ** Lifecycle.max_creation_name_length));
     try std.testing.expect(state.canCreate());
-    try state.update(&(.{'a'} ** (Lifecycle.max_name_length + 1)));
-    try std.testing.expect(state.problem != null);
-    try std.testing.expectEqualStrings("Workspace name is too long", state.problem.?);
-    try std.testing.expect(!state.canCreate());
+    try state.update(&(.{'a'} ** (Lifecycle.max_creation_name_length + 1)));
+    try std.testing.expect(state.problem == null);
+    try std.testing.expect(state.canCreate());
+    try std.testing.expectEqualStrings("C:\\OwnedHome\\.graphcode-" ++ "a" ** 32, state.path);
+    try std.testing.expectEqual(@as(usize, 33), state.previewName().len);
 }
 
 test "new workspace layout keeps fields and diagram separate at supported DPIs" {
@@ -626,15 +627,38 @@ test "new workspace create cancel and editing notifications route without accide
     try std.testing.expectEqual(CommandAction.ignore, commandAction(9999, 0));
 }
 
-test "new workspace presentation preserves Unicode and ampersands without changing directory rules" {
+test "new workspace presentation preserves Unicode and ampersands with creation transliteration" {
     var state = TestValidation.state();
     defer state.deinit();
     try state.update("Caf\xc3\xa9 R&D");
     try std.testing.expectEqualStrings("Caf\xc3\xa9 R&D", state.previewName());
-    try std.testing.expectEqualStrings("C:\\OwnedHome\\.graphcode-caf-r-d", state.path);
+    try std.testing.expectEqualStrings("C:\\OwnedHome\\.graphcode-cafe-r-d", state.path);
     var result = (try state.submit()).?;
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("Caf\xc3\xa9 R&D", result.name);
+}
+
+test "new workspace production validator preview submit and create agree on Unicode and truncation" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const home = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+    var state = State{ .allocator = allocator, .home = home, .current_name = "Legacy-" ++ "x" ** 48 };
+    defer state.deinit();
+    for ([_][]const u8{ "Café Zürich", "東京", "a" ** 31 ++ " bb" }) |input| {
+        try state.update(input);
+        try std.testing.expectEqualStrings(input, state.previewName());
+        try std.testing.expect(state.canCreate());
+        var result = (try state.submit()).?;
+        defer result.deinit(allocator);
+        var workspace = try Lifecycle.create(allocator, result.name, home);
+        defer workspace.deinit(allocator);
+        try std.testing.expectEqualStrings(workspace.path, state.path);
+        try std.testing.expect((try state.submit()) == null);
+        try std.testing.expectEqualStrings("That workspace already exists", state.problem.?);
+        try std.testing.expectEqualStrings("", state.path);
+    }
 }
 
 test "new workspace state and handoff release every allocation on failure" {
