@@ -1,0 +1,356 @@
+---
+title: A Conductor alternative for parallel coding agents on the Mac
+description: Conductor is joining Meta and Conductor Cloud shuts down on 20 November 2026. What is changing, how Conductor's workspaces, agents, goals and routines map onto GraphCode's loops, and how to start a first loop in a few minutes.
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{% seo %}
+<link rel="icon" type="image/png" href="assets/icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+{% include head-custom.html %}
+<style>
+<style>
+  * { box-sizing: border-box; }
+  :root {
+    --bg: #08080a;
+    --panel: #0b0b0d;
+    --card: #0c0c0f;
+    --line: #1c1c20;
+    --line2: #1e1e23;
+    --line3: #212126;
+    --line4: #2a2a30;
+    --ink: #f3f3f1;
+    --ink-soft: #b6b6bc;
+    --ink-mid: #9a9aa2;
+    --ink-dim: #8b8b92;
+    --ink-faint: #77777e;
+    --ink-ghost: #6a6a72;
+    --ink-mute: #63636a;
+    --amber: #f0a23b;
+    --amber-hi: #ffc178;
+    --green: #4ec98a;
+    --blue: #4a9eff;
+    --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--ink); -webkit-font-smoothing: antialiased; font-family: "Helvetica Neue", Helvetica, "Segoe UI", sans-serif; overflow-x: hidden; }
+  a { color: var(--amber); text-decoration: none; }
+  a:hover { color: var(--amber-hi); }
+  ::selection { background: rgba(240,162,59,.3); }
+  code { font-family: var(--mono); font-size: .92em; color: #d6d6d2; background: #101013; border: 1px solid var(--line3); border-radius: 4px; padding: 1px 5px; white-space: nowrap; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding-left: 28px; padding-right: 28px; }
+
+  .nav { position: sticky; top: 0; z-index: 50; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); background: rgba(8,8,10,.78); border-bottom: 1px solid var(--line); }
+  .nav-inner { max-width: 1180px; margin: 0 auto; padding: 14px 28px; display: flex; align-items: center; gap: 28px; }
+  .nav-brand { display: flex; align-items: center; gap: 10px; margin-right: auto; color: var(--ink); }
+  .nav-brand img { width: 26px; height: 26px; display: block; }
+  .nav-brand span { font-size: 15px; letter-spacing: -.01em; font-weight: 600; }
+  .nav-links { display: flex; align-items: center; gap: 22px; font-size: 13.5px; }
+  .nav-links a { color: var(--ink-dim); }
+  .nav-links a:hover, .nav-links a[aria-current] { color: var(--ink); }
+  .nav-actions { display: flex; align-items: center; gap: 10px; }
+  .btn-star { display: flex; align-items: center; gap: 8px; padding: 8px 13px; border: 1px solid var(--line4); border-radius: 8px; font-size: 13px; color: #d6d6d2; font-family: var(--mono); }
+  .btn-star:hover { border-color: #4a4a52; color: #fff; }
+  .btn-star .star { color: var(--amber); }
+  .btn-amber { padding: 9px 16px; background: var(--amber); color: #12100c; border-radius: 8px; font-size: 13px; font-weight: 600; }
+  .btn-amber:hover { background: var(--amber-hi); color: #12100c; }
+
+  .head { position: relative; padding: 72px 28px 0; overflow: hidden; }
+  .head-grid-bg { position: absolute; inset: 0; background-image: linear-gradient(#141418 1px, transparent 1px), linear-gradient(90deg, #141418 1px, transparent 1px); background-size: 46px 46px; -webkit-mask-image: radial-gradient(ellipse 90% 60% at 50% 0%, #000 30%, transparent 75%); mask-image: radial-gradient(ellipse 90% 60% at 50% 0%, #000 30%, transparent 75%); pointer-events: none; }
+  .head-copy { max-width: 1180px; margin: 0 auto; position: relative; }
+  .eyebrow { display: inline-flex; align-items: center; gap: 10px; padding: 6px 12px 6px 8px; border: 1px solid var(--line4); border-radius: 999px; font-family: var(--mono); font-size: 12px; color: var(--ink-mid); margin-bottom: 26px; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--blue); }
+  h1 { font-size: 46px; line-height: 1.04; letter-spacing: -.03em; font-weight: 600; margin: 0 0 18px; text-wrap: balance; max-width: 900px; }
+  h1 .accent { color: var(--amber); }
+  .lede { font-size: 17px; line-height: 1.6; color: var(--ink-mid); max-width: 760px; margin: 0 0 14px; text-wrap: pretty; }
+  .method { font-family: var(--mono); font-size: 12px; line-height: 1.7; color: var(--ink-faint); max-width: 760px; margin: 0; }
+
+  .section { max-width: 1180px; margin: 0 auto; padding: 56px 28px 0; }
+  .section h2 { font-size: 28px; line-height: 1.1; letter-spacing: -.025em; font-weight: 600; margin: 0 0 8px; }
+  .section .sub { color: var(--ink-mid); font-size: 15px; line-height: 1.55; margin: 0 0 22px; max-width: 760px; }
+
+  .table-wrap { overflow-x: auto; border: 1px solid var(--line3); border-radius: 14px; background: var(--panel); -webkit-overflow-scrolling: touch; }
+  table { border-collapse: separate; border-spacing: 0; width: 100%; min-width: 980px; font-size: 13.5px; line-height: 1.5; }
+  th, td { text-align: left; vertical-align: top; padding: 14px 16px; border-bottom: 1px solid var(--line2); }
+  tr:last-child td { border-bottom: 0; }
+  thead th { position: sticky; top: 0; background: #0f0f12; font-family: var(--mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-dim); font-weight: 500; border-bottom: 1px solid var(--line4); }
+  thead th.gc { color: var(--amber); }
+  tbody th { position: sticky; left: 0; background: var(--panel); font-family: var(--mono); font-size: 11.5px; letter-spacing: .06em; color: var(--ink-soft); font-weight: 500; width: 150px; min-width: 150px; border-right: 1px solid var(--line2); }
+  tbody td { color: var(--ink-soft); width: 25%; }
+  tbody td.gc { color: var(--ink); background: rgba(240,162,59,.035); }
+  td .none { color: var(--ink-ghost); }
+  sup { font-family: var(--mono); font-size: 10px; line-height: 0; }
+  sup a { color: var(--amber); }
+  sup a:hover { color: var(--amber-hi); }
+  sup + sup::before { content: ","; color: var(--ink-ghost); margin: 0 1px; }
+
+  .sources ol { margin: 0; padding-left: 26px; column-gap: 40px; font-size: 13px; line-height: 1.65; color: var(--ink-mid); }
+  .sources li { margin: 0 0 6px; padding-left: 4px; }
+  .sources li a { word-break: break-all; }
+  .sources li::marker { font-family: var(--mono); color: var(--ink-faint); font-size: 11px; }
+  .sources .gc-note { margin-top: 26px; padding: 16px 18px; border: 1px solid var(--line3); border-radius: 12px; background: var(--card); color: var(--ink-mid); font-size: 13.5px; line-height: 1.6; }
+  .sources .gc-note strong { color: var(--ink); }
+  .sources .gc-note ul { margin: 8px 0 0; padding-left: 20px; }
+  .sources .gc-note li { margin: 2px 0; }
+
+  .cta { max-width: 1180px; margin: 72px auto 0; padding: 0 28px; }
+  .cta-card { position: relative; border: 1px solid var(--line3); border-radius: 20px; background: var(--panel); overflow: hidden; }
+  .cta-inner { position: relative; padding: 48px 40px 44px; text-align: center; }
+  .cta-inner h2 { font-size: 32px; line-height: 1.05; letter-spacing: -.03em; font-weight: 600; margin: 0 0 12px; }
+  .cta-inner p { color: var(--ink-mid); max-width: 560px; margin: 0 auto 26px; line-height: 1.55; }
+  .cta-ctas { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-bottom: 22px; }
+  .btn-primary { padding: 14px 24px; background: var(--amber); color: #12100c; border-radius: 10px; font-size: 15px; font-weight: 600; }
+  .btn-primary:hover { background: var(--amber-hi); color: #12100c; }
+  .btn-ghost { padding: 14px 22px; border: 1px solid var(--line4); border-radius: 10px; font-size: 15px; color: #e6e6e2; display: flex; align-items: center; gap: 9px; }
+  .btn-ghost:hover { border-color: #4a4a52; color: #e6e6e2; }
+  .btn-ghost .star { color: var(--amber); }
+  .brew { display: inline-flex; align-items: center; gap: 12px; padding: 11px 16px; background: var(--bg); border: 1px solid var(--line3); border-radius: 10px; font-family: var(--mono); font-size: 13px; color: #b9b9b2; }
+  .brew .prompt { color: var(--green); }
+
+  .footer { max-width: 1180px; margin: 80px auto 0; padding: 32px 28px 56px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 20px; align-items: center; font-size: 13px; color: var(--ink-faint); }
+  .footer img { width: 22px; height: 22px; display: block; opacity: .8; }
+  .footer .made { margin-right: auto; }
+  .footer-links { display: flex; gap: 20px; flex-wrap: wrap; }
+  .footer-links a { color: var(--ink-faint); }
+  .footer-links a:hover { color: var(--ink); }
+
+  @media (max-width: 720px) {
+    .nav-links { display: none; }
+    .head { padding-top: 48px; }
+    h1 { font-size: 32px; }
+    .lede { font-size: 15.5px; }
+    .section { padding-top: 44px; }
+    .section h2 { font-size: 24px; }
+    .cta-inner { padding: 40px 20px 36px; }
+    .cta-inner h2 { font-size: 26px; }
+    .brew { font-size: 11.5px; }
+  }
+  .timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; max-width: 860px; }
+  .timeline li { display: grid; grid-template-columns: 120px 1fr; gap: 18px; padding: 16px 18px; border: 1px solid var(--line3); border-radius: 12px; background: var(--card); font-size: 14.5px; line-height: 1.6; color: var(--ink-soft); }
+  .timeline .when { font-family: var(--mono); font-size: 12px; letter-spacing: .04em; color: var(--amber); padding-top: 2px; }
+  .prose { max-width: 760px; font-size: 15px; line-height: 1.65; color: var(--ink-soft); }
+  .prose p { margin: 0 0 14px; }
+  .fit { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+  .fit div { padding: 18px 20px; border: 1px solid var(--line3); border-radius: 12px; background: var(--card); font-size: 14px; line-height: 1.6; color: var(--ink-soft); }
+  .fit h3 { margin: 0 0 6px; font-size: 15px; font-weight: 600; color: var(--ink); }
+  table.map { min-width: 760px; }
+  table.map tbody td { width: 42%; }
+  .steps { margin: 0; padding-left: 0; list-style: none; counter-reset: step; max-width: 860px; }
+  .steps li { counter-increment: step; position: relative; padding: 0 0 22px 44px; font-size: 15px; line-height: 1.6; color: var(--ink-soft); }
+  .steps li::before { content: counter(step); position: absolute; left: 0; top: 0; width: 28px; height: 28px; border: 1px solid var(--line4); border-radius: 50%; font-family: var(--mono); font-size: 12px; color: var(--amber); display: flex; align-items: center; justify-content: center; }
+  .steps strong { color: var(--ink); }
+  pre { margin: 10px 0 0; padding: 14px 16px; background: var(--bg); border: 1px solid var(--line3); border-radius: 10px; font-family: var(--mono); font-size: 12.5px; line-height: 1.65; color: #d6d6d2; overflow-x: auto; }
+  pre .prompt { color: var(--green); user-select: none; }
+  @media (max-width: 720px) {
+    .timeline li { grid-template-columns: 1fr; gap: 4px; }
+  }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-brand" href="./">
+      <img src="assets/icon.png" alt="GraphCode">
+      <span>GraphCode</span>
+    </a>
+    <div class="nav-links">
+      <a href="./">Home</a>
+      <a href="compare.html">Compare</a>
+      <a href="shortcuts.html">Docs</a>
+    </div>
+    <div class="nav-actions">
+      <a class="btn-star" href="https://github.com/scgopi/GraphCode" target="_blank" rel="noopener"><span class="star">★</span>Star</a>
+      <a class="btn-amber" href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">Download .dmg</a>
+    </div>
+  </div>
+</nav>
+
+<header class="head">
+  <div class="head-grid-bg"></div>
+  <div class="head-copy">
+    <div class="eyebrow"><span class="dot"></span>For Conductor users · sourced 7 Nov 2026</div>
+    <h1>Moving off Conductor? Run your parallel agents as a <span class="accent">graph of loops</span>.</h1>
+    <p class="lede">Conductor is joining Meta. Conductor Cloud goes read-only on 13 November and shuts down on 20 November 2026, and new users can no longer download the app. GraphCode is a native macOS app that runs Claude Code, Codex, Copilot CLI, OpenCode and pi side by side, each in a live terminal you can step into, kept running by a local daemon.</p>
+    <p class="method">Method: every statement about Conductor below quotes or paraphrases Conductor's own announcement, changelog or docs, fetched on 7 November 2026, and cites it. Every statement about GraphCode is checked against its README and source, linked at the bottom.</p>
+  </div>
+</header>
+
+<section class="section" id="whats-happening">
+  <h2>What is happening to Conductor</h2>
+  <p class="sub">Conductor announced on 4 November 2026 that it is joining Meta.<sup><a href="#s1">1</a></sup><sup><a href="#s2">2</a></sup> Its announcement sets out this timeline:<sup><a href="#s1">1</a></sup></p>
+  <ol class="timeline">
+    <li><span class="when">4 Nov</span><span>No new sign-ups. "New users can no longer sign up for Conductor or download the app." Pro users keep Pro features for free, and active subscribers get a refund.</span></li>
+    <li><span class="when">13 Nov</span><span>Conductor Cloud goes read-only: "You can still read old chats and export data, but you can't send new messages."</span></li>
+    <li><span class="when">20 Nov</span><span>Conductor Cloud shuts down: "We begin deleting Conductor Cloud user data. Please export your data before this date."</span></li>
+    <li><span class="when">Early 2027</span><span>The local Mac app "will continue to receive new models and critical bug fixes until early 2027", then starts winding down.</span></li>
+  </ol>
+  <div class="prose" style="margin-top:22px">
+    <p>Before 20 November, Conductor's own guidance is to bring a cloud workspace and its chats to your Mac with <strong>right-click › Transfer to local</strong>, or to export everything from <strong>Settings › Account › Export data</strong>.<sup><a href="#s2">2</a></sup> Do that first; your branches and worktrees are ordinary git, so nothing below needs Conductor's data to get started.</p>
+  </div>
+</section>
+
+<section class="section" id="why">
+  <h2>Why GraphCode fits a Conductor workflow</h2>
+  <p class="sub">The same job, running several coding agents at once on your own Mac, organised as a graph of loops instead of a list of workspaces.</p>
+  <div class="fit">
+    <div><h3>Native macOS</h3>A Mac app for macOS 15+ on Apple Silicon, Developer ID signed and notarized. Terminals render with GhosttyKit.</div>
+    <div><h3>Live, steerable terminals</h3>Each node on the canvas is a loop running inside a real agent CLI session. Click it to open that session's terminal and type into it mid-run.</div>
+    <div><h3>Your choice of agent, per loop</h3>Claude Code, GitHub Copilot CLI, Codex, OpenCode or pi. A Codex loop can hand off to a Claude Code loop; an edge never asks which agent is on either end.</div>
+    <div><h3>Local daemon and CLI</h3><code>graphcoded</code> keeps loops alive with the app closed, fires edges and polls goal checks. The <code>graphcode</code> CLI drives the same daemon from a shell or from another loop.</div>
+    <div><h3>Sessions that outlast the app</h3>Every loop's terminal is a zmx session. It survives quitting the app; after a reboot the backend's saved session id is resumed rather than started again.</div>
+    <div><h3>Source-available, free</h3>The app and daemon are FSL-1.1-MIT, converting to MIT two years after each release. The CLI and GraphcodeKit are MIT. There is no paid tier.</div>
+  </div>
+</section>
+
+<section class="section" id="mapping">
+  <h2>Conductor concepts, in GraphCode terms</h2>
+  <p class="sub">An honest mapping. Where GraphCode has no equivalent, the row says so.</p>
+  <div class="table-wrap">
+    <table class="map">
+      <thead>
+        <tr>
+          <th scope="col">Conductor</th>
+          <th scope="col">What it is there</th>
+          <th scope="col" class="gc">In GraphCode</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">Workspace</th>
+          <td>"An isolated copy of a project and repository for one task", one workspace to one branch, backed by a git worktree.<sup><a href="#s3">3</a></sup><sup><a href="#s4">4</a></sup></td>
+          <td class="gc">A <strong>loop</strong>: one node on the project's canvas, one live agent session. Its worktree is optional: in the create form pick none (run in the checkout), an existing worktree, or a new branch, which GraphCode creates and later offers to sweep.</td>
+        </tr>
+        <tr>
+          <th scope="row">Repository / project</th>
+          <td>The repository a workspace is cut from.<sup><a href="#s3">3</a></sup></td>
+          <td class="gc">A <strong>project</strong> in the sidebar: a local folder, a clone from a URL, or a repository on a remote host over SSH.</td>
+        </tr>
+        <tr>
+          <th scope="row">Several agents in one workspace</th>
+          <td>Agents on the same branch in separate tabs.<sup><a href="#s5">5</a></sup><sup><a href="#s6">6</a></sup></td>
+          <td class="gc">Several loops in one project sharing a checkout or worktree, or extra tabs and splits inside one loop's terminal workspace.</td>
+        </tr>
+        <tr>
+          <th scope="row">Agent picker</th>
+          <td>Claude Code, Codex, Cursor or OpenCode.<sup><a href="#s6">6</a></sup></td>
+          <td class="gc">Chosen per loop: Claude Code, Copilot CLI, Codex, OpenCode or pi (<code>--backend</code> on the CLI). The CLI must already be on your PATH. <span class="none">No Cursor backend.</span></td>
+        </tr>
+        <tr>
+          <th scope="row">Chat panel and Big Terminal</th>
+          <td>A chat panel per agent session plus a workspace terminal.<sup><a href="#s6">6</a></sup></td>
+          <td class="gc">The agent's own terminal UI, live, with tabs and splits. <code>graphcode node send</code> types into any loop from a shell or from another loop.</td>
+        </tr>
+        <tr>
+          <th scope="row">Codex goals (<code>/goal</code>)</th>
+          <td>Keeps a local Codex session working across turns.<sup><a href="#s6">6</a></sup></td>
+          <td class="gc">A <strong>goal-based loop</strong>, on any backend. It resolves when the goal is met, optionally decided by a shell check that exits 0 (for example <code>make test</code>).</td>
+        </tr>
+        <tr>
+          <th scope="row">Plan Mode</th>
+          <td>An agent mode that plans before editing.<sup><a href="#s6">6</a></sup></td>
+          <td class="gc">The backend's own modes stay available in its terminal. A <strong>turn-based loop</strong> additionally pauses for your review every turn, or only before writes.</td>
+        </tr>
+        <tr>
+          <th scope="row">Routines</th>
+          <td>Agents on a schedule or from a GitHub Action, run in the cloud.<sup><a href="#s7">7</a></sup></td>
+          <td class="gc">A <strong>time-based loop</strong>, run locally. Its cadence lives in its prompt (<code>/loop 1h …</code>); for Codex, OpenCode and pi, switch on the experimental Daemon heartbeat. <span class="none">No GitHub Action trigger.</span></td>
+        </tr>
+        <tr>
+          <th scope="row">Handoffs and <code>.context</code> notes</th>
+          <td>A <code>.context</code> folder in the workspace for notes and handoffs.<sup><a href="#s3">3</a></sup></td>
+          <td class="gc"><strong>Edges</strong> between loops (hand-off, message, spawn), a memory log per loop that a relaunched session reads first, and the Mailroom, a board every loop in the graph can post to. Nothing is written inside your project folder.</td>
+        </tr>
+        <tr>
+          <th scope="row">Cloud workspaces</th>
+          <td>Workspaces in Vercel sandboxes that keep running with the app closed; shutting down 20 November.<sup><a href="#s1">1</a></sup><sup><a href="#s8">8</a></sup></td>
+          <td class="gc">The local daemon keeps loops running with the app closed. To run on another machine, add a remote project over SSH; loops run there and this Mac steers them. <span class="none">No hosted cloud.</span></td>
+        </tr>
+        <tr>
+          <th scope="row">Multiplayer</th>
+          <td>Teammates prompting a shared cloud workspace in real time.<sup><a href="#s8">8</a></sup></td>
+          <td class="gc"><span class="none">No equivalent. GraphCode is single-user.</span></td>
+        </tr>
+        <tr>
+          <th scope="row">Setup scripts, files to copy</th>
+          <td>Gitignored files copied into each new worktree; setup scripts for the rest.<sup><a href="#s4">4</a></sup></td>
+          <td class="gc"><span class="none">No equivalent. GraphCode creates the worktree; ask the loop's prompt to run your setup.</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="section" id="quickstart">
+  <h2>Migration quickstart</h2>
+  <p class="sub">About five minutes from install to a running loop. Your existing repositories, branches and worktrees work as they are.</p>
+  <ol class="steps">
+    <li><strong>Export from Conductor first.</strong> Before 13 November if you still want to send messages in the cloud, and before 20 November at the latest: right-click a cloud workspace › Transfer to local, or Settings › Account › Export data.</li>
+    <li><strong>Install GraphCode.</strong> macOS 15+ on Apple Silicon, with at least one of <code>claude</code>, <code>codex</code>, <code>copilot</code>, <code>opencode</code> or <code>pi</code> on your PATH. GraphCode bundles none of them, so the CLIs you used under Conductor carry over with their logins.
+<pre><span class="prompt">$ </span>brew install --cask scgopi/graphcode/graphcode</pre>
+    Or drag GraphCode to Applications from the <a href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">latest .dmg</a>.</li>
+    <li><strong>Add your repository.</strong> The sidebar's ⊕ menu: a local folder (the repo you had in Conductor), a clone from a URL, or a remote repository over SSH.</li>
+    <li><strong>Create your first loop.</strong> ⊕ on the canvas. Write the prompt, pick the agent, choose <em>Goal</em>, and give it a done check; the <strong>Test</strong> button runs the check exactly as the daemon will. To mirror a Conductor workspace, set the worktree to a new branch. From a shell, the same loop is:
+<pre><span class="prompt">$ </span>graphcode node create ~/code/my-repo --title FixBuild --type goal \
+    --goal "the test suite passes" --predicate "make test" --backend codex</pre></li>
+    <li><strong>Open it and steer.</strong> Click the node to attach to the live session. Add a second loop and drag an edge between them to hand work on when the first resolves. Close the app; the daemon keeps both running.</li>
+  </ol>
+</section>
+
+<section class="section sources" id="sources">
+  <h2>Sources</h2>
+  <p class="sub">Fetched on 7 November 2026. If Conductor's pages change, its own pages win; open an issue on the GraphCode repo and this page gets corrected. The <a href="compare.html">full comparison</a> covers Conductor alongside Vibe Kanban, Claude Squad, Superset, Emdash and Sculptor.</p>
+  <ol>
+    <li id="s1"><a href="https://conductor.build/announcement">conductor.build/announcement</a>, "Conductor is joining Meta", timeline and FAQ.</li>
+    <li id="s2"><a href="https://conductor.build/changelog/0.93.0-conductor-is-joining-meta">conductor.build/changelog</a>, 0.93.0 "Conductor is joining Meta", 4 November 2026; see also <a href="https://aiweekly.co/alerts/meta-buys-conductor-to-run-teams-of-ai-coding-agents-in-parallel">AI Weekly</a>, 4 November 2026.</li>
+    <li id="s3"><a href="https://conductor.build/docs/concepts/workspaces-and-branches">conductor.build/docs/concepts/workspaces-and-branches</a>.</li>
+    <li id="s4"><a href="https://conductor.build/docs/concepts/git-worktrees">conductor.build/docs/concepts/git-worktrees</a>.</li>
+    <li id="s5"><a href="https://conductor.build/docs/concepts/parallel-agents">conductor.build/docs/concepts/parallel-agents</a>.</li>
+    <li id="s6"><a href="https://conductor.build/docs/concepts/agent-modes">conductor.build/docs/concepts/agent-modes</a>.</li>
+    <li id="s7"><a href="https://conductor.build/changelog">conductor.build/changelog</a>, 0.85.0 "Sections, routines, and a new model picker", 9 September 2026.</li>
+    <li id="s8"><a href="https://conductor.build/pricing">conductor.build/pricing</a>, plans and the Cloud FAQ, as cited on the <a href="compare.html">comparison page</a> (12 September 2026).</li>
+  </ol>
+  <div class="gc-note">
+    <strong>The GraphCode statements</strong> are drawn from the shipped code and the README:
+    <ul>
+      <li>Backends: <a href="https://github.com/scgopi/GraphCode/blob/main/GraphcodeKit/Sources/Domain/CLISessionBackendKind.swift">CLISessionBackendKind.swift</a>; loop types: <a href="https://github.com/scgopi/GraphCode/blob/main/GraphcodeKit/Sources/Domain/LoopType.swift">LoopType.swift</a>; edge kinds: <a href="https://github.com/scgopi/GraphCode/blob/main/GraphcodeKit/Sources/Domain/EdgeKind.swift">EdgeKind.swift</a>.</li>
+      <li>Optional worktree per loop (none, existing, new branch) and the sweep: <a href="https://github.com/scgopi/GraphCode/blob/main/graphcode/Sources/Features/Project/ProjectFeatureState.swift">ProjectFeatureState.swift</a>, <a href="https://github.com/scgopi/GraphCode/blob/main/graphcode/Sources/Features/App/AppFeature+Worktrees.swift">AppFeature+Worktrees.swift</a>.</li>
+      <li>Install, platform, projects over SSH, session survival and the daemon: the <a href="https://github.com/scgopi/GraphCode#readme">README</a>; licence: <a href="https://github.com/scgopi/GraphCode/blob/main/LICENSE">LICENSE</a>.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="cta">
+  <div class="cta-card">
+    <div class="cta-inner">
+      <h2>Bring your agents. Keep your Mac.</h2>
+      <p>Add the repo you had in Conductor, write a goal, pick the agent. Then close the app; the loop keeps going.</p>
+      <div class="cta-ctas">
+        <a class="btn-primary" href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">⬇ Download .dmg</a>
+        <a class="btn-ghost" href="https://github.com/scgopi/GraphCode" target="_blank" rel="noopener"><span class="star">★</span> View on GitHub</a>
+      </div>
+      <div class="brew"><span class="prompt">$</span>brew install --cask scgopi/graphcode/graphcode</div>
+    </div>
+  </div>
+</section>
+
+<footer class="footer">
+  <img src="assets/icon.png" alt="GraphCode">
+  <div class="made">GraphCode is maintained by <a href="https://github.com/scgopi">scgopi</a>. Built on <a href="https://ghostty.org">Ghostty</a> and <a href="https://zmx.sh">zmx</a>.</div>
+  <div class="footer-links">
+    <a href="https://github.com/scgopi/GraphCode/releases">Releases</a>
+    <a href="compare.html">Compare</a>
+    <a href="shortcuts.html">Shortcuts</a>
+    <a href="https://github.com/scgopi/GraphCode/blob/main/LICENSE">FSL-1.1-MIT</a>
+    <a href="https://x.com/scgopi">X</a>
+    <a href="https://www.linkedin.com/in/scgopi/">LinkedIn</a>
+  </div>
+</footer>
+
+</body>
+</html>
