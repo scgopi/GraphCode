@@ -519,13 +519,30 @@ function Resolve-TestZig {
 
 Invoke-Native "Shell process ownership mock contracts" {
   . (Join-Path $PSScriptRoot "..\Import-PinnedPester.ps1")
+  $registry = Get-Content (Join-Path $repoRoot "Tools\windows\ValidationRunner\Manifests\host.json") -Raw | ConvertFrom-Json
+  $required = @($registry.units | Where-Object id -CEQ "host.legacy-ownership.shell-scope")
+  if ($required.Count -ne 1) { throw "Shell ownership registry identity is absent or duplicated" }
+  $tokens = $null
+  $errors = $null
+  $adapter = [Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $repoRoot "Tools\windows\ValidationRunner\Adapters\LegacyOwnership.Contracts.ps1"),
+    [ref]$tokens, [ref]$errors)
+  $definitions = @($adapter.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+      $node.Name -ceq "Get-ShellScopeDiagnosticGroups"
+  }, $true))
+  if ($errors.Count -ne 0 -or $definitions.Count -ne 1) { throw "Exact shell ownership diagnostic validator unavailable" }
+  . ([scriptblock]::Create($definitions[0].Extent.Text))
   $ownershipResults = Invoke-Pester -Path (Join-Path $PSScriptRoot "ShellProcessOwnership.Tests.ps1") -PassThru
-  if ($ownershipResults.TotalCount -ne 70 -or
+  if ($ownershipResults.TotalCount -le 0 -or
       $ownershipResults.PassedCount -ne $ownershipResults.TotalCount -or
-      $ownershipResults.FailedCount -ne 0 -or $ownershipResults.SkippedCount -ne 0) {
-    throw "Shell process ownership mock contracts did not pass all 70 unskipped cases"
+      $ownershipResults.FailedCount -ne 0 -or $ownershipResults.SkippedCount -ne 0 -or
+      $ownershipResults.NotRunCount -ne 0) {
+    throw "Shell process ownership contracts did not pass all executed, unskipped cases"
   }
-  Write-Host "SHELL_PROCESS_OWNERSHIP_MOCK_CASES=$($ownershipResults.TotalCount)"
+  $groups = @(Get-ShellScopeDiagnosticGroups $ownershipResults $required[0])
+  Write-Host "SHELL_PROCESS_OWNERSHIP_CASES=$($ownershipResults.TotalCount) DIAGNOSTICS=$($groups.Count) INCLUDES_CONTROLLED_NATIVE_FIXTURES"
   $global:LASTEXITCODE = 0
 }
 

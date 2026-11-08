@@ -1080,6 +1080,61 @@ Describe "Ownership-unproven root retention contract (filesystem only)" {
       $invalidRun = [pscustomobject]@{ TotalCount = $total; Tests = $invalidCases }
       { Get-ShellScopeDiagnosticGroups $invalidRun $expected } | Should -Throw
     }
+    $unitTokens = $null
+    $unitErrors = $null
+    $unitAst = [Management.Automation.Language.Parser]::ParseFile(
+      (Join-Path $repo "Tools\windows\Tests\WindowsShell.Tests.ps1"), [ref]$unitTokens, [ref]$unitErrors)
+    $entrypoints = @($unitAst.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq "Invoke-Native" -and
+        $node.CommandElements.Count -eq 3 -and
+        $node.CommandElements[1] -is [Management.Automation.Language.StringConstantExpressionAst] -and
+        $node.CommandElements[1].Value -ceq "Shell process ownership mock contracts"
+    }, $true))
+    $unitErrors.Count | Should -Be 0
+    $entrypoints.Count | Should -Be 1
+    $bodyText = $entrypoints[0].CommandElements[2].ScriptBlock.Extent.Text
+    $body = [scriptblock]::Create('param([string]$PSScriptRoot)' + "`n" +
+      $bodyText.Substring(1, $bodyText.Length - 2))
+    $unitRoot = Join-Path $repo "Tools\windows\Tests"
+    $repoRoot = $repo
+    $script:controlledOwnershipRun = [pscustomobject]@{
+      TotalCount = 77; PassedCount = 77; FailedCount = 0; SkippedCount = 0; NotRunCount = 0; Tests = $cases
+    }
+    Mock Invoke-Pester { $script:controlledOwnershipRun }
+    Mock Write-Host {}
+    # Negative control from the failing 131 unit entrypoint, not another live count contract.
+    $oldBody = [scriptblock]::Create('param([string]$PSScriptRoot)' + "`n" + @'
+. (Join-Path $PSScriptRoot "..\Import-PinnedPester.ps1")
+$ownershipResults = Invoke-Pester -Path (Join-Path $PSScriptRoot "ShellProcessOwnership.Tests.ps1") -PassThru
+if ($ownershipResults.TotalCount -ne 70 -or
+    $ownershipResults.PassedCount -ne $ownershipResults.TotalCount -or
+    $ownershipResults.FailedCount -ne 0 -or $ownershipResults.SkippedCount -ne 0) {
+  throw "Shell process ownership mock contracts did not pass all 70 unskipped cases"
+}
+'@)
+    { & $oldBody $unitRoot } | Should -Throw "*all 70 unskipped cases*"
+    & $body $unitRoot
+    foreach ($mutation in @("missing", "extra", "duplicate", "unexecuted", "wrong-count", "not-run")) {
+      $invalidCases = @($cases | ForEach-Object {
+        [pscustomobject]@{ Name = $_.Name; Tag = $_.Tag; Executed = $_.Executed; Result = $_.Result }
+      })
+      $total = 77
+      $notRun = 0
+      switch ($mutation) {
+        "missing" { $invalidCases = $invalidCases[1..6] }
+        "extra" { $invalidCases += [pscustomobject]@{ Name = "unexpected diagnostic"; Tag = @("FirstFailureDiagnostic"); Executed = $true; Result = "Passed" } }
+        "duplicate" { $invalidCases += $invalidCases[0] }
+        "unexecuted" { $invalidCases[0].Executed = $false }
+        "wrong-count" { $total = 70 }
+        "not-run" { $notRun = 1 }
+      }
+      $script:controlledOwnershipRun = [pscustomobject]@{
+        TotalCount = $total; PassedCount = $total; FailedCount = 0; SkippedCount = 0; NotRunCount = $notRun; Tests = $invalidCases
+      }
+      { & $body $unitRoot } | Should -Throw
+    }
   }
   It "never overwrites the immutable first failure or replaces its primary on write refusal" -Tag "FirstFailureDiagnostic" {
     $path = Join-Path $root "ownership-first-failure.json"
