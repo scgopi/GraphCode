@@ -279,6 +279,8 @@ public static class CapNative {
   [DllImport("user32.dll", SetLastError=true)] private static extern bool PostMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
   private static extern bool WaitNamedPipeW(string name, uint timeout);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  private static extern bool GetNamedPipeServerProcessId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint processId);
 
   private static IntPtr EnterPerMonitorV2() {
     IntPtr previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
@@ -884,6 +886,18 @@ public static class CapNative {
     return Marshal.GetLastWin32Error();
   }
 
+  // This connection's kernel peer is not evidence of another client's connection or process custody.
+  public static int PipeServerProcessId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe) {
+    if (pipe == null) throw new ArgumentNullException("pipe");
+    if (pipe.IsClosed) throw new ObjectDisposedException("pipe");
+    if (pipe.IsInvalid) throw new ArgumentException("A valid connected pipe handle is required.", "pipe");
+    uint processId;
+    if (!GetNamedPipeServerProcessId(pipe, out processId))
+      throw new Win32Exception(Marshal.GetLastWin32Error());
+    if (processId == 0) throw new InvalidOperationException("The pipe server PID is unavailable.");
+    return checked((int)processId);
+  }
+
   [DllImport("user32.dll", SetLastError=true)]
   private static extern bool PrintWindow(IntPtr window, IntPtr dc, uint flags);
 }
@@ -894,6 +908,7 @@ if (-not ('CapNative' -as [type])) {
         [System.Drawing.Bitmap].Assembly.Location,
         [System.Drawing.Graphics].Assembly.Location,
         [System.Drawing.Color].Assembly.Location,
+        [Microsoft.Win32.SafeHandles.SafePipeHandle].Assembly.Location,
         (Join-Path $PSHOME 'System.Private.Windows.Core.dll'),
         (Join-Path $PSHOME 'System.Private.Windows.GdiPlus.dll'),
         'System.Collections.dll',

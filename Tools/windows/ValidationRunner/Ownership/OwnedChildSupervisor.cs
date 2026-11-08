@@ -20,6 +20,7 @@ public sealed record OwnedCleanupProof(bool RootExited, bool JobEmpty, bool Stdo
 }
 public sealed record OwnedChildResult(int ExitCode, string StandardOutput, string StandardError, OwnedCleanupProof Cleanup);
 public sealed record OwnedChildObservation(bool RootExited, uint ActiveJobProcesses, bool StdoutCompleted, bool StderrCompleted);
+public sealed record OwnedRootResources(uint ProcessId, long CreationFileTime, uint Handles, long PrivateBytes);
 
 public sealed class OwnedChildSupervisor
 {
@@ -36,6 +37,13 @@ public sealed class OwnedChildSupervisor
     }
     [StructLayout(LayoutKind.Sequential)]
     private struct ProcessInfo { public IntPtr Process, Thread; public uint Pid, Tid; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessMemoryCounters
+    {
+        public uint Size, PageFaultCount;
+        public UIntPtr PeakWorkingSetSize, WorkingSetSize, QuotaPeakPagedPoolUsage, QuotaPagedPoolUsage,
+            QuotaPeakNonPagedPoolUsage, QuotaNonPagedPoolUsage, PagefileUsage, PeakPagefileUsage, PrivateUsage;
+    }
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CreatePipe(out IntPtr read, out IntPtr write, ref Security security, int size);
@@ -66,6 +74,10 @@ public sealed class OwnedChildSupervisor
     private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetProcessHandleCount(IntPtr process, out uint count);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool K32GetProcessMemoryInfo(IntPtr process, ref ProcessMemoryCounters counters, uint size);
 
     // Unknown leases stay reachable: a finalizer must not close a kill-on-close job.
     private static readonly ConcurrentBag<OwnedChildSupervisor> retained = new();
@@ -115,6 +127,46 @@ public sealed class OwnedChildSupervisor
 
     public OwnedChildObservation Observe() => new(RootExited(), StandaloneProcessJob.Active(job),
         StandardOutput.IsCompleted, StandardError.IsCompleted);
+
+    public static OwnedRootResources ValidateResourceSnapshot(uint expectedPid, long expectedCreated,
+        uint observedPid, long observedCreated, bool exited, uint handles, ulong privateBytes)
+    {
+        if (expectedPid == 0 || expectedCreated <= 0 || observedPid != expectedPid ||
+            observedCreated != expectedCreated || exited || handles == 0 || privateBytes == 0 ||
+            privateBytes > long.MaxValue)
+            throw new InvalidOperationException("Held original resource identity or counters are invalid.");
+        return new OwnedRootResources(observedPid, observedCreated, handles, checked((long)privateBytes));
+    }
+
+    public OwnedRootResources ReadResources()
+    {
+        lock (retentionGate)
+        {
+            if (completed || descendantUnknown || root == IntPtr.Zero || !assigned || !resumed)
+                throw new InvalidOperationException("Resources require the active original held launch.");
+            RequireResourceRoot();
+            if (!GetProcessHandleCount(root, out uint handles)) throw new Win32Exception();
+            var counters = new ProcessMemoryCounters { Size = checked((uint)Marshal.SizeOf<ProcessMemoryCounters>()) };
+            if (!K32GetProcessMemoryInfo(root, ref counters, counters.Size)) throw new Win32Exception();
+            if (counters.Size != Marshal.SizeOf<ProcessMemoryCounters>())
+                throw new InvalidOperationException("Native resource counter structure size differs.");
+            RequireResourceRoot();
+            return ValidateResourceSnapshot(ProcessId, creationFileTime, ProcessId, creationFileTime,
+                false, handles, counters.PrivateUsage.ToUInt64());
+        }
+    }
+
+    private void RequireResourceRoot()
+    {
+        uint state = WaitForSingleObject(root, 0);
+        if (state == 0) throw new InvalidOperationException("Held original root exited before resource proof.");
+        if (state != 258) throw new Win32Exception();
+        uint pid = GetProcessId(root);
+        if (pid == 0) throw new Win32Exception();
+        if (!GetProcessTimes(root, out long created, out _, out _, out _)) throw new Win32Exception();
+        if (pid != ProcessId || created != creationFileTime)
+            throw new InvalidOperationException("Held original root generation differs.");
+    }
 
     private OwnedChildSupervisor(TimeSpan timeout, string artifactRoot)
     {

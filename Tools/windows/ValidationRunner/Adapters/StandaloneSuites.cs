@@ -107,6 +107,11 @@ public static class StandaloneSuites
             const string script = "Tools\\windows\\Tests\\UiCaptureDriver.Tests.ps1";
             var captureRoot = PowerShellPayload.CreateScratchRoot(context.RepositoryRoot);
             await File.WriteAllTextAsync(Path.Combine(context.ArtifactRoot, "capture-root.txt"), captureRoot, cancellationToken);
+            var peerContracts = await PowerShellPayload.RunAsync(context, Id + ".native-pipe-peer", script,
+                ["-NativePipePeerContractOnly", "-ScratchRoot", Path.Combine(captureRoot, "native-pipe-peer")],
+                cancellationToken);
+            if (EvidenceParser.Structured(Id, "UiCaptureNativePipePeerContracts", peerContracts.Output, 5, 5).Status != UnitStatus.Passed)
+                throw new InvalidDataException("Native pipe peer contracts failed");
             var prebuilt = Path.Combine(captureRoot, "prebuilt");
             var compilerContracts = await PowerShellPayload.RunAsync(context, Id + ".compiler-input",
                 "Tools\\windows\\Tests\\FixtureCompiler.Tests.ps1",

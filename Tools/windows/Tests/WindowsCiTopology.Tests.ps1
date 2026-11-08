@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([switch] $RetentionPropagationOnly)
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
@@ -81,8 +81,162 @@ function Test-CompiledCompatibilityWrapper([string] $Text) {
     $withoutCompilerFlags -notmatch 'ValidationRunner\.Tests\.ps1|--suite\b|--self-test\b|--fixture\b'
 }
 
+function Test-GobjectSwiftRoute([string] $Job) {
+  $steps = @([regex]::Matches($Job, '(?ms)^      - .*?(?=^      - |\z)') |
+    ForEach-Object Value | Where-Object { $_ -match 'name: Prefetch verified official gobject package' })
+  return $steps.Count -eq 1 -and
+    $steps[0] -match '(?m)^        timeout-minutes: 5[ \t]*$' -and
+    $steps[0].Contains('. .\.ci-tools\environment.ps1') -and
+    $steps[0].Contains('$env:GRAPHCODE_VALIDATION_ASSEMBLY = & .\Tools\windows\Build-CompiledValidationRunner.ps1') -and
+    $steps[0].Contains('./Tools/windows/Initialize-GobjectPackageCache.ps1 -PublishJobEnvironment') -and
+    $steps[0].Contains('GH_TOKEN: ${{ github.token }}') -and
+    $Job -notmatch 'ValidationRunner\.exe|ValidationRunner\.Tests\.ps1|Invoke-ValidationRunnerContract\.ps1|--suite\b|--self-test\b|--fixture\b' -and
+    $Job.IndexOf('name: Prefetch verified official gobject package') -lt
+      $Job.IndexOf('name: Run real zmx empty-list test') -and
+    $Job.Contains('./Tools/windows/Test-RealZmxEmptyList.ps1')
+}
+
+function Get-GobjectRetentionBody([string] $Text) {
+  $parseErrors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseInput($Text, [ref]$null, [ref]$parseErrors)
+  if ($parseErrors.Count -gt 0) { throw "Invalid prefetch helper syntax" }
+  $guards = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.IfStatementAst] -and
+      $node.Clauses[0].Item1.Extent.Text.Contains('OwnedChildSupervisor]::RequiresLifetimeHold')
+  }, $true))
+  if ($guards.Count -ne 1) { throw "Expected one production retention guard" }
+  $body = $guards[0].Clauses[0].Item2
+  if ($body.Statements.Count -ne 3 -or
+      $body.Statements[0].Extent.Text -cne '[Console]::Out.WriteLine("GRAPHCODE_VALIDATION_ROOT_RETENTION_REQUIRED=ownership_unproven")' -or
+      $body.Statements[1].Extent.Text -cne '[Console]::Out.Flush()' -or
+      -not $body.Statements[2].Extent.Text.Contains('HoldRetainedResourcesAsync().GetAwaiter().GetResult()')) {
+    throw "Retention sentinel and flush must precede the original lifetime hold"
+  }
+  return $body
+}
+
 $portJobs = Get-WorkflowJobs $portWorkflow
 $hardeningJobs = Get-WorkflowJobs $hardeningWorkflow
+
+$prefetchHelper = Join-Path $repoRoot "Tools\windows\Initialize-GobjectPackageCache.ps1"
+Assert-Contract (Test-Path -LiteralPath $prefetchHelper -PathType Leaf) `
+  "the Swift provider build needs a bounded official gobject package prefetch helper"
+. $prefetchHelper
+$retentionSource = (Get-Content -LiteralPath $prefetchHelper -Raw).Replace("`r`n", "`n")
+$retentionBody = Get-GobjectRetentionBody $retentionSource
+Assert-Contract ($retentionBody.Statements.Count -eq 3) `
+  "unknown helper lifetime must announce and flush retention before holding"
+if ($RetentionPropagationOnly) {
+  & (Join-Path $repoRoot "Tools\windows\Import-CompiledValidationAssembly.ps1") `
+    -AssemblyPath $env:GRAPHCODE_VALIDATION_ASSEMBLY `
+    -RequiredType "GraphCode.Validation.Ownership.RetentionSignalObserver" | Out-Null
+  $script:retentionSignals = 0
+  $observer = [GraphCode.Validation.Ownership.RetentionSignalObserver]::new(
+    [Action]{ $script:retentionSignals++ })
+  $writer = [IO.StringWriter]::new()
+  $priorWriter = [Console]::Out
+  try {
+    [Console]::SetOut($writer)
+    $announcer = [scriptblock]::Create(($retentionBody.Statements[0..1] |
+      ForEach-Object { $_.Extent.Text }) -join "`n")
+    & $announcer
+    $text = $writer.ToString()
+    $observer.OnText($text.Substring(0, 20))
+    Assert-Contract ($script:retentionSignals -eq 0) "partial stdout cannot imply a completed retention signal"
+    $observer.OnText($text.Substring(20))
+    Assert-Contract ($script:retentionSignals -eq 1) "the flushed helper marker must propagate through the actual outer observer"
+    $observer.OnText($text)
+    Assert-Contract ($script:retentionSignals -eq 1) "the actual observer must signal retention once"
+  } finally {
+    [Console]::SetOut($priorWriter)
+    $writer.Dispose()
+  }
+  Write-Host "Gobject retention propagation: 1 managed case, $checks checks, 0 failures; no native lifetime hold"
+  exit 0
+}
+foreach ($mutation in @(
+    $retentionSource.Replace('GRAPHCODE_VALIDATION_ROOT_RETENTION_REQUIRED=ownership_unproven', 'wrong-retention-marker'),
+    $retentionSource.Replace('[Console]::Out.Flush()', ''),
+    $retentionSource.Replace('[Console]::Out.Flush()', '[Console]::Out.WriteLine("not-a-flush")')
+  )) {
+  $refused = $false
+  try { $null = Get-GobjectRetentionBody $mutation } catch { $refused = $true }
+  Assert-Contract ($mutation -cne $retentionSource -and $refused) `
+    "retention source must reject missing or foreign markers and missing flush before hold"
+}
+Assert-GobjectArchiveProof 1867503 "D572886E8672A46AC6C740E3FE3A1F1C9D9A1A9F09D59FD62328A41FCDB70196"
+Assert-Contract $true "the exact official archive byte proof must pass"
+foreach ($proof in @(
+    @(1867502, "D572886E8672A46AC6C740E3FE3A1F1C9D9A1A9F09D59FD62328A41FCDB70196"),
+    @(1867503, "D572886E8672A46AC6C740E3FE3A1F1C9D9A1A9F09D59FD62328A41FCDB70195")
+  )) {
+  $refused = $false
+  try { Assert-GobjectArchiveProof $proof[0] $proof[1] } catch { $refused = $true }
+  Assert-Contract $refused "wrong archive size or digest must stop before fetch"
+}
+$expectedGobjectHash = "gobject-0.3.2-Skun7F6HogCMynX2JqeSHS7xr-8pK4ob-qRFIcEasVi3"
+$fetchResult = [pscustomobject]@{
+  ExitCode = 0; StandardOutput = "$expectedGobjectHash`n"; StandardError = ""
+  Cleanup = [pscustomobject]@{ CanRelease = $true; ResourcesClosed = $true }
+}
+Assert-GobjectFetchProof $fetchResult
+Assert-Contract $true "one exact pinned package hash and complete owned cleanup must pass"
+foreach ($mutation in @("exit", "empty", "foreign", "duplicate", "blank", "stderr", "cleanup", "resources")) {
+  $candidate = [pscustomobject]@{
+    ExitCode = 0; StandardOutput = "$expectedGobjectHash`n"; StandardError = ""
+    Cleanup = [pscustomobject]@{ CanRelease = $true; ResourcesClosed = $true }
+  }
+  switch ($mutation) {
+    "exit" { $candidate.ExitCode = 1 }
+    "empty" { $candidate.StandardOutput = "" }
+    "foreign" { $candidate.StandardOutput = "wrong-package`n" }
+    "duplicate" { $candidate.StandardOutput += "$expectedGobjectHash`n" }
+    "blank" { $candidate.StandardOutput += "`n" }
+    "stderr" { $candidate.StandardError = "fetch error" }
+    "cleanup" { $candidate.Cleanup.CanRelease = $false }
+    "resources" { $candidate.Cleanup.ResourcesClosed = $false }
+  }
+  $refused = $false
+  try { Assert-GobjectFetchProof $candidate } catch { $refused = $true }
+  Assert-Contract $refused "fetch must reject $mutation rather than treating exit zero as equivalence"
+}
+
+$fetchStart = New-GobjectFetchStart "D:\owned\zig.exe" "D:\owned\project" `
+  "D:\owned\global" "D:\owned\official.tar.gz" "D:\owned\temp"
+Assert-Contract ($fetchStart.WorkingDirectory -ceq "D:\owned\project" -and
+  $fetchStart.ArgumentList.Count -eq 4 -and $fetchStart.Arguments -ceq "" -and
+  $fetchStart.ArgumentList[0] -ceq "fetch" -and
+  $fetchStart.ArgumentList[1] -ceq "--global-cache-dir" -and
+  $fetchStart.ArgumentList[2] -ceq "D:\owned\global" -and
+  $fetchStart.ArgumentList[3] -ceq "D:\owned\official.tar.gz" -and
+  $fetchStart.Environment["ZIG_GLOBAL_CACHE_DIR"] -ceq "D:\owned\global" -and
+  $fetchStart.Environment["TEMP"] -ceq "D:\owned\temp" -and
+  -not $fetchStart.Environment.ContainsKey("GH_TOKEN") -and
+  -not $fetchStart.Environment.ContainsKey("GITHUB_TOKEN") -and
+  -not $fetchStart.Environment.ContainsKey("ZIG_LOCAL_CACHE_DIR")) `
+  "local fetch must preserve actual argument transport, private paths and token exclusion"
+foreach ($token in @("", "controlled token")) {
+  $refused = $false
+  try { Save-OfficialGobjectArchive "D:\not-created.tar.gz" $token } catch { $refused = $true }
+  Assert-Contract $refused "missing or malformed job tokens must refuse before any transport"
+}
+$prefetchSource = $retentionSource
+Assert-Contract ($prefetchSource.Contains('releases/assets/493157198') -and
+  $prefetchSource.Contains('"application/octet-stream"') -and
+  $prefetchSource.Contains('[TimeSpan]::FromSeconds(60)') -and
+  $prefetchSource.Contains('[TimeSpan]::FromSeconds(120)') -and
+  $prefetchSource.Contains('$output.Write($buffer, 0, $read)') -and
+  $prefetchSource.Contains('CreateOwnedByCurrentUser') -and
+  $prefetchSource.Contains('[IO.FileMode]::CreateNew') -and
+  $prefetchSource.Contains('OwnedChildSupervisor]::RunAsync') -and
+  $prefetchSource.Contains('HoldRetainedResourcesAsync') -and
+  $prefetchSource.IndexOf('Assert-GobjectArchiveProof $archiveInfo') -lt
+    $prefetchSource.IndexOf('Assert-GobjectFetchProof $result') -and
+  $prefetchSource.IndexOf('Assert-GobjectFetchProof $result') -lt
+    $prefetchSource.IndexOf('[IO.File]::AppendAllText($env:GITHUB_ENV') -and
+  $prefetchSource -notmatch '--save|--insecure|releases/download|Set-Acl|icacls|Copy-Item|Start-Sleep') `
+  "official transport must be bounded and binary, exclusive, source-owned and publish only after both proofs"
 
 Assert-Contract $portJobs.Contains("validation-runner") `
   "Windows port CI needs a dedicated validation-runner job"
@@ -108,6 +262,24 @@ Assert-Contract ($runnerJob -notmatch 'bootstrap\.ps1|\.ci-providers|validate\.p
   "the source-only validation runner job must not bootstrap providers or hide failures"
 
 $spikesSwift = $portJobs["spikes-swift"]
+Assert-Contract (Test-GobjectSwiftRoute $spikesSwift) `
+  "the Swift job must compile existing bindings only and prefetch before its unchanged required real-empty test"
+foreach ($suffix in @(
+    "`n          ValidationRunner.exe",
+    "`n          ValidationRunner.Tests.ps1",
+    "`n          Invoke-ValidationRunnerContract.ps1",
+    "`n          command --suite owned",
+    "`n          command --fixture owned",
+    "`n          command --self-test"
+  )) {
+  Assert-Contract (-not (Test-GobjectSwiftRoute ($spikesSwift + $suffix))) `
+    "build-only preparation must not admit duplicate runner, test, contract, suite or fixture execution"
+}
+Assert-Contract ($spikesSwift.Contains('if: always()') -and
+  $spikesSwift.Contains('${{ runner.temp }}\gobject-prefetch-*\**') -and
+  $spikesSwift.Contains('include-hidden-files: true') -and
+  $spikesSwift -notmatch 'continue-on-error|permissions:') `
+  "prefetch failure evidence must be retained without waiving failure or adding permissions"
 Assert-Contract ($spikesSwift -notmatch
   'ValidationRunner\.Tests\.ps1|Invoke-ValidationRunnerContract\.ps1|ValidationRunner\.exe') `
   "the sequential Swift job must not repeat the validation runner contract"

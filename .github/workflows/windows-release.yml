@@ -42,6 +42,16 @@ jobs:
         shell: pwsh
         run: ./Tools/windows/bootstrap.ps1 -ToolRoot .ci-tools -ProviderRoot .ci-providers
 
+      - name: Prefetch verified official gobject package for zmx
+        shell: pwsh
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          . .\.ci-tools\environment.ps1
+          $env:GRAPHCODE_VALIDATION_ASSEMBLY = & .\Tools\windows\Build-CompiledValidationRunner.ps1
+          ./Tools/windows/Initialize-GobjectPackageCache.ps1 -PublishJobEnvironment
+
       - name: Stage the Swift daemon and CLI for packaging
         shell: pwsh
         run: ./Tools/windows/stage-swift-products.ps1
@@ -71,3 +81,14 @@ jobs:
           name: graphcode-windows-x86_64
           path: .build/windows/release-publish/publish/
           if-no-files-found: warn
+
+      - name: Retain official package verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        timeout-minutes: 5
+        with:
+          name: gobject-package-verification-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\gobject-prefetch-*\**
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7

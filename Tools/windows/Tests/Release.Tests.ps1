@@ -366,6 +366,61 @@ exit 2
   if (-not $publishDefault.Success -or $publishDefault.Groups[1].Value -notmatch "^(false|'false'|`"false`")$") {
     throw "the publishing input no longer defaults to false"
   }
+  $normalizedWorkflow = $workflow -replace "\r\n", "`n"
+  $helperVariants = 0
+  foreach ($variant in @($normalizedWorkflow, ($normalizedWorkflow -replace "`n", "`r`n"))) {
+    $source = $variant -replace "\r\n", "`n"
+    $steps = [regex]::Split($source, '(?m)(?=^      - (?:name|uses):)')
+    $prefetch = @($steps | Where-Object { $_ -match '^      - name: Prefetch verified official gobject package for zmx\n' })
+    $retention = @($steps | Where-Object { $_ -match '^      - name: Retain official package verification evidence\n' })
+    if ($prefetch.Count -ne 1 -or $retention.Count -ne 1) {
+      throw "the release workflow requires exactly one gobject prefetch and evidence step"
+    }
+    foreach ($required in @(
+        'timeout-minutes: 5',
+        'GH_TOKEN: ${{ github.token }}',
+        '. .\.ci-tools\environment.ps1',
+        '$env:GRAPHCODE_VALIDATION_ASSEMBLY = & .\Tools\windows\Build-CompiledValidationRunner.ps1',
+        './Tools/windows/Initialize-GobjectPackageCache.ps1 -PublishJobEnvironment')) {
+      if (-not $prefetch[0].Contains($required)) {
+        throw "the release prefetch step no longer references $required"
+      }
+    }
+    if ($prefetch[0] -match 'ValidationRunner\.exe|validate\.ps1|setup-dotnet@|permissions:') {
+      throw "release prefetch must build only the existing guard without new SDK or permissions"
+    }
+    foreach ($required in @(
+        'if: always()',
+        'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
+        'timeout-minutes: 5',
+        'name: gobject-package-verification-${{ github.run_attempt }}',
+        'path: ${{ runner.temp }}\gobject-prefetch-*\**',
+        'include-hidden-files: true',
+        'if-no-files-found: warn',
+        'retention-days: 7')) {
+      if (-not $retention[0].Contains($required)) {
+        throw "the release evidence step no longer references $required"
+      }
+    }
+    $bootstrapPosition = $source.IndexOf('      - name: Bootstrap exact Windows dependencies')
+    $prefetchPosition = $source.IndexOf($prefetch[0])
+    $packagePosition = $source.IndexOf('      - name: Package the Windows release artifact')
+    $retentionPosition = $source.IndexOf($retention[0])
+    if ($bootstrapPosition -lt 0 -or $prefetchPosition -le $bootstrapPosition -or
+        $packagePosition -le $prefetchPosition -or $retentionPosition -le $packagePosition) {
+      throw "release prefetch and retained evidence must surround the existing package build"
+    }
+    $jobsSource = ($source -split "(?m)^jobs:\n", 2)[1]
+    if ([regex]::Matches($jobsSource, '(?m)^  [a-zA-Z][a-zA-Z0-9_-]*:\s*$').Count -ne 1 -or
+        $source -notmatch '(?m)^permissions:\n  contents: read\n' -or
+        $source -notmatch '(?m)^    permissions:\n      contents: write\n' -or
+        $source -match '(?m)^  (?:push|release|schedule):') {
+      throw "release helper composition changed the single job, permissions, or manual trigger"
+    }
+    $helperVariants++
+  }
+  if ($helperVariants -ne 2) { throw "release helper contract did not execute both line-ending variants" }
+  Write-Output "Release workflow helper variants executed: $helperVariants"
   Write-Output "Release workflow contract: PASS"
 
   # 9. The workflow's own invocation actually binds release.ps1's parameters.
