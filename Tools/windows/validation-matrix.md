@@ -99,6 +99,38 @@ assert one owned-file receipt and its preserved hash, and emit distinct
 `UNTRACKED_OWNED_FILE_PREFLIGHT_KIND` markers. Require both markers as well as a
 positive test count when interpreting that coverage.
 
+### Native accessibility runner admission
+
+The existing native entry now uses the compiled runner's
+`OwnedChildSupervisor.RunAsync` for discovery and the compile/test command.
+Both consume the same original `-TimeoutMilliseconds` clock (default 120000),
+with the supervisor's separate five-second bounded cleanup reserve. Targets
+start suspended under the original held handle/non-breakaway job; raw stdout
+and stderr, cleanup proof, timeout and codec context stay in fresh scratch.
+The runner never deletes that scratch, and UNKNOWN stops further work in a
+passive original-authority hold rather than closing or retrying the lease.
+A passive hold is not permission for an unbounded workload. A caller that
+later removes its enclosing validation directory can still remove successful
+evidence; runtime admission must separately account for that existing outer
+cleanup policy and preserve protected outputs.
+
+The headless harness has 16 distinct safety cases, including actual runner
+invocation with controlled abrupt/failing/timeout tools, partial stdout/stderr,
+metadata-report failure, two actual steps sharing one clock, a missing executable,
+invalid-byte refusal and a fake success-summary refusal. No real compiler or C++
+fixture executes in that harness. Its existing 25 failure-attribution checks and 14 compile-plan checks
+remain separate. The compiled safety suite is `ui.native-runner-safety`.
+
+The console-free `cmd` channel uses the observed Windows OEM code page;
+`vswhere -utf8` uses strict UTF-8. Raw bytes remain authoritative. Non-ASCII
+display diagnostics use explicitly labeled JSON escaping without changing
+console/OS code pages or rewriting the raw logs. The controlled non-ASCII path
+roundtrip does not prove that every compiler/descendant emits that codec or
+qualify all Unicode paths/MSVC diagnostics. The original UTF-8/OEM decode failure
+and subsequent nested-host decode failure remain failed evidence, distinct from
+the corrected passing run. Default native 280-check execution still requires
+specific runtime approval; the headless switch is not a desktop grant.
+
 ### Stable canvas card context menu
 
 The stable canvas card context menu mock contracts execute 16 managed

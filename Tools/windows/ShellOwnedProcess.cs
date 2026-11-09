@@ -9,6 +9,10 @@ using System.Text;
 using System.Threading.Tasks;
 
 public sealed class ShellOwnedLaunch {
+  [DllImport("kernel32.dll")]
+  static extern uint GetOEMCP();
+  public static int OemCodePage() { return checked((int)GetOEMCP()); }
+
   public static string SelectWorkingDirectory(ProcessStartInfo info) {
     return String.IsNullOrEmpty(info.WorkingDirectory) ? null : info.WorkingDirectory;
   }
