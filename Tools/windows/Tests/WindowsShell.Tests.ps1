@@ -890,6 +890,11 @@ Invoke-Native "Owned live caller and adapter mock integration" {
     throw "Owned live caller and adapter mock integration did not pass all 13 cases"
   }
   Write-Host "OWNED_LIVE_ADAPTER_MOCK_CASES=$($adapterResults.PassedCount)"
+  $heldAssembly = & (Join-Path $PSScriptRoot "..\Build-CompiledValidationRunner.ps1")
+  & pwsh -NoProfile -File (Join-Path $PSScriptRoot "UiaHeldLauncher.Tests.ps1") `
+    -ArtifactRoot (Join-Path $repoRoot ".build\uia-held-launcher-shell") `
+    -AssemblyPath $heldAssembly
+  if ($LASTEXITCODE -ne 0) { throw "Default UIA held-launch contracts failed" }
   $global:LASTEXITCODE = 0
 }
 Invoke-Native "GDI+ asynchronous startup live test" {

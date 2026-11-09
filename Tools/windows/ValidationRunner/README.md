@@ -113,6 +113,29 @@ proof only from validated results of the current invocation. Its derived
 
 ## Production and process boundaries
 
+The default UIA launch adapter has a separate mandatory
+`host.uia-held-launcher` unit: 16 unique cases, comprising 13 mocked refusals,
+bindings and cleanup controls plus three actual owned non-GUI child cases.
+The actual cases exercise the production default launch/registration and
+cleanup dispatch with concurrent live stdout/stderr, Unicode argv, environment
+and working-directory propagation, a nonzero exit, and failed process creation.
+They do not load a UIA clientside provider or create/query a window. The
+optional writer overload uses the existing capture pump; writers stay owned by
+the adapter until job/root exit and both pipe EOFs are proved. Partial setup
+preserves the original error, existing evidence is never overwritten, and
+UNKNOWN retains authority rather than closing or retrying the scope.
+
+The original shell-ownership unit remains exactly 77 cases with seven diagnostic
+groups; the caller adapter remains 13 and capture routing remains 14. These
+regressions are distinct from the new launch unit. The selected canonical
+invocation can name `host.uia-held-launcher`,
+`host.legacy-ownership.shell-scope`, `host.legacy-ownership.live-adapter` and
+`ownership.capture` together. It deliberately remains an incomplete invocation,
+not the full CI gate. The shared regression also selected the independent Jump
+functional and navigation-runner adapters (70 units, 256 counted executions on
+the combined 687-unit inventory); an issue candidate must select only suites
+present in its own issue-specific tree.
+
 Production C# files are linked into `WindowsValidationBindings.csproj` once.
 UIA, packaging contracts, shell ownership, and managed/native tests consume those
 same implementations. The loader verifies the exact file/type, worktree,
