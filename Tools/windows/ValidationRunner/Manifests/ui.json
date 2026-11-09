@@ -30,6 +30,8 @@
     { "id": "ui.cards-pilot.original-cli-exit-budget", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.cards-pilot.completed-cli-ownership-not-identity", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.cards-pilot.popup-pointer-preparation", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.navigation.selection-snapshot-controls", "owner": "Ui", "minimumCount": 27, "exactCount": 27,
+      "requiredGroups": ["graph", "quick-chats", "project", "loop", "chat"] },
     { "id": "ui.cards-pilot.zip-source-boundary", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.cards-pilot.zip-filename-identity", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.cards-pilot.zip-fixture-valid", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },

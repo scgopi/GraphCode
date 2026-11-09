@@ -14,7 +14,10 @@ public static class SuiteRegistration
         new ActivationSuite(), new ManagedUiSuite(), new CardsAcceptanceControlsSuite(), new NativeUiSuite(), new ControlClickTopologySuite(),
         new StandaloneSuites.CaseScriptSuite("ui.navigation-runner-contracts",
             @"Tools\windows\Tests\AccessibilityProvider.Native.Tests.Harness.Tests.ps1",
-            "UI_CASE_RESULT=", new[] { "ui.navigation.headless-runner-plan" }, new[] { "-PlanOnly" })
+            "UI_CASE_RESULT=", new[] { "ui.navigation.headless-runner-plan" }, new[] { "-PlanOnly" }),
+        new StandaloneSuites.CaseScriptSuite("ui.navigation-oracle-contracts",
+            @"Tools\windows\Tests\NavigationSelectionOracle.Tests.ps1",
+            "UI_CASE_RESULT=", new[] { "ui.navigation.selection-snapshot-controls" })
     }.Concat(UiAdapterCases.CreateSuites()).ToArray();
 }
 

@@ -54,7 +54,7 @@ function Assert-ContainsAll([string] $Text, [string[]] $Needles) {
 $caption = $null
 Invoke-Derived 'ui.root.source.line-5501' {
   $script:caption = Get-Region $source '$laneProjectId = Get-MultiProjectAutomationId "overview-project" $fixtureProjectPath' `
-    '$surfaceActionPatterns["quick-chats-destination"].Invoke()'
+    '$quickChatNavigation = Find-FragmentById $root "quick-chats-destination" $rawWalker'
 }
 Invoke-Derived 'ui.root.source.line-5514' {
   Assert-Derived ($null -ne $caption) 'Caption region unavailable'
