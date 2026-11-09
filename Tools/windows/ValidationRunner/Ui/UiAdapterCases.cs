@@ -270,6 +270,9 @@ internal static class UiAdapterCases
     };
     internal static IReadOnlyList<IValidationSuite> CreateSuites() => new IValidationSuite[]
     {
+        new StandaloneSuites.CaseScriptSuite("ui.native-runner-safety",
+            @"Tools\windows\Tests\AccessibilityProvider.Native.Tests.Harness.Tests.ps1",
+            "UI_CASE_RESULT=", new[] { "ui.navigation.native-runner-safety" }),
         new StandaloneSuites.CaseScriptSuite("ui.powershell-contracts", @"Tools\windows\ValidationRunner\Ui\UiPowerShellContracts.ps1", "UI_CASE_RESULT=", PowerShellIds),
         new StandaloneSuites.CaseScriptSuite("ui.delete-contracts", @"Tools\windows\ValidationRunner\Ui\UiDeleteContracts.ps1", "UI_CASE_RESULT=", DeleteIds),
         new StandaloneSuites.CaseScriptSuite("ui.root-source-contracts", @"Tools\windows\ValidationRunner\Ui\UiRootSourceContracts.ps1", "UI_CASE_RESULT=", RootSourceIds),
