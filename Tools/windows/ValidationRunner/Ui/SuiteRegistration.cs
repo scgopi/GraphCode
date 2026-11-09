@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using GraphCode.Validation.Adapters;
 
 namespace GraphCode.Validation.Ui;
 
@@ -10,7 +11,10 @@ public static class SuiteRegistration
 {
     public static IReadOnlyList<IValidationSuite> CreateSuites() => new IValidationSuite[]
     {
-        new ActivationSuite(), new ManagedUiSuite(), new CardsAcceptanceControlsSuite(), new NativeUiSuite(), new ControlClickTopologySuite()
+        new ActivationSuite(), new ManagedUiSuite(), new CardsAcceptanceControlsSuite(), new NativeUiSuite(), new ControlClickTopologySuite(),
+        new StandaloneSuites.CaseScriptSuite("ui.navigation-runner-contracts",
+            @"Tools\windows\Tests\AccessibilityProvider.Native.Tests.Harness.Tests.ps1",
+            "UI_CASE_RESULT=", new[] { "ui.navigation.headless-runner-plan" }, new[] { "-PlanOnly" })
     }.Concat(UiAdapterCases.CreateSuites()).ToArray();
 }
 

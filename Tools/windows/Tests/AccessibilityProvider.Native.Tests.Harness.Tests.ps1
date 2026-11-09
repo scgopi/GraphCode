@@ -1,7 +1,63 @@
 [CmdletBinding()]
-param()
+param(
+  [switch] $PlanOnly,
+  [string] $RepositoryRoot,
+  [string] $ArtifactRoot,
+  [string] $AssemblyPath
+)
 
 $ErrorActionPreference = "Stop"
+$nativeScript = Join-Path $PSScriptRoot "AccessibilityProvider.Native.Tests.ps1"
+$parseErrors = $null
+$nativeAst = [Management.Automation.Language.Parser]::ParseFile($nativeScript, [ref]$null, [ref]$parseErrors)
+if ($parseErrors.Count -ne 0) { throw "Native accessibility runner must parse" }
+$planFunctions = @($nativeAst.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -ceq "Get-AccessibilityProviderNativeTestPlan"
+}, $true))
+if ($planFunctions.Count -ne 1) { throw "Native accessibility needs one shared compile plan" }
+. ([scriptblock]::Create($planFunctions[0].Extent.Text))
+$planChecks = 0
+foreach ($headless in @($false, $true)) {
+  $plan = Get-AccessibilityProviderNativeTestPlan $headless
+  $expected = if ($headless) {
+    @("/DGC_UIA_HEADLESS_SELECTION", "", "oleaut32.lib user32.lib uuid.lib",
+      "Headless navigation selection: 179 checks, 0 failures")
+  } else {
+    @("", '"%~3"', "oleaut32.lib uiautomationcore.lib user32.lib",
+      "Native accessibility provider: 280 checks, 0 failures")
+  }
+  $actual = @($plan.definitions, $plan.providerSource, $plan.libraries, $plan.summary)
+  for ($index = 0; $index -lt $expected.Count; $index++) {
+    if ($actual[$index] -cne $expected[$index]) { throw "Wrong native compile plan: headless=$headless field=$index" }
+    $planChecks++
+  }
+}
+$nativeSource = [IO.File]::ReadAllText($nativeScript)
+foreach ($literal in @(
+  '.Replace("TEST_DEFINITIONS", $plan.definitions)',
+  'Replace("PROVIDER_SOURCE", $plan.providerSource)',
+  'Replace("TEST_LIBRARIES", $plan.libraries)',
+  '$_ -ceq $plan.summary',
+  'if ($HeadlessSelection)',
+  'GC_UIA_HEADLESS_SELECTION'
+)) {
+  if (-not $nativeSource.Contains($literal)) { throw "Native compile plan is not enforced: $literal" }
+  $planChecks++
+}
+Write-Host "Native accessibility compile plan: $planChecks checks, 0 failures (source/data only)"
+if ($PlanOnly) {
+  if ($ArtifactRoot) {
+    Write-Output ("UI_CASE_RESULT=" + ([ordered]@{
+      id = "ui.navigation.headless-runner-plan"; status = "Passed"; executedCount = $planChecks
+      evidence = "Actual native runner compile plan; source/data controls; compilerCalls=0; nativeCalls=0"
+    } | ConvertTo-Json -Compress))
+    return
+  }
+  return $planChecks
+}
+
 $scratch = Join-Path ([IO.Path]::GetTempPath()) ("graphcode uia harness-" + [char]0xe9 + [guid]::NewGuid())
 function Test-AbruptStage([string] $Stage, [switch] $RepeatedPath) {
   $fixture = Join-Path $scratch $(if ($RepeatedPath) { "$Stage-repeated-path" } else { $Stage })

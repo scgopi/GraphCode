@@ -1311,6 +1311,11 @@ function Invoke-Task([string] $name) {
         }
         # The native UIA provider suite is not sharded; shard 0 runs it once.
         if ($ShellTestShard -eq 0) {
+          Invoke-Native "Headless navigation selection provider contracts" {
+            & pwsh -NoProfile -File `
+              (Join-Path $repoRoot "Tools\windows\Tests\AccessibilityProvider.Native.Tests.ps1") `
+              -HeadlessSelection
+          }
           Invoke-Native "Native accessibility provider tests" {
             & pwsh -NoProfile -File `
               (Join-Path $repoRoot "Tools\windows\Tests\AccessibilityProvider.Native.Tests.ps1")

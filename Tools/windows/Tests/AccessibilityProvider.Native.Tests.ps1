@@ -1,8 +1,33 @@
 [CmdletBinding()]
-param([string] $VcVars)
+param([string] $VcVars, [switch] $HeadlessSelection)
 
 $ErrorActionPreference = "Stop"
+function Get-AccessibilityProviderNativeTestPlan([bool] $HeadlessSelection) {
+  if ($HeadlessSelection) {
+    return [pscustomobject]@{
+      definitions = "/DGC_UIA_HEADLESS_SELECTION"
+      providerSource = ""
+      libraries = "oleaut32.lib user32.lib uuid.lib"
+      summary = "Headless navigation selection: 179 checks, 0 failures"
+    }
+  }
+  return [pscustomobject]@{
+    definitions = ""
+    providerSource = '"%~3"'
+    libraries = "oleaut32.lib uiautomationcore.lib user32.lib"
+    summary = "Native accessibility provider: 280 checks, 0 failures"
+  }
+}
+$plan = Get-AccessibilityProviderNativeTestPlan ([bool]$HeadlessSelection)
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
+$test = Join-Path $PSScriptRoot "AccessibilityProvider.Native.Tests.cpp"
+if ($HeadlessSelection) {
+  $testSource = [IO.File]::ReadAllText($test)
+  if ($testSource -notmatch '(?m)^#if(?:def\s+GC_UIA_HEADLESS_SELECTION|[ \t]+defined\s*\(\s*GC_UIA_HEADLESS_SELECTION\s*\))' -or
+      -not $testSource.Contains("Headless navigation selection:")) {
+    throw "Headless selection requires the intercepted C++ test branch; the legacy native entry will not run"
+  }
+}
 if (-not $VcVars) {
   $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
   if (-not (Test-Path -LiteralPath $vswhere)) { throw "Visual Studio vswhere is required" }
@@ -34,7 +59,6 @@ try {
   if ($env:PATH.Length -ge 8191) {
     throw "Native accessibility provider deduplicated PATH is still too long for cmd: $($env:PATH.Length)"
   }
-  $test = Join-Path $PSScriptRoot "AccessibilityProvider.Native.Tests.cpp"
   $provider = Join-Path $repoRoot "graphcode-windows\src\AccessibilityProvider.cpp"
   # Change directory inside cmd only: a Push-Location here becomes this process's
   # working directory at the native call and then locks the scratch folder.
@@ -58,7 +82,7 @@ set "where_exit=%errorlevel%"
 echo [native-uia] stage=where-cl exit=%where_exit%
 if not "%where_exit%"=="0" exit /b %where_exit%
 echo [native-uia] stage=compile start
-cl /nologo /EHsc /std:c++17 /Fe:uia-native.exe "%~2" "%~3" oleaut32.lib uiautomationcore.lib user32.lib
+cl /nologo /EHsc /std:c++17 TEST_DEFINITIONS /Fe:uia-native.exe "%~2" PROVIDER_SOURCE TEST_LIBRARIES
 set "compile_exit=%errorlevel%"
 echo [native-uia] stage=compile exit=%compile_exit%
 if not "%compile_exit%"=="0" exit /b %compile_exit%
@@ -68,6 +92,9 @@ set "test_exit=%errorlevel%"
 echo [native-uia] stage=test-exe exit=%test_exit%
 exit /b %test_exit%
 '@
+  $command = $command.Replace("TEST_DEFINITIONS", $plan.definitions).
+    Replace("PROVIDER_SOURCE", $plan.providerSource).
+    Replace("TEST_LIBRARIES", $plan.libraries)
   $commandPath = Join-Path $scratch "run-native.cmd"
   [IO.File]::WriteAllText($commandPath,
     $command.Replace("`r`n", "`n").Replace("`n", "`r`n"), [Text.Encoding]::ASCII)
@@ -90,25 +117,27 @@ exit /b %test_exit%
   $setupPathLength = $setupPath[0].Substring(5).Length
   Write-Host "[native-uia] post-vcvars PATH length=$setupPathLength (cmd limit=8191)"
   if ($setupPathLength -ge 8191) { throw "Native accessibility provider post-vcvars PATH exceeds cmd limit: $setupPathLength" }
-  if (@($nativeOutput | Where-Object { $_ -eq "Native accessibility provider: 280 checks, 0 failures" }).Count -ne 1) {
-    throw "Native accessibility provider test-exe did not report exactly one 280-check, zero-failure summary"
+  if (@($nativeOutput | Where-Object { $_ -ceq $plan.summary }).Count -ne 1) {
+    throw "Native accessibility provider test-exe did not report exactly one expected summary: $($plan.summary)"
   }
 } finally {
   $env:TEMP = $savedTemp
   $env:TMP = $savedTmp
   $env:PATH = $savedPath
-  # The just-built test executable and compiler outputs can stay locked briefly
-  # (for example by an antivirus scan) after the process exits. Cleanup must not
-  # turn a passing run into a failure, so retry and then only warn.
-  for ($attempt = 1; Test-Path -LiteralPath $scratch; $attempt++) {
-    try {
-      Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction Stop
-    } catch {
-      if ($attempt -ge 10) {
-        Write-Warning "Native accessibility test scratch was not removed: $scratch ($($_.Exception.Message))"
-        break
+    if ($HeadlessSelection) {
+      Write-Host "HEADLESS_SELECTION_RETAINED_SCRATCH=$scratch"
+    } else {
+      # Native compiler outputs can stay locked briefly after the process exits.
+      for ($attempt = 1; Test-Path -LiteralPath $scratch; $attempt++) {
+        try {
+          Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction Stop
+        } catch {
+          if ($attempt -ge 10) {
+            Write-Warning "Native accessibility test scratch was not removed: $scratch ($($_.Exception.Message))"
+            break
+          }
+          Start-Sleep -Milliseconds 500
+        }
       }
-      Start-Sleep -Milliseconds 500
     }
-  }
 }
