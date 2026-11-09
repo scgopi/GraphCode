@@ -1,5 +1,6 @@
 {
   "units": [
+    { "id": "ui.jump.workspace-destination-controls", "owner": "Ui", "minimumCount": 16, "exactCount": 16, "requiredGroups": [] },
     { "id": "ui.cards-pilot.target-valid", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.cards-pilot.foreign-project", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.cards-pilot.missing-target", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },

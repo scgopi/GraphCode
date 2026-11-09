@@ -8,6 +8,7 @@ The Windows port must have runnable commands before implementation fleets begin.
 |---|---|
 | Windows investigation spikes | `pwsh Tools/windows/validate.ps1 -Task all` |
 | Compiled validation runner contract | `pwsh -NoProfile -File Tools\windows\Invoke-ValidationRunnerContract.ps1` (builds and runs the normal full C# entry; see [runner documentation](ValidationRunner/README.md)) |
+| Jump destination observation controls (no desktop/UIA calls) | `pwsh -NoProfile -File Tools\windows\Tests\WindowsShell.Tests.ps1 -JumpDestinationOnly` (16 destination fixtures; also executed by the shell gate and compiled `ui.functional-contracts` adapter) |
 | Explicit fixture compiler selection (controlled files and observations; no compiler/GUI execution) | `pwsh -NoProfile -File Tools\windows\Tests\FixtureCompiler.Tests.ps1 -ScratchRoot .build\fixture-compiler-contracts` (fresh directory required; 27 cases; also run by the canonical capture adapter before fresh preparation) |
 | Exclusive validation fixture directories (independent filesystem and static wiring contracts) | `pwsh -NoProfile -File Tools\windows\Tests\ValidationFixtureDirectory.Tests.ps1` |
 | Isolated 30-key process environment boundary | `pwsh -NoProfile -File Tools\windows\Tests\IsolatedProcessEnvironment.Contracts.Tests.ps1 -Phase REGRESSION` |
@@ -36,6 +37,28 @@ The Windows port must have runnable commands before implementation fleets begin.
 | macOS app/daemon/CLI | `make test` |
 | macOS format/lint | `make check` |
 | DCO commit range | `git log --format=%B <base>..HEAD` plus trailer validation |
+
+### Jump destination acceptance
+
+The finished Goal fixture is the leaf-workspace oracle; the Composite fixture
+opens a group and must not stand in for leaf mounting. The destination check
+requires exact owned loop-bar, project-toolbar and Show in Graph identities
+with visible nonempty bounds, plus the unique selected sidebar loop row.
+The 16 in-memory controls exercise the actual production observation helper,
+not native navigation. The functional adapter has no compiled-UIA import:
+its executed source/managed fixtures do not need a binding assembly, and the
+ordinary loader registers real UIA clientside providers. Its existing 64 units
+and the new exact-16 unit execute headlessly (65 distinct units, 122 counted
+executions). The full registry contains 685 unique units; that is an inventory,
+not a full-run result. Shell coverage remains 66 sections across 23/18/25.
+
+The selected canonical invocation is
+`ValidationRunner.exe --repository-root $PWD.Path --artifact-root $ownedFreshRoot --suite ui.functional-contracts`
+after the normal pinned build. It deliberately exits 1 with `complete=false`
+and `fullInvocation=false` because the other required units did not run.
+Require all 65 selected unit identities to pass; do not relabel this as the
+full CI-equivalent invocation. Full shell units still include native fixtures,
+and `-SkipTrayLive` is not headless admission.
 
 ### Validation-runner fixture ownership
 

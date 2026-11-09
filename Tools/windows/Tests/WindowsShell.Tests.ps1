@@ -2,6 +2,7 @@
 param(
   [switch] $List,
   [switch] $WorkspaceTabSelectorOnly,
+  [switch] $JumpDestinationOnly,
   [string] $ZigExecutable,
   # Hosted CI splits the executable sections across runners. Shard/ShardCount
   # select one part of a deterministic, complete partition; the defaults run
@@ -224,6 +225,76 @@ function Assert-WorkspaceTabSelectors {
 
 Assert-WorkspaceTabSelectors
 if ($WorkspaceTabSelectorOnly) { exit 0 }
+
+function Assert-JumpDestinationContract {
+  $path = Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1"
+  $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errors)
+  Assert-Contract ($errors.Count -eq 0) "Jump destination gate must parse"
+  $definitions = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+      $node.Name -ceq "Assert-UiaJumpWorkspaceDestination"
+  }, $true))
+  Assert-Contract ($definitions.Count -eq 1) "Jump needs one actual workspace destination oracle"
+  Assert-Contract ($definitions[0].Extent.Text -notmatch 'System\.Windows\.Automation|GraphCodeUiaGateState|GetCurrentPattern|Invoke\(') `
+    "Jump destination predicate must consume observations without native UIA or input"
+  . ([scriptblock]::Create($definitions[0].Extent.Text))
+  $cases = @(
+    "exact", "project-only", "wrong-loop", "wrong-project", "duplicate-loop-bar",
+    "foreign-loop-bar", "foreign-toolbar", "unselected-row", "wrong-row",
+    "foreign-row", "missing-show-graph", "wrong-show-graph", "offscreen-loop-bar",
+    "zero-loop-bar-bounds", "duplicate-toolbar", "duplicate-row"
+  )
+  foreach ($name in $cases) {
+    $children = @(
+      [pscustomobject]@{ Current = [pscustomobject]@{ AutomationId = "workspace-loop-bar-1"; Name = "Selected loop workspace"; ProcessId = 42; IsOffscreen = $false; BoundingRectangle = @{ Width = 100; Height = 20 } } },
+      [pscustomobject]@{ Current = [pscustomobject]@{ AutomationId = "workspace-toolbar-2"; Name = "Owned project"; ProcessId = 42; IsOffscreen = $false; BoundingRectangle = @{ Width = 100; Height = 20 } } },
+      [pscustomobject]@{ Current = [pscustomobject]@{ AutomationId = "workspace-show-graph-3"; Name = "Show in Graph"; ProcessId = 42; IsOffscreen = $false; BoundingRectangle = @{ Width = 100; Height = 20 } } }
+    )
+    $rows = @([pscustomobject]@{ Current = [pscustomobject]@{
+      AutomationId = "loop-row-4"; Name = "Owned loop"; ProcessId = 42
+    } })
+    $selected = $true
+    switch ($name) {
+      "project-only" { $children = @() }
+      "wrong-loop" { $children[0].Current.AutomationId = "workspace-loop-bar-9" }
+      "wrong-project" { $children[1].Current.AutomationId = "workspace-toolbar-9" }
+      "duplicate-loop-bar" { $children += $children[0] }
+      "foreign-loop-bar" { $children[0].Current.ProcessId = 99 }
+      "foreign-toolbar" { $children[1].Current.ProcessId = 99 }
+      "unselected-row" { $selected = $false }
+      "wrong-row" { $rows[0].Current.AutomationId = "loop-row-9" }
+      "foreign-row" { $rows[0].Current.ProcessId = 99 }
+      "missing-show-graph" { $children = @($children[0], $children[1]) }
+      "wrong-show-graph" { $children[2].Current.AutomationId = "workspace-show-graph-9" }
+      "offscreen-loop-bar" { $children[0].Current.IsOffscreen = $true }
+      "zero-loop-bar-bounds" { $children[0].Current.BoundingRectangle.Width = 0 }
+      "duplicate-toolbar" { $children += $children[1] }
+      "duplicate-row" { $rows += $rows[0] }
+    }
+    $failure = $null
+    try {
+      Assert-UiaJumpWorkspaceDestination $children $rows $selected 42 `
+        "workspace-loop-bar-1" "workspace-toolbar-2" "workspace-show-graph-3" `
+        "loop-row-4" "Owned project" "Owned loop"
+    } catch { $failure = $_ }
+    Assert-Contract (($null -eq $failure) -eq ($name -ceq "exact")) "Jump destination oracle accepted wrong observation: $name"
+    if ($failure) {
+      Assert-Contract ($failure.Exception.Message -like "Jump destination:*") "Jump refusal came from an unrelated failure: $name"
+    }
+  }
+  $source = [IO.File]::ReadAllText($path)
+  Assert-Contract ($source.Contains('Assert-UiaJumpWorkspaceDestination $jumpWorkspaceChildren $jumpDestinationRows') -and
+    $source.Contains('SetFirstEditText($jumpWindow, "UIA loop A")') -and
+    $source.Contains('$jumpExpectedLoopBarId = Get-MultiProjectAutomationId "workspace-loop-bar" $dynamicProjectNodeIds[0]')) `
+    "Jump leaf destination observations must reach the actual production oracle"
+  Write-Host "UIA Jump destination contract: $($cases.Count) cases passed (nativeCalls=0)"
+  return $cases.Count
+}
+
+$null = Assert-JumpDestinationContract
+if ($JumpDestinationOnly) { exit 0 }
 
 $shellSource = Get-Content $shellScript -Raw
 $appSource = Get-Content (Join-Path $shellRoot "src\App.zig") -Raw
