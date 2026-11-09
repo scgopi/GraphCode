@@ -9172,7 +9172,7 @@ pub const App = struct {
                         const node = nodes[row.index];
                         const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ path, node.id }) catch return;
                         defer self.allocator.free(key);
-                        self.appendAccessibilityElement(&elements, &owned_identities, "loop", key, node.title, 2, .{ .logical = bounds }, self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, node.id), false) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "loop", key, node.title, 2, .{ .logical = bounds }, Sidebar.rowSelected(row, &self.model, self.surface, self.workspaceQuickChatID()), false) catch return;
                         if (row.has_children) {
                             const disclosure_bounds = clipSidebarAccessibilityBounds(Sidebar.disclosureBounds(row), sidebar_bottom);
                             self.appendAccessibilityElement(
@@ -9247,7 +9247,7 @@ pub const App = struct {
                 },
                 .quick_chat => if (row.index < self.model.quick_chats.items.len) {
                     const chat = self.model.quick_chats.items[row.index];
-                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-row", chat.id, chat.title, 1, .{ .logical = bounds }, false, false) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-row", chat.id, chat.title, 1, .{ .logical = bounds }, Sidebar.rowSelected(row, &self.model, self.surface, self.workspaceQuickChatID()), false) catch return;
                 },
             }
         }
@@ -10549,9 +10549,15 @@ fn logWireReceiver(app: *App, event: u32, message: c.UINT, wparam: c.WPARAM, lpa
         CanvasInput.decodeMouseMessage(0);
     var buffer: [512]u8 = undefined;
     const line = app.wire_receiver_trace.project(&buffer, event, message, after, .{
-        .x = point.x, .y = point.y, .buttons = wparam, .raw_lparam = lparam, .source = app.edge_drag_source_id,
-        .edge_dragging = app.canvas.edge_dragging, .node_dragging = app.canvas.node_dragging,
-        .panning = app.canvas.dragging, .surface = @tagName(app.surface),
+        .x = point.x,
+        .y = point.y,
+        .buttons = wparam,
+        .raw_lparam = lparam,
+        .source = app.edge_drag_source_id,
+        .edge_dragging = app.canvas.edge_dragging,
+        .node_dragging = app.canvas.node_dragging,
+        .panning = app.canvas.dragging,
+        .surface = @tagName(app.surface),
     }) catch |err| {
         std.log.err("Wire receiver diagnostic projection failed: {s}", .{@errorName(err)});
         return;
@@ -10883,7 +10889,7 @@ fn onWindowMessage(
             if (app.model.currentGraph()) |graph| app.canvas.syncNodeOffsets(graph.nodes.items);
             _ = app.refreshCanvasLayout(.{ .left = 0, .top = 0, .right = logical_right, .bottom = logical_bottom });
             const offered_version = if (app.update_state.state == .available) app.update_version else "";
-            GraphCanvas.paint(hdc, logical_right, logical_bottom, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), offered_version, app.ingress_error, app.connectionFailureVisible(), app.worktree_state, app.declared_entry_ids.items, app.kept_worktree_paths.items, app.allocator, &app.canvas, &app.sidebar_state, app.sidebar_hover_y, app.workspace_controls, app.surface, app.selection_active);
+            GraphCanvas.paint(hdc, logical_right, logical_bottom, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), offered_version, app.ingress_error, app.connectionFailureVisible(), app.worktree_state, app.declared_entry_ids.items, app.kept_worktree_paths.items, app.allocator, &app.canvas, &app.sidebar_state, app.sidebar_hover_y, app.workspace_controls, app.surface, app.selection_active, app.workspaceQuickChatID());
             app.update_lock.unlock();
             if (app.workspace_controls.panel_visible or app.surface == .workspace) {
                 if (app.surface == .workspace) {
@@ -13742,6 +13748,89 @@ fn expectSidebarNavigationElement(
     return sink.rects[index];
 }
 
+test "headless canonical sidebar selection follows the visible destination and project owner" {
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = .{ .allocator = allocator, .frame_buffer = try @import("FrameBuffer.zig").FrameBuffer.init(allocator, .v2) },
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+        .workspace_controls = .{ .rail_visible = true, .panel_visible = false, .activity_enabled = false },
+    };
+    defer app.client.deinit();
+    defer app.canvas.deinitLayout();
+    defer app.model.deinit();
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
+    const frames = [_][]const u8{
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"A","name":"Alpha"},"nodes":[{"id":"same","title":"Alpha loop","state":"idle"},{"id":"group","title":"Group","loopType":"composite","subGraph":{"nodes":[{"id":"inner","title":"Inner"}],"edges":[]}}],"edges":[]}}}
+        ,
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"B","name":"Beta"},"nodes":[{"id":"same","title":"Beta loop","state":"idle"}],"edges":[]}}}
+        ,
+        \\{"version":2,"kind":"event","sequence":3,"event":{"quickChatsListed":[{"id":"chat","title":"Chat","backend":"claudeCode"}]}}
+        ,
+    };
+    for (frames) |frame| _ = try app.model.updateFromFrame(frame);
+    try std.testing.expect(app.model.selectProject("A"));
+    var chat_id = [_]u8{ 'c', 'h', 'a', 't' };
+    var workspace: TerminalWorkspace.Workspace = .{
+        .parent = null,
+        .allocator = allocator,
+        .zmx_path = &.{},
+        .cwd = &.{},
+        .input_queue = .{ .allocator = allocator },
+        .layout = try @import("WorkspaceLayout.zig").Layout.init(allocator, TerminalWorkspace.quick_chat_scope_project),
+        .layout_path = &.{},
+        .project_key = &.{},
+        .project_path = &.{},
+        .loop_id = &chat_id,
+    };
+    defer workspace.layout.deinit();
+    defer allocator.free(workspace.agent_tab_title);
+    defer allocator.free(workspace.agent_pane_detail);
+    const cases = [_]struct {
+        surface: GraphCanvas.Surface,
+        chat_workspace: bool = false,
+        selected: []const u8,
+    }{
+        .{ .surface = .overview, .selected = "overview-destination:graph" },
+        .{ .surface = .quick_chats, .selected = "quick-chats-destination:quick-chats" },
+        .{ .surface = .project, .selected = "open-project:A" },
+        .{ .surface = .workspace, .selected = "loop:A:same" },
+        .{ .surface = .workspace, .chat_workspace = true, .selected = "quick-chat-row:chat" },
+    };
+    const destinations = [_][]const u8{
+        "overview-destination:graph", "quick-chats-destination:quick-chats",
+        "open-project:A",             "open-project:B",
+        "loop:A:same",                "loop:B:same",
+        "loop:A:group",               "quick-chat-row:chat",
+    };
+    for (cases) |case| {
+        app.surface = case.surface;
+        app.workspace = if (case.chat_workspace) &workspace else null;
+        var sink: SidebarUiaSink = .{};
+        app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+        var selected_count: usize = 0;
+        for (destinations) |identity| {
+            const expected = std.mem.eql(u8, identity, case.selected);
+            try expectSidebarNavigationSelection(&sink, identity, expected);
+            if (sink.selected[sink.indexOfName(identity).?]) selected_count += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 1), selected_count);
+    }
+    app.workspace = null;
+    app.surface = .project;
+    try std.testing.expect(app.model.openComposite("group"));
+    var composite_sink: SidebarUiaSink = .{};
+    app.syncAccessibilityTo(&composite_sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    for (destinations) |identity|
+        try expectSidebarNavigationSelection(&composite_sink, identity, std.mem.eql(u8, identity, "open-project:A"));
+}
+
 test "parity sidebar navigation UIA matches painted owners and clipped row controls" {
     for ([_]u32{ 96, 144, 192 }) |dpi| {
         var app = try overviewTestApp(dpi);
@@ -13782,6 +13871,11 @@ test "parity sidebar navigation UIA matches painted owners and clipped row contr
             return error.TestUnexpectedResult;
         const quick_chats_row = for (rows.items) |row| {
             if (row.kind == .quick_chat_overview) break row;
+        } else return error.TestUnexpectedResult;
+        const local_loop_row = navigationRowForProject(rows.items, .loop, "C:\\local") orelse
+            return error.TestUnexpectedResult;
+        const chat_row = for (rows.items) |row| {
+            if (row.kind == .quick_chat) break row;
         } else return error.TestUnexpectedResult;
         try std.testing.expect(app.model.selectProject("C:\\local"));
         var temporary = std.testing.tmpDir(.{});
@@ -13826,18 +13920,23 @@ test "parity sidebar navigation UIA matches painted owners and clipped row contr
             try expectSidebarNavigationSelection(&route_sink, "open-project:C:\\local", case.local);
             try expectSidebarNavigationSelection(&route_sink, "open-project:ssh://host/remote", false);
             try expectSidebarNavigationSelection(&route_sink, "open-project:codespace://fixture/loading", false);
+            try expectSidebarNavigationSelection(&route_sink, "loop:C:\\local:local-loop", case.surface == .workspace and !case.quick_chat_workspace);
+            try expectSidebarNavigationSelection(&route_sink, "loop:graphcode://global:global-loop", false);
+            try expectSidebarNavigationSelection(&route_sink, "quick-chat-row:chat", case.quick_chat_workspace);
 
             {
                 var bitmap = try paintSidebarBitmap(&app, client.bottom, false, 0);
                 defer bitmap.deinit();
-                const row_selections = [_]struct { row: Sidebar.Row, selected: bool }{
+                const row_selections = [_]struct { row: Sidebar.Row, selected: bool, x: i32 = 190 }{
                     .{ .row = graph_row, .selected = case.graph },
                     .{ .row = quick_chats_row, .selected = case.quick_chats },
                     .{ .row = local_row, .selected = case.local },
+                    .{ .row = local_loop_row, .selected = case.surface == .workspace and !case.quick_chat_workspace, .x = 16 },
+                    .{ .row = chat_row, .selected = case.quick_chat_workspace, .x = 16 },
                 };
                 for (row_selections) |selection| {
                     const expected_fill = dibColor(if (selection.selected) Tokens.pane_focus_tint else Tokens.workspace_rail);
-                    try std.testing.expectEqual(expected_fill, bitmap.pixel(190, selection.row.top + 10));
+                    try std.testing.expectEqual(expected_fill, bitmap.pixel(selection.x, selection.row.top + 10));
                 }
 
                 app.selection_active = false;
@@ -13845,7 +13944,7 @@ test "parity sidebar navigation UIA matches painted owners and clipped row contr
                 defer inactive_bitmap.deinit();
                 for (row_selections) |selection| {
                     const expected_fill = dibColor(if (selection.selected) 0x003A3A44 else Tokens.workspace_rail);
-                    try std.testing.expectEqual(expected_fill, inactive_bitmap.pixel(190, selection.row.top + 10));
+                    try std.testing.expectEqual(expected_fill, inactive_bitmap.pixel(selection.x, selection.row.top + 10));
                 }
             }
         }
@@ -14240,6 +14339,7 @@ fn paintedIngressFooter(app: *App, sidebar_bottom: i32, update: bool) !?c.RECT {
         hdc,
         &app.model,
         app.surface,
+        app.workspaceQuickChatID(),
         app.selection_active,
         app.currentWorktreeInspection(),
         "",
@@ -14606,6 +14706,7 @@ fn paintSidebarBitmap(app: *App, viewport_bottom: i32, update: bool, scroll: i32
         dc,
         &app.model,
         app.surface,
+        app.workspaceQuickChatID(),
         app.selection_active,
         app.currentWorktreeInspection(),
         "",
@@ -23781,8 +23882,7 @@ test "wire capture real window procedure preserves reentrant same-window SetCapt
     try MainWindow.registerClass(instance);
     app.window.hwnd = null;
     app.window.context = &app;
-    const hwnd = c.CreateWindowExW(0, app.window.class_name, app.window.class_name,
-        c.WS_POPUP, 0, 0, 1200, 700, null, null, instance, &app.window) orelse {
+    const hwnd = c.CreateWindowExW(0, app.window.class_name, app.window.class_name, c.WS_POPUP, 0, 0, 1200, 700, null, null, instance, &app.window) orelse {
         app.window.hwnd = original;
         return error.WindowCreationFailed;
     };
@@ -23816,9 +23916,7 @@ test "wire capture real window procedure preserves reentrant same-window SetCapt
     _ = c.SendMessageW(hwnd, c.WM_ACTIVATEAPP, 0, 0);
     try std.testing.expect(!app.canvas.edge_dragging);
     try std.testing.expectEqual(@as(usize, 0), app.edge_drag_source_id.len);
-    const foreign = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
-        std.unicode.utf8ToUtf16LeStringLiteral("Capture peer"), c.WS_POPUP,
-        0, 0, 100, 100, null, null, instance, null) orelse return error.WindowCreationFailed;
+    const foreign = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC"), std.unicode.utf8ToUtf16LeStringLiteral("Capture peer"), c.WS_POPUP, 0, 0, 100, 100, null, null, instance, null) orelse return error.WindowCreationFailed;
     defer _ = c.DestroyWindow(foreign);
     app.beginWireSelectedNode(0);
     _ = c.SetCapture(foreign);

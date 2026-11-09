@@ -173,6 +173,7 @@ pub fn draw(
     hdc: c.HDC,
     model: *const GraphModel.Model,
     surface: Surface,
+    active_quick_chat_id: ?[]const u8,
     selection_active: bool,
     inspection: ?*const WorktreeStatus.Inspection,
     selected_worktree_path: []const u8,
@@ -254,6 +255,8 @@ pub fn draw(
             .loop => if (row.project_path) |path| if (graphForProject(model, path)) |graph| {
                 const nodes = graph.nodes();
                 if (row.index < nodes.len) {
+                    if (rowSelected(row, model, surface, active_quick_chat_id))
+                        drawSelection(hdc, bounds, selection_active);
                     const node = nodes[row.index];
                     const indent = loopIndent(row.depth);
                     const elapsed = elapsedText(allocator, @intCast(node.created_at orelse 0), std.time.timestamp()) catch |err| blk: {
@@ -301,8 +304,11 @@ pub fn draw(
                     if (row.has_children) drawDisclosureIcon(hdc, chatsDisclosureBounds(row), state.chats_collapsed, 0x00B8B8B8);
                 }
             },
-            .quick_chat => if (row.index < model.quick_chats.items.len)
-                drawTextRect(hdc, allocator, model.quick_chats.items[row.index].title, rect(34, row.top + 5, Tokens.sidebar_width - 12, row.top + 27), 13, 0x00E6E6E6, loop_text_format),
+            .quick_chat => if (row.index < model.quick_chats.items.len) {
+                if (rowSelected(row, model, surface, active_quick_chat_id))
+                    drawSelection(hdc, bounds, selection_active);
+                drawTextRect(hdc, allocator, model.quick_chats.items[row.index].title, rect(34, row.top + 5, Tokens.sidebar_width - 12, row.top + 27), 13, 0x00E6E6E6, loop_text_format);
+            },
         }
     }
 
@@ -634,6 +640,27 @@ pub fn navigationRowSelected(row: Row, surface: Surface, selected_project_path: 
             std.mem.eql(u8, row.project_path.?, selected_project_path.?),
         else => false,
     };
+}
+
+pub fn rowSelected(row: Row, model: *const GraphModel.Model, surface: Surface, active_quick_chat_id: ?[]const u8) bool {
+    switch (row.kind) {
+        .loop => {
+            if (surface != .workspace or active_quick_chat_id != null) return false;
+            const path = row.project_path orelse return false;
+            const selected_path = model.selected_project_path orelse return false;
+            if (!std.mem.eql(u8, path, selected_path)) return false;
+            const selected_node = model.selected_node_id orelse return false;
+            const graph = graphForProject(model, path) orelse return false;
+            const nodes = graph.nodes();
+            return row.index < nodes.len and std.mem.eql(u8, nodes[row.index].id, selected_node);
+        },
+        .quick_chat => {
+            if (surface != .workspace or row.index >= model.quick_chats.items.len) return false;
+            const id = active_quick_chat_id orelse return false;
+            return std.mem.eql(u8, model.quick_chats.items[row.index].id, id);
+        },
+        else => return navigationRowSelected(row, surface, model.selected_project_path),
+    }
 }
 
 pub fn graphForProject(model: *const GraphModel.Model, path: []const u8) ?ProjectGraph {
@@ -2182,7 +2209,7 @@ test "sidebar framing starts with navigation instead of a fixed title block" {
     defer state.deinit();
     var bitmap = try TestSidebarBitmap.init();
     defer bitmap.deinit();
-    draw(bitmap.hdc, &model, .workspace, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
+    draw(bitmap.hdc, &model, .workspace, null, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
     var painted_rows: usize = 0;
     for (rows.items) |row| {
         var pixels: usize = 0;
@@ -2274,12 +2301,12 @@ test "remaining sidebar interaction parity paints active navigation selection bl
             break row;
         } else return error.TestUnexpectedResult;
 
-        draw(bitmap.hdc, &model, case.surface, true, null, "", 0, "", 800, "", "", &state, -1, allocator);
+        draw(bitmap.hdc, &model, case.surface, null, true, null, "", 0, "", 800, "", "", &state, -1, allocator);
         try std.testing.expectEqual(
             @as(u32, Tokens.pane_focus_tint),
             c.GetPixel(bitmap.hdc, 100, selected_row.top + 1),
         );
-        draw(bitmap.hdc, &model, case.surface, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
+        draw(bitmap.hdc, &model, case.surface, null, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
         try std.testing.expectEqual(
             @as(u32, 0x003A3A44),
             c.GetPixel(bitmap.hdc, 100, selected_row.top + 1),
@@ -2315,7 +2342,7 @@ test "remaining sidebar interaction parity keeps navigation controls hover-only 
 
     const control_color: u32 = 0x00B8B8B8;
     const heading_color: u32 = 0x00909090;
-    draw(bitmap.hdc, &model, .workspace, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
+    draw(bitmap.hdc, &model, .workspace, null, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
     var navigation_rows: usize = 0;
     var headings: usize = 0;
     for (rows.items) |row| {
@@ -2336,7 +2363,7 @@ test "remaining sidebar interaction parity keeps navigation controls hover-only 
                 try std.testing.expectEqual(@as(usize, 0), sidebarTestPixelCount(bitmap, add_bounds, control_color));
                 try std.testing.expectEqual(@as(usize, 0), sidebarTestPixelCount(bitmap, disclosure, control_color));
 
-                draw(bitmap.hdc, &model, .workspace, false, null, "", 0, "", 800, "", "", &state, row.top + 8, allocator);
+                draw(bitmap.hdc, &model, .workspace, null, false, null, "", 0, "", 800, "", "", &state, row.top + 8, allocator);
                 try std.testing.expect(sidebarTestPixelCount(bitmap, add_bounds, control_color) > 0);
                 try expectSidebarTestDisclosureDirection(bitmap, disclosure, control_color, false);
                 navigation_rows += 1;
@@ -2344,7 +2371,7 @@ test "remaining sidebar interaction parity keeps navigation controls hover-only 
             .local_heading, .remote_heading => {
                 const disclosure = rect(198, row.top, rowBounds(row).right, row.top + 20);
                 try std.testing.expectEqual(@as(usize, 0), sidebarTestPixelCount(bitmap, disclosure, heading_color));
-                draw(bitmap.hdc, &model, .workspace, false, null, "", 0, "", 800, "", "", &state, row.top + 8, allocator);
+                draw(bitmap.hdc, &model, .workspace, null, false, null, "", 0, "", 800, "", "", &state, row.top + 8, allocator);
                 try expectSidebarTestDisclosureDirection(bitmap, disclosure, heading_color, false);
                 headings += 1;
             },
@@ -2363,9 +2390,63 @@ test "remaining sidebar interaction parity keeps navigation controls hover-only 
     for (collapsed_rows.items) |row| {
         if (row.kind != .overview and row.kind != .open_project and row.kind != .quick_chat_overview) continue;
         const disclosure = if (row.kind == .quick_chat_overview) chatsDisclosureBounds(row) else disclosureBounds(row);
-        draw(bitmap.hdc, &model, .workspace, false, null, "", 0, "", 800, "", "", &state, row.top + 8, allocator);
+        draw(bitmap.hdc, &model, .workspace, null, false, null, "", 0, "", 800, "", "", &state, row.top + 8, allocator);
         try expectSidebarTestDisclosureDirection(bitmap, disclosure, control_color, true);
     }
+}
+
+test "headless canonical sidebar selection keeps workspace identities separate from backing model selection" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"A","name":"Alpha"},"nodes":[{"id":"same","title":"Alpha loop"},{"id":"group","title":"Group","loopType":"composite","subGraph":{"nodes":[{"id":"inner","title":"Inner"}],"edges":[]}}],"edges":[]}}}
+    );
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"B","name":"Beta"},"nodes":[{"id":"same","title":"Beta loop"}],"edges":[]}}}
+    );
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"quickChatsListed":[{"id":"chat","title":"Chat","backend":"claudeCode"}]}}
+    );
+    try std.testing.expect(model.selectProject("A"));
+    const rows = [_]Row{
+        .{ .kind = .overview, .index = 0, .top = 0 },
+        .{ .kind = .quick_chat_overview, .index = 0, .top = 0 },
+        .{ .kind = .open_project, .index = 0, .top = 0, .project_path = "A" },
+        .{ .kind = .loop, .index = 0, .top = 0, .project_path = "A" },
+        .{ .kind = .loop, .index = 0, .top = 0, .project_path = "B" },
+        .{ .kind = .quick_chat, .index = 0, .top = 0 },
+        .{ .kind = .loop, .index = 1, .top = 0, .project_path = "A" },
+    };
+    const cases = [_]struct { surface: Surface, chat: ?[]const u8 = null, selected: usize }{
+        .{ .surface = .overview, .selected = 0 },
+        .{ .surface = .quick_chats, .selected = 1 },
+        .{ .surface = .project, .selected = 2 },
+        .{ .surface = .workspace, .selected = 3 },
+        .{ .surface = .workspace, .chat = "chat", .selected = 5 },
+        .{ .surface = .project, .chat = "chat", .selected = 2 },
+    };
+    for (cases) |case| {
+        var selected_count: usize = 0;
+        for (rows, 0..) |row, index| {
+            const selected = rowSelected(row, &model, case.surface, case.chat);
+            try std.testing.expectEqual(index == case.selected, selected);
+            if (selected) selected_count += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 1), selected_count);
+    }
+    try std.testing.expect(!rowSelected(rows[3], &model, .workspace, "stale-chat"));
+    try std.testing.expect(!rowSelected(rows[5], &model, .workspace, "stale-chat"));
+    try std.testing.expect(!rowSelected(.{ .kind = .loop, .index = 99, .top = 0, .project_path = "A" }, &model, .workspace, null));
+    try std.testing.expect(!rowSelected(.{ .kind = .loop, .index = 0, .top = 0, .project_path = "missing" }, &model, .workspace, null));
+    try std.testing.expect(!rowSelected(.{ .kind = .quick_chat, .index = 99, .top = 0 }, &model, .workspace, "chat"));
+    try std.testing.expect(model.setSelectedIndex(1));
+    try std.testing.expect(rowSelected(rows[6], &model, .workspace, null));
+    try std.testing.expect(!rowSelected(rows[3], &model, .workspace, null));
+    try std.testing.expect(model.openComposite("group"));
+    try std.testing.expect(rowSelected(rows[2], &model, .project, null));
+    try std.testing.expect(!rowSelected(rows[3], &model, .project, null));
+    try std.testing.expect(!rowSelected(rows[6], &model, .project, null));
 }
 
 test "sidebar framing rounds every selected navigation surface inside the rail" {
@@ -2384,7 +2465,7 @@ test "sidebar framing rounds every selected navigation surface inside the rail" 
     var rows = try appendRows(allocator, &model, null, 0, &state);
     defer rows.deinit(allocator);
     for (surfaces, kinds) |surface, kind| {
-        draw(bitmap.hdc, &model, surface, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
+        draw(bitmap.hdc, &model, surface, null, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
         const row = for (rows.items) |candidate| {
             if (candidate.kind == kind) break candidate;
         } else return error.TestUnexpectedResult;
@@ -2423,12 +2504,12 @@ test "sidebar framing rounds reclaimable worktree selection without selecting un
     defer state.deinit();
     var bitmap = try TestSidebarBitmap.init();
     defer bitmap.deinit();
-    draw(bitmap.hdc, &model, .workspace, false, &inspection, "worktree", 0, "", 800, "", "", &state, -1, allocator);
+    draw(bitmap.hdc, &model, .workspace, null, false, &inspection, "worktree", 0, "", 800, "", "", &state, -1, allocator);
     const bounds = rowBounds(row);
     try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), c.GetPixel(bitmap.hdc, bounds.left, bounds.top));
     try std.testing.expectEqual(@as(u32, 0x003A3A44), c.GetPixel(bitmap.hdc, 100, bounds.top + 1));
     inspection.entries.items[0].dirty = true;
-    draw(bitmap.hdc, &model, .workspace, false, &inspection, "worktree", 0, "", 800, "", "", &state, -1, allocator);
+    draw(bitmap.hdc, &model, .workspace, null, false, &inspection, "worktree", 0, "", 800, "", "", &state, -1, allocator);
     try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), c.GetPixel(bitmap.hdc, 100, bounds.top + 1));
 }
 
@@ -2511,7 +2592,7 @@ test "sidebar row parity paints solid and hollow states on the production draw p
     defer state.deinit();
     var bitmap = try TestSidebarBitmap.init();
     defer bitmap.deinit();
-    draw(bitmap.hdc, &model, .overview, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
+    draw(bitmap.hdc, &model, .overview, null, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
     var rows = try appendRows(allocator, &model, null, 0, &state);
     defer rows.deinit(allocator);
     const colors = [_]u32{ 0x000A9FFF, 0x000A9FFF, 0x00FF840A, 0x00FF840A, 0x0058D130, 0x003A45FF, 0x00F25ABF, 0x006F6C6C, 0x006F6C6C };
@@ -2572,7 +2653,7 @@ test "sidebar row parity keeps section controls trailing and header icons aligne
     defer bitmap.deinit();
     var rows = try appendRows(allocator, &model, null, 0, &state);
     defer rows.deinit(allocator);
-    draw(bitmap.hdc, &model, .workspace, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
+    draw(bitmap.hdc, &model, .workspace, null, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
     var headers_checked: usize = 0;
     var sections_checked: usize = 0;
     for (rows.items) |row| {
@@ -2596,7 +2677,7 @@ test "sidebar row parity keeps section controls trailing and header icons aligne
                     while (x < 220) : (x += 1)
                         try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), c.GetPixel(bitmap.hdc, x, y));
                 }
-                draw(bitmap.hdc, &model, .workspace, false, null, "", 0, "", 800, "", "", &state, row.top + 8, allocator);
+                draw(bitmap.hdc, &model, .workspace, null, false, null, "", 0, "", 800, "", "", &state, row.top + 8, allocator);
                 var chevron_pixels: usize = 0;
                 y = row.top;
                 while (y < row.top + 20) : (y += 1) {
@@ -2628,7 +2709,7 @@ test "sidebar row parity gives short elapsed labels spare title space" {
     defer state.deinit();
     var bitmap = try TestSidebarBitmap.init();
     defer bitmap.deinit();
-    draw(bitmap.hdc, &model, .overview, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
+    draw(bitmap.hdc, &model, .overview, null, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
     var rows = try appendRows(allocator, &model, null, 0, &state);
     defer rows.deinit(allocator);
     const loop = for (rows.items) |row| {
@@ -2890,7 +2971,7 @@ test "sidebar draw clips rows to the content viewport and keeps status text insi
     var draw_allocator = std.heap.DebugAllocator(.{}){};
     defer std.debug.assert(draw_allocator.deinit() == .ok);
     const long_status = "S" ** 120;
-    draw(hdc, &model, .project, false, null, "", 0, long_status, viewport_bottom, "", "", &state, -1, draw_allocator.allocator());
+    draw(hdc, &model, .project, null, false, null, "", 0, long_status, viewport_bottom, "", "", &state, -1, draw_allocator.allocator());
 
     const content_bottom = contentViewportBottom(viewport_bottom, false, false);
     const status = statusTextRect(viewport_bottom, false, false);
@@ -2937,7 +3018,7 @@ test "sidebar paints an open project whose daemon name is empty" {
     defer _ = c.SelectObject(hdc, previous);
     var draw_allocator = std.heap.DebugAllocator(.{}){};
     defer std.debug.assert(draw_allocator.deinit() == .ok);
-    draw(hdc, &model, .project, false, null, "", 0, "", 800, "", "", &state, -1, draw_allocator.allocator());
+    draw(hdc, &model, .project, null, false, null, "", 0, "", 800, "", "", &state, -1, draw_allocator.allocator());
 }
 
 fn manyLoopModel(allocator: std.mem.Allocator, loops: usize) !GraphModel.Model {
@@ -3001,7 +3082,7 @@ test "scrolled rows are not drawn over the application header inset" {
     defer _ = c.SelectObject(hdc, previous);
     var draw_allocator = std.heap.DebugAllocator(.{}){};
     defer std.debug.assert(draw_allocator.deinit() == .ok);
-    draw(hdc, &model, .project, false, null, "", scroll, "", viewport_bottom, "", "", &state, -1, draw_allocator.allocator());
+    draw(hdc, &model, .project, null, false, null, "", scroll, "", viewport_bottom, "", "", &state, -1, draw_allocator.allocator());
 
     // The goalBased accent bar is only ever painted by loop rows.
     const accent: u32 = 0x00709E19;

@@ -577,6 +577,8 @@ class Node final : public IRawElementProviderSimple,
       }
       for (int64_t key : state_->row_order) {
         const Row &row = state_->rows.at(key);
+        if (row.identity == "quick-chats-header:quick-chats" &&
+            state_->has_destination_bounds[1]) continue;
         consider(key, hitTier(row.identity), row.bounds);
       }
       if (best >= 0) hit = retainElementLocked(best);

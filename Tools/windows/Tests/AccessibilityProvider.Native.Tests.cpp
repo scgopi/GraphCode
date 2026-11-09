@@ -22,6 +22,11 @@ static std::vector<WPARAM> selectionCommands;
 static bool rejectSelectionCommand = false;
 static int forbiddenHostCalls = 0;
 
+static BOOL WINAPI selectionClientToScreen(HWND hwnd, POINT *point) {
+  if (hwnd) ++forbiddenHostCalls;
+  *point = {0, 0};
+  return TRUE;
+}
 static BOOL WINAPI selectionPostMessage(HWND hwnd, UINT message, WPARAM command, LPARAM argument) {
   if (hwnd || message != WM_COMMAND || argument) ++forbiddenHostCalls;
   if (rejectSelectionCommand) {
@@ -57,6 +62,7 @@ static LRESULT WINAPI selectionReturnProvider(HWND, WPARAM, LPARAM, IRawElementP
 // Intercept before including production code, after SDK declarations: no UIA client,
 // host registration, message delivery, HWND creation, or managed mock type is involved.
 #define PostMessageW selectionPostMessage
+#define ClientToScreen selectionClientToScreen
 #define UiaRaiseAutomationEvent selectionAutomationEvent
 #define UiaRaiseAutomationPropertyChangedEvent selectionPropertyEvent
 #define UiaRaiseStructureChangedEvent selectionStructureEvent
@@ -64,6 +70,7 @@ static LRESULT WINAPI selectionReturnProvider(HWND, WPARAM, LPARAM, IRawElementP
 #define UiaReturnRawElementProvider selectionReturnProvider
 #include "..\..\..\graphcode-windows\src\AccessibilityProvider.cpp"
 #undef PostMessageW
+#undef ClientToScreen
 #undef UiaRaiseAutomationEvent
 #undef UiaRaiseAutomationPropertyChangedEvent
 #undef UiaRaiseStructureChangedEvent
@@ -174,10 +181,15 @@ int main() {
   const int parents[] = {1, 1, 1, 2, 1, 1, 1, 4, 3};
   const int eligible[] = {0, 0, 0, 0, 0, 0, 0, 0, 1};
   const int actions[] = {1, 1, 1, 1, 1, 1, 1, 0, 0};
+  const int bounds[] = {
+      0, 0, 100, 20, 0, 20, 100, 40, 0, 40, 100, 60,
+      0, 60, 100, 80, 0, 80, 100, 100, 0, 100, 100, 120,
+      0, 20, 100, 40, 100, 0, 200, 200, 0, 120, 100, 140,
+  };
   int selected[] = {1, 0, 0, 0, 0, 0, 0, 0, 1};
   auto publish = [&](int count = 9) {
     check(gc_uia_update(root, "Ready", ids, names, parents, selected, eligible,
-                        actions, nullptr, count, 0, 1, 1, 0, 0, 0) == S_OK,
+                        actions, bounds, count, 0, 1, 1, 0, 0, 0) == S_OK,
           "headless publication succeeds");
   };
   publish();
@@ -293,8 +305,19 @@ int main() {
           "duplicate alias does not expose selection");
     if (item) item->Release();
     if (pattern) pattern->Release();
-    check(selectionBoolProperty(alias, UIA_IsSelectionItemPatternAvailablePropertyId, false),
-          "alias does not advertise SelectionItem pattern availability");
+    bool canonical_hit = true;
+    if (i == 6) {
+      auto *fragmentRoot = selectionInterface<IRawElementProviderFragmentRoot>(root);
+      IRawElementProviderFragment *hit = nullptr;
+      canonical_hit = fragmentRoot &&
+          fragmentRoot->ElementProviderFromPoint(10, 30, &hit) == S_OK &&
+          sameSelectionObject(hit, destinations[1]);
+      if (hit) hit->Release();
+      if (fragmentRoot) fragmentRoot->Release();
+    }
+    check(selectionBoolProperty(alias, UIA_IsSelectionItemPatternAvailablePropertyId, false) &&
+              canonical_hit,
+          "alias is not selectable and hit testing resolves the canonical destination");
     alias->Release();
   }
 

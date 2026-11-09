@@ -969,6 +969,7 @@ pub fn paint(
     controls: WorkspaceControls.State,
     surface: Surface,
     selection_active: bool,
+    active_quick_chat_id: ?[]const u8,
 ) void {
     const client = c.RECT{ .left = 0, .top = 0, .right = client_right, .bottom = client_bottom };
     fill(hdc, client, Tokens.canvas_tone);
@@ -985,6 +986,7 @@ pub fn paint(
             hdc,
             model,
             surface,
+            active_quick_chat_id,
             selection_active,
             visible_inspection,
             selected_worktree_path,
@@ -1120,6 +1122,7 @@ pub fn paint(
             hdc,
             model,
             surface,
+            active_quick_chat_id,
             selection_active,
             visible_inspection,
             selected_worktree_path,
@@ -1981,6 +1984,7 @@ test "responsive overlay rail background stops above the full-width Activity str
         .{ .rail_visible = true, .panel_visible = false, .activity_enabled = true },
         .overview,
         true,
+        null,
     );
 
     const strip_top = client.bottom - Tokens.activity_strip_height;
@@ -6048,6 +6052,7 @@ test "responsive overlay paints the Quick Chat empty action in the visible detai
         controls,
         .quick_chats,
         true,
+        null,
     );
 
     const full_bounds = rect(bounds.left, bounds.top, bounds.right, bounds.bottom);
@@ -7189,6 +7194,7 @@ fn paintExportFixture(
         controls,
         surface,
         true,
+        null,
     );
     paintHeader(
         dib.dc,
@@ -8205,7 +8211,7 @@ fn paintVisualFinish(dib: ParityDib, allocator: std.mem.Allocator, scene: Visual
     defer state.deinitLayout();
     var sidebar = Sidebar.State.init(allocator);
     defer sidebar.deinit();
-    paint(dib.dc, 1280, 720, &model, null, "", 0, "", "", "", false, "", &.{}, &.{}, allocator, &state, &sidebar, -1, .{ .rail_visible = true, .panel_visible = false, .activity_enabled = false }, surface, true);
+    paint(dib.dc, 1280, 720, &model, null, "", 0, "", "", "", false, "", &.{}, &.{}, allocator, &state, &sidebar, -1, .{ .rail_visible = true, .panel_visible = false, .activity_enabled = false }, surface, true, null);
     paintHeader(dib.dc, allocator, 1280, "", .{
         .title = "Canvas Fixture",
         .project_glyph = if (surface == .workspace) .folder else null,
@@ -8522,6 +8528,7 @@ fn chrome764Paint(
         .{ .graph_visible = true, .rail_visible = true, .panel_visible = false, .activity_enabled = false },
         if (scene == .project) .project else .overview,
         true,
+        null,
     );
     if (c.GdiFlush() == 0) return error.Chrome764FlushFailed;
 }
