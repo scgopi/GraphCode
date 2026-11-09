@@ -8,6 +8,418 @@
 #include <string>
 #include <vector>
 
+#ifdef GC_UIA_HEADLESS_SELECTION
+
+struct SelectionEvent {
+  IRawElementProviderSimple *provider;
+  int id;
+  bool property;
+  bool before;
+  bool after;
+};
+static std::vector<SelectionEvent> selectionEvents;
+static std::vector<WPARAM> selectionCommands;
+static bool rejectSelectionCommand = false;
+static int forbiddenHostCalls = 0;
+
+static BOOL WINAPI selectionPostMessage(HWND hwnd, UINT message, WPARAM command, LPARAM argument) {
+  if (hwnd || message != WM_COMMAND || argument) ++forbiddenHostCalls;
+  if (rejectSelectionCommand) {
+    SetLastError(ERROR_INVALID_WINDOW_HANDLE);
+    return FALSE;
+  }
+  selectionCommands.push_back(command);
+  return TRUE;
+}
+static HRESULT WINAPI selectionAutomationEvent(IRawElementProviderSimple *provider, EVENTID id) {
+  selectionEvents.push_back({provider, id, false, false, false});
+  return S_OK;
+}
+static HRESULT WINAPI selectionPropertyEvent(
+    IRawElementProviderSimple *provider, PROPERTYID id, VARIANT before, VARIANT after) {
+  if (id == UIA_SelectionItemIsSelectedPropertyId)
+    selectionEvents.push_back({provider, id, true,
+        before.vt == VT_BOOL && before.boolVal == VARIANT_TRUE,
+        after.vt == VT_BOOL && after.boolVal == VARIANT_TRUE});
+  return S_OK;
+}
+static HRESULT WINAPI selectionStructureEvent(
+    IRawElementProviderSimple *, StructureChangeType, int *, int) { return S_OK; }
+static HRESULT WINAPI selectionHostProvider(HWND, IRawElementProviderSimple **) {
+  ++forbiddenHostCalls;
+  return E_UNEXPECTED;
+}
+static LRESULT WINAPI selectionReturnProvider(HWND, WPARAM, LPARAM, IRawElementProviderSimple *) {
+  ++forbiddenHostCalls;
+  return 0;
+}
+
+// Intercept before including production code, after SDK declarations: no UIA client,
+// host registration, message delivery, HWND creation, or managed mock type is involved.
+#define PostMessageW selectionPostMessage
+#define UiaRaiseAutomationEvent selectionAutomationEvent
+#define UiaRaiseAutomationPropertyChangedEvent selectionPropertyEvent
+#define UiaRaiseStructureChangedEvent selectionStructureEvent
+#define UiaHostProviderFromHwnd selectionHostProvider
+#define UiaReturnRawElementProvider selectionReturnProvider
+#include "..\..\..\graphcode-windows\src\AccessibilityProvider.cpp"
+#undef PostMessageW
+#undef UiaRaiseAutomationEvent
+#undef UiaRaiseAutomationPropertyChangedEvent
+#undef UiaRaiseStructureChangedEvent
+#undef UiaHostProviderFromHwnd
+#undef UiaReturnRawElementProvider
+
+static int checks = 0;
+static int failures = 0;
+static void check(bool condition, const char *description) {
+  ++checks;
+  if (!condition) {
+    ++failures;
+    std::fprintf(stderr, "FAIL: %s\n", description);
+  }
+}
+
+template <typename T>
+static T *selectionInterface(IRawElementProviderSimple *provider) {
+  T *result = nullptr;
+  if (provider) provider->QueryInterface(__uuidof(T), reinterpret_cast<void **>(&result));
+  return result;
+}
+
+static IRawElementProviderSimple *findSelectionElement(
+    IRawElementProviderSimple *provider, const wchar_t *name) {
+  VARIANT value{};
+  if (!provider) return nullptr;
+  if (provider->GetPropertyValue(UIA_NamePropertyId, &value) != S_OK) return nullptr;
+  const bool found = value.vt == VT_BSTR && std::wcscmp(value.bstrVal, name) == 0;
+  VariantClear(&value);
+  if (found) {
+    provider->AddRef();
+    return provider;
+  }
+  auto *fragment = selectionInterface<IRawElementProviderFragment>(provider);
+  if (!fragment) return nullptr;
+  IRawElementProviderFragment *child = nullptr;
+  fragment->Navigate(NavigateDirection_FirstChild, &child);
+  fragment->Release();
+  while (child) {
+    IRawElementProviderSimple *simple = nullptr;
+    // Fragment and Simple are distinct COM subobjects.
+    child->QueryInterface(IID_PPV_ARGS(&simple));
+    auto *result = simple ? findSelectionElement(simple, name) : nullptr;
+    if (simple) simple->Release();
+    IRawElementProviderFragment *next = nullptr;
+    if (!result) child->Navigate(NavigateDirection_NextSibling, &next);
+    child->Release();
+    if (result) return result;
+    child = next;
+  }
+  return nullptr;
+}
+
+static bool sameSelectionObject(IUnknown *left, IUnknown *right) {
+  IUnknown *a = nullptr, *b = nullptr;
+  if (left) left->QueryInterface(IID_PPV_ARGS(&a));
+  if (right) right->QueryInterface(IID_PPV_ARGS(&b));
+  const bool same = a && b && a == b;
+  if (a) a->Release();
+  if (b) b->Release();
+  return same;
+}
+
+static bool selectedDestination(ISelectionProvider *container, IRawElementProviderSimple *expected) {
+  SAFEARRAY *values = nullptr;
+  if (container->GetSelection(&values) != S_OK || !values) return false;
+  LONG first = 0, last = -1;
+  SafeArrayGetLBound(values, 1, &first);
+  SafeArrayGetUBound(values, 1, &last);
+  bool result = expected ? last - first == 0 : last < first;
+  if (expected && result) {
+    IUnknown *item = nullptr;
+    result = SafeArrayGetElement(values, &first, &item) == S_OK &&
+        sameSelectionObject(item, expected);
+    if (item) item->Release();
+  }
+  SafeArrayDestroy(values);
+  return result;
+}
+
+static bool selectionEvent(IRawElementProviderSimple *provider, int id,
+                           bool property = false, bool before = false, bool after = false) {
+  return std::count_if(selectionEvents.begin(), selectionEvents.end(),
+      [&](const SelectionEvent &event) {
+        return event.provider == provider && event.id == id && event.property == property &&
+            (!property || (event.before == before && event.after == after));
+      }) == 1;
+}
+
+static bool selectionBoolProperty(IRawElementProviderSimple *provider, PROPERTYID id, bool expected) {
+  VARIANT value{};
+  const bool result = provider->GetPropertyValue(id, &value) == S_OK && value.vt == VT_BOOL &&
+      value.boolVal == (expected ? VARIANT_TRUE : VARIANT_FALSE);
+  VariantClear(&value);
+  return result;
+}
+
+int main() {
+  auto *root = gc_uia_create(nullptr);
+  const char *ids[] = {
+      "overview-destination:graph", "quick-chats-destination:quick-chats",
+      "open-project:test", "loop:test:node", "quick-chat-row:chat",
+      "needs-you-row:test:node", "quick-chats-header:quick-chats",
+      "quick-chat-workspace:chat", "worktree:test"};
+  const char *names[] = {"Graph", "Quick Chats", "Project", "Loop", "Chat",
+                         "Needs you alias", "Chats alias", "Workspace alias", "Worktree"};
+  const int parents[] = {1, 1, 1, 2, 1, 1, 1, 4, 3};
+  const int eligible[] = {0, 0, 0, 0, 0, 0, 0, 0, 1};
+  const int actions[] = {1, 1, 1, 1, 1, 1, 1, 0, 0};
+  int selected[] = {1, 0, 0, 0, 0, 0, 0, 0, 1};
+  auto publish = [&](int count = 9) {
+    check(gc_uia_update(root, "Ready", ids, names, parents, selected, eligible,
+                        actions, nullptr, count, 0, 1, 1, 0, 0, 0) == S_OK,
+          "headless publication succeeds");
+  };
+  publish();
+  auto *projects = findSelectionElement(root, L"Projects");
+  auto *loops = findSelectionElement(root, L"Loops");
+  auto *worktrees = findSelectionElement(root, L"Worktrees");
+  auto *container = selectionInterface<ISelectionProvider>(root);
+  check(container != nullptr, "common ancestor exposes canonical Selection interface");
+  IUnknown *containerPattern = nullptr;
+  check(root->GetPatternProvider(UIA_SelectionPatternId, &containerPattern) == S_OK &&
+            sameSelectionObject(containerPattern, container),
+        "common ancestor pattern and QueryInterface share identity");
+  if (containerPattern) containerPattern->Release();
+  check(selectionBoolProperty(root, UIA_IsSelectionPatternAvailablePropertyId, true),
+        "common ancestor advertises Selection pattern availability");
+  auto *projectContainer = selectionInterface<ISelectionProvider>(projects);
+  check(projectContainer == nullptr, "projects does not expose a competing selection scope");
+  if (projectContainer) projectContainer->Release();
+  check(selectionBoolProperty(projects, UIA_IsSelectionPatternAvailablePropertyId, false),
+        "projects does not advertise an independent Selection pattern");
+  BOOL multiple = TRUE;
+  check(container && container->get_CanSelectMultiple(&multiple) == S_OK && !multiple,
+        "navigation container is single select");
+  BOOL required = FALSE;
+  check(container && container->get_IsSelectionRequired(&required) == S_OK && required,
+        "navigation selection cannot be cleared independently");
+  auto *loopContainer = selectionInterface<ISelectionProvider>(loops);
+  check(loopContainer == nullptr, "loops does not expose a competing selection scope");
+  if (loopContainer) loopContainer->Release();
+  auto *worktreeContainer = selectionInterface<ISelectionProvider>(worktrees);
+  check(worktreeContainer && worktreeContainer->get_CanSelectMultiple(&multiple) == S_OK && multiple,
+        "worktree multiselection remains independent");
+  auto *worktree = findSelectionElement(root, L"Worktree");
+  auto *worktreeItem = selectionInterface<ISelectionItemProvider>(worktree);
+  IRawElementProviderSimple *worktreeOwner = nullptr;
+  check(worktreeItem && worktreeItem->get_SelectionContainer(&worktreeOwner) == S_OK &&
+            sameSelectionObject(worktreeOwner, worktrees),
+        "worktree item retains its own selection container");
+  if (worktreeOwner) worktreeOwner->Release();
+  check(worktreeContainer && selectedDestination(worktreeContainer, worktree),
+        "worktree GetSelection retains its independently selected row");
+  check(worktreeItem && worktreeItem->RemoveFromSelection() == S_OK &&
+            selectedDestination(worktreeContainer, nullptr) &&
+            worktreeItem->AddToSelection() == S_OK &&
+            selectedDestination(worktreeContainer, worktree),
+        "worktree add/remove selection behavior is preserved");
+  if (worktreeItem) worktreeItem->Release();
+  if (worktree) worktree->Release();
+
+  IRawElementProviderSimple *destinations[5]{};
+  ISelectionItemProvider *items[5]{};
+  for (int i = 0; i < 5; ++i) {
+    destinations[i] = findSelectionElement(root, wide(names[i]).c_str());
+    check(destinations[i] != nullptr, "canonical navigation destination exists");
+    if (!destinations[i]) continue;
+    items[i] = selectionInterface<ISelectionItemProvider>(destinations[i]);
+    check(items[i] != nullptr, "destination QueryInterface exposes SelectionItem");
+    IUnknown *pattern = nullptr;
+    check(destinations[i]->GetPatternProvider(UIA_SelectionItemPatternId, &pattern) == S_OK &&
+              pattern && sameSelectionObject(pattern, items[i]),
+          "pattern and QueryInterface share COM identity");
+    if (pattern) pattern->Release();
+    check(selectionBoolProperty(destinations[i], UIA_IsSelectionItemPatternAvailablePropertyId, true),
+          "destination advertises SelectionItem pattern availability");
+    check(selectionBoolProperty(destinations[i], UIA_SelectionItemIsSelectedPropertyId, i == 0),
+          "destination selection property matches SelectionItem state");
+    if (!items[i]) continue;
+    BOOL value = FALSE;
+    check(items[i]->get_IsSelected(&value) == S_OK && value == (i == 0 ? TRUE : FALSE),
+          "initial IsSelected matches publication");
+    IRawElementProviderSimple *owner = nullptr;
+    check(items[i]->get_SelectionContainer(&owner) == S_OK &&
+              sameSelectionObject(owner, root),
+          "all destinations share one navigation container");
+    if (owner) owner->Release();
+    check(items[i]->get_IsSelected(nullptr) == E_POINTER &&
+              items[i]->get_SelectionContainer(nullptr) == E_POINTER,
+          "selection item rejects null output pointers");
+    const size_t commands = selectionCommands.size();
+    const size_t events = selectionEvents.size();
+    check(items[i]->Select() == S_OK && selectionCommands.size() == commands + 1,
+          "Select dispatches exactly one existing action");
+    const WPARAM expected = i < 2 ? static_cast<WPARAM>(20 + i)
+        : kDynamicInvokeTag | (hashPath(ids[i]) & kRowPayloadMask);
+    check(selectionCommands.size() == commands + 1 && selectionCommands.back() == expected,
+          "Select uses the unchanged fixed/dynamic Invoke command");
+    check(items[i]->get_IsSelected(&value) == S_OK && value == (i == 0 ? TRUE : FALSE) &&
+              selectionEvents.size() == events,
+          "Select does not optimistically change published navigation state");
+    check(items[i]->RemoveFromSelection() == UIA_E_INVALIDOPERATION,
+          "navigation cannot be deselected independently");
+    const HRESULT addResult = i == 0 ? S_OK : static_cast<HRESULT>(UIA_E_INVALIDOPERATION);
+    check(items[i]->AddToSelection() == addResult,
+          "AddToSelection cannot replace another destination");
+    check(selectionCommands.size() == commands + 1,
+          "selection add/remove does not post an extra action");
+    rejectSelectionCommand = true;
+    check(items[i]->Select() == HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE) &&
+              selectionCommands.size() == commands + 1 && selectionEvents.size() == events,
+          "fixed and dynamic Select report dispatch failure");
+    rejectSelectionCommand = false;
+  }
+  check(container && selectedDestination(container, destinations[0]),
+        "GetSelection includes fixed Graph and excludes worktree state");
+  for (int i = 5; i < 8; ++i) {
+    auto *alias = findSelectionElement(root, wide(names[i]).c_str());
+    check(alias != nullptr, "duplicate alias remains in accessibility tree");
+    if (!alias) continue;
+    auto *item = selectionInterface<ISelectionItemProvider>(alias);
+    IUnknown *pattern = nullptr;
+    check(!item && alias->GetPatternProvider(UIA_SelectionItemPatternId, &pattern) == S_FALSE &&
+              !pattern,
+          "duplicate alias does not expose selection");
+    if (item) item->Release();
+    if (pattern) pattern->Release();
+    check(selectionBoolProperty(alias, UIA_IsSelectionItemPatternAvailablePropertyId, false),
+          "alias does not advertise SelectionItem pattern availability");
+    alias->Release();
+  }
+
+  for (int i = 1; i < 5; ++i) {
+    selectionEvents.clear();
+    selected[i - 1] = 0;
+    selected[i] = 1;
+    selected[5] = i == 3;
+    selected[6] = i == 1;
+    selected[7] = i == 4;
+    publish();
+    check(container && selectedDestination(container, destinations[i]),
+          "GetSelection returns exactly the canonical selected destination");
+    for (int j = 0; j < 5; ++j) {
+      BOOL value = FALSE;
+      check(items[j] && items[j]->get_IsSelected(&value) == S_OK &&
+                value == (i == j ? TRUE : FALSE),
+            "all navigation IsSelected values agree after transition");
+    }
+    check(selectionEvent(destinations[i], UIA_SelectionItem_ElementSelectedEventId),
+          "new destination raises ElementSelected");
+    check(selectionEvent(destinations[i - 1], UIA_SelectionItem_ElementRemovedFromSelectionEventId),
+          "old destination raises ElementRemovedFromSelection");
+    check(selectionEvent(destinations[i], UIA_SelectionItemIsSelectedPropertyId, true, false, true) &&
+              selectionEvent(destinations[i - 1], UIA_SelectionItemIsSelectedPropertyId, true, true, false),
+          "selection boolean changes raise property events");
+    check(selectionEvents.size() == 4, "navigation transition emits only canonical selection events");
+    selectionEvents.clear();
+    publish();
+    check(selectionEvents.empty(), "unchanged publication emits no selection event");
+  }
+
+  selectionEvents.clear();
+  selected[0] = 1;
+  check(gc_uia_update(root, "Conflicting", ids, names, parents, selected, eligible,
+                      actions, nullptr, 9, 0, 1, 1, 0, 0, 0) == E_INVALIDARG,
+        "conflicting canonical selection is rejected rather than silently normalized");
+  check(container && selectedDestination(container, destinations[4]) && selectionEvents.empty(),
+        "rejected snapshot leaves selection and events unchanged");
+  selected[0] = 0;
+  auto *oldChat = items[4];
+  if (oldChat) oldChat->AddRef();
+  selectionEvents.clear();
+  publish(4);
+  BOOL value = TRUE;
+  check(oldChat && oldChat->get_IsSelected(&value) == UIA_E_ELEMENTNOTAVAILABLE,
+        "removed selected row reference becomes unavailable");
+  check(container && selectedDestination(container, nullptr),
+        "removed selected destination is absent from GetSelection");
+  check(selectionEvent(root, UIA_Selection_InvalidatedEventId),
+        "retiring selected row invalidates canonical selection");
+  publish();
+  check(oldChat && oldChat->get_IsSelected(&value) == UIA_E_ELEMENTNOTAVAILABLE,
+        "republishing identity does not revive retired SelectionItem");
+  check(oldChat && oldChat->Select() == UIA_E_ELEMENTNOTAVAILABLE,
+        "retired SelectionItem cannot dispatch actions");
+  auto *newChat = findSelectionElement(root, L"Chat");
+  auto *newChatItem = newChat ? selectionInterface<ISelectionItemProvider>(newChat) : nullptr;
+  check(newChatItem && newChatItem->get_IsSelected(&value) == S_OK && value,
+        "republished destination has a fresh working SelectionItem");
+  if (newChatItem) newChatItem->Release();
+  if (newChat) newChat->Release();
+  selected[4] = 0;
+  selected[0] = 1;
+  publish();
+  selectionEvents.clear();
+  publish(0);
+  check(items[0] && items[0]->get_IsSelected(&value) == S_OK && !value,
+        "unpublished fixed destination clears selected state");
+  check(container && selectedDestination(container, nullptr),
+        "empty publication has no selected destination");
+  check(selectionEvent(destinations[0], UIA_SelectionItem_ElementRemovedFromSelectionEventId) &&
+            selectionEvent(destinations[0], UIA_SelectionItemIsSelectedPropertyId, true, true, false),
+        "unpublishing selected fixed destination raises removal and property events");
+  publish();
+  SAFEARRAY *retainedSelection = nullptr;
+  check(container && container->GetSelection(&retainedSelection) == S_OK && retainedSelection,
+        "selection array retains its selected provider independently");
+  gc_uia_release(root);
+  check(gc_uia_update(root, "Late", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                      nullptr, 0, 0, 1, 0, 0, 0, 0) == UIA_E_ELEMENTNOTAVAILABLE,
+        "publication through a retained shut-down root is rejected");
+  check(container && container->GetSelection(nullptr) == E_POINTER,
+        "container null output remains E_POINTER after shutdown");
+  SAFEARRAY *none = nullptr;
+  check(container && container->GetSelection(&none) == UIA_E_ELEMENTNOTAVAILABLE && !none,
+        "retained container becomes unavailable at shutdown");
+  check(container && container->get_CanSelectMultiple(&value) == UIA_E_ELEMENTNOTAVAILABLE,
+        "retained selection metadata becomes unavailable at shutdown");
+  check(container && container->get_IsSelectionRequired(&value) == UIA_E_ELEMENTNOTAVAILABLE,
+        "retained required-selection metadata becomes unavailable at shutdown");
+  IUnknown *retainedUnknown = nullptr;
+  LONG first = 0;
+  check(retainedSelection && SafeArrayGetElement(retainedSelection, &first, &retainedUnknown) == S_OK &&
+            sameSelectionObject(retainedUnknown, destinations[0]),
+        "retained SAFEARRAY still owns the original COM identity after shutdown");
+  if (retainedUnknown) retainedUnknown->Release();
+  if (retainedSelection) SafeArrayDestroy(retainedSelection);
+  for (int i = 0; i < 5; ++i) {
+    IRawElementProviderSimple *owner = nullptr;
+    IUnknown *unavailablePattern = nullptr;
+    check(items[i] && items[i]->get_IsSelected(&value) == UIA_E_ELEMENTNOTAVAILABLE &&
+              items[i]->get_SelectionContainer(&owner) == UIA_E_ELEMENTNOTAVAILABLE && !owner &&
+              items[i]->Select() == UIA_E_ELEMENTNOTAVAILABLE &&
+              items[i]->AddToSelection() == UIA_E_ELEMENTNOTAVAILABLE &&
+              items[i]->RemoveFromSelection() == UIA_E_ELEMENTNOTAVAILABLE &&
+              destinations[i]->GetPatternProvider(UIA_SelectionItemPatternId, &unavailablePattern) ==
+                  UIA_E_ELEMENTNOTAVAILABLE && !unavailablePattern,
+          "retained destination selection methods are unavailable after shutdown");
+    if (items[i]) items[i]->Release();
+    if (destinations[i]) destinations[i]->Release();
+  }
+  if (oldChat) oldChat->Release();
+  if (container) container->Release();
+  if (worktreeContainer) worktreeContainer->Release();
+  if (projects) projects->Release();
+  if (loops) loops->Release();
+  if (worktrees) worktrees->Release();
+  check(forbiddenHostCalls == 0, "no native UIA host or real window/message binding was used");
+  std::printf("Headless navigation selection: %d checks, %d failures\n", checks, failures);
+  return failures || checks == 0 ? 1 : 0;
+}
+
+#else
+
 extern "C" IRawElementProviderSimple *gc_uia_create(HWND hwnd);
 extern "C" void gc_uia_release(IRawElementProviderSimple *provider);
 extern "C" HRESULT gc_uia_set_header_focus(IRawElementProviderSimple *provider, const char *identity);
@@ -16,7 +428,9 @@ extern "C" HRESULT gc_uia_update(IRawElementProviderSimple *provider, const char
                                    const int *parents, const int *selected,
                                    const int *eligible, const int *invokable,
                                    const int *bounds, int count, int allow_reclaim,
-                                   int confirm_each_reclaim);
+                                   int confirm_each_reclaim, int worktrees_available = 0,
+                                   int worktree_dialog_open = 0, int worktree_row_selected = 0,
+                                   int worktree_busy = 0);
 
 static int failures = 0;
 static int checks = 0;
@@ -51,10 +465,6 @@ static void checkName(IRawElementProviderFragment *fragment, const wchar_t *expe
   VariantClear(&value);
   simple->Release();
 }
-
-typedef HRESULT (*FullUpdate)(IRawElementProviderSimple *, const char *, const char **,
-                              const char **, const int *, const int *, const int *,
-                              const int *, const int *, int, int, int, int, int, int, int);
 
 static std::wstring stringProperty(IRawElementProviderFragment *fragment, PROPERTYID property) {
   std::wstring result;
@@ -143,7 +553,7 @@ static void nativeRootGeometryChecks() {
     const int parents[] = {2};
     const int flags[] = {0};
     const int row_bounds[] = {32, 120, 192, 160};
-    auto update = reinterpret_cast<FullUpdate>(&gc_uia_update);
+    auto update = &gc_uia_update;
     check(update(provider, "Geometry", identities, names, parents, flags, flags, flags,
                  row_bounds, 1, 0, 1, 0, 0, 0, 0) == S_OK,
           "root geometry descendant publication succeeds");
@@ -244,7 +654,7 @@ static void nativeHitTestChecks(IRawElementProviderSimple *provider, HWND hwnd) 
       12, 480, 232, 520,   // row published (wrongly) under the banner: the banner must win
       8, 500, 212, 550,    // update banner
   };
-  auto update = reinterpret_cast<FullUpdate>(&gc_uia_update);
+  auto update = &gc_uia_update;
   check(update(provider, "Hit testing", identities, names, parents, none, none, actions, bounds,
                10, 0, 1, 0, 0, 0, 0) == S_OK,
         "hit-testing publication succeeds");
@@ -307,7 +717,7 @@ static void nativeSidebarGeometryChecks(IRawElementProviderSimple *provider, HWN
   const int none[] = {0, 0, 0, 0, 0};
   const int actions[] = {1, 1, 1, 1, 1};
   const int bounds[] = {8, 500, 212, 550,  12, 150, 232, 176,  0, 0, 0, 0,  0, 0, 0, 0,  12, 200, 232, 226};
-  auto update = reinterpret_cast<FullUpdate>(&gc_uia_update);
+  auto update = &gc_uia_update;
   check(update(provider, "Geometry", identities, names, parents, none, none, actions, bounds,
                5, 0, 1, 0, 0, 0, 0) == S_OK,
         "sidebar geometry publication succeeds");
@@ -442,7 +852,7 @@ static void nativeHeaderOverflowChecks(IRawElementProviderSimple *provider, HWND
   const int eligible[] = {1};
   const int invokable_flags[] = {1};
   const int bounds[] = {444, 5, 480, 29};
-  auto update = reinterpret_cast<FullUpdate>(&gc_uia_update);
+  auto update = &gc_uia_update;
   check(update(provider, "Header overflow", identities, names, parents, none, eligible,
                invokable_flags, bounds, 1, 0, 1, 0, 0, 0, 0) == S_OK,
         "header overflow publishes");
@@ -518,7 +928,7 @@ static void nativeBannerInvokeChecks(IRawElementProviderSimple *provider, HWND h
   const int none[] = {0};
   const int actions[] = {1};
   const int bounds[] = {8, 500, 212, 550};
-  auto update = reinterpret_cast<FullUpdate>(&gc_uia_update);
+  auto update = &gc_uia_update;
   check(update(provider, "Banner", identities, names, parents, none, none, actions, bounds,
                1, 0, 1, 0, 0, 0, 0) == S_OK,
         "banner publication succeeds");
@@ -553,7 +963,7 @@ static void nativeUnwiredRecoveryChecks(IRawElementProviderSimple *provider, HWN
   const int none[] = {0, 0};
   const int actions[] = {1, 1};
   const int bounds[] = {300, 120, 373, 140, 379, 120, 465, 140};
-  auto update = reinterpret_cast<FullUpdate>(&gc_uia_update);
+  auto update = &gc_uia_update;
   check(update(provider, "Unwired recovery", identities, names, parents, none, none, actions,
                bounds, 2, 0, 1, 0, 0, 0, 0) == S_OK,
         "unwired recovery publication succeeds");
@@ -607,7 +1017,7 @@ static void nativeCycleHierarchyChecks(IRawElementProviderSimple *provider, HWND
       412, 151, 478, 168,
       261, 175, 478, 188,
   };
-  auto update = reinterpret_cast<FullUpdate>(&gc_uia_update);
+  auto update = &gc_uia_update;
   check(update(provider, "Cycle hierarchy", identities, names, parents, none, none, actions, bounds,
                2, 0, 1, 0, 0, 0, 0) == S_OK,
         "cycle hierarchy publication succeeds");
@@ -661,7 +1071,7 @@ static void nativeQuickChatRestartChecks(IRawElementProviderSimple *provider, HW
   const int none[] = {0};
   const int actions[] = {1};
   const int bounds[] = {732, 44, 864, 70};
-  auto update = reinterpret_cast<FullUpdate>(&gc_uia_update);
+  auto update = &gc_uia_update;
   check(update(provider, "Quick Chat", identities, names, parents, none, none, actions, bounds,
                1, 0, 1, 0, 0, 0, 0) == S_OK,
         "Quick Chat restart publication succeeds");
@@ -719,7 +1129,7 @@ static void nativeQuickChatWorkspaceBarChecks(IRawElementProviderSimple *provide
   const int none[] = {0};
   const int actions[] = {0};
   const int bounds[] = {0, 0, 0, 0};
-  auto update = reinterpret_cast<FullUpdate>(&gc_uia_update);
+  auto update = &gc_uia_update;
   check(update(provider, "Quick Chat", identities, names, parents, none, none, actions, bounds,
                1, 0, 1, 0, 0, 0, 0) == S_OK,
         "Quick Chat workspace bar publication succeeds");
@@ -753,7 +1163,7 @@ static void nativeScrollChecks(IRawElementProviderSimple *provider, HWND hwnd,
   // Bit 0 invokable, bit 1 scrolls with the sidebar.
   const int actions[] = {3, 3, 1, 1};
   const int bounds[] = {0, 0, 0, 0,  12, 150, 232, 176,  100, 10, 200, 40,  8, 500, 212, 550};
-  auto update = reinterpret_cast<FullUpdate>(&gc_uia_update);
+  auto update = &gc_uia_update;
   check(update(provider, "Scroll", identities, names, parents, none, none, actions, bounds,
                4, 0, 1, 0, 0, 0, 0) == S_OK,
         "scroll publication succeeds");
@@ -1008,3 +1418,5 @@ int main() {
   std::printf("Native accessibility provider: %d checks, %d failures\n", checks, failures);
   return failures || checks == 0 ? 1 : 0;
 }
+
+#endif
