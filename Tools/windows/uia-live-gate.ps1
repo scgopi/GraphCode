@@ -5009,6 +5009,9 @@ function Wait-MultiProjectCapture($capture, [int] $timeoutMilliseconds = 5000) {
 
 function Complete-MultiProjectCapture($capture, [string] $logDirectory, [int] $timeoutMilliseconds = 5000, $primaryError = $null) {
   if ($null -eq $capture) { return }
+  if ($capture -is [Collections.IDictionary] -and $capture.Contains("scope")) {
+    return Complete-UiaHeldCapture $capture -TimeoutMilliseconds $timeoutMilliseconds
+  }
   $clock = [Diagnostics.Stopwatch]::StartNew()
   $errors = [Collections.Generic.List[string]]::new()
   $identity = "pid=$($capture.rootPID) start=$($capture.rootStartUtcTicks) target=$($capture.targetPID) targetStart=$($capture.targetStartUtcTicks) job=$($capture.job.ToInt64())"
@@ -5102,17 +5105,81 @@ function Start-UiaOwnedProcess(
   [string] $file, [string[]] $arguments, [string] $standardOutputPath,
   [string] $standardErrorPath, [switch] $Hidden
 ) {
-  $environment = @{}
-  foreach ($entry in [Environment]::GetEnvironmentVariables("Process").GetEnumerator()) {
-    $environment[$entry.Key] = $entry.Value
-  }
   $directory = Split-Path -Parent $standardErrorPath
   $stem = [IO.Path]::GetFileNameWithoutExtension($standardErrorPath) -replace "-stderr$", ""
   if (-not $standardOutputPath) { $standardOutputPath = Join-Path $directory "$stem-stdout.log" }
-  $capture = Start-MultiProjectOwnedProcess -file $file -arguments $arguments -environment $environment `
-    -stem $stem -Visible:(-not $Hidden) -RegisterForUia -standardOutputPath $standardOutputPath `
-    -standardErrorPath $standardErrorPath -logDirectory $directory -targetWorkingDirectory (Get-Location).ProviderPath
-  return $capture.process
+  $capture = [ordered]@{
+    scope = New-ShellProcessScope; process = $null; cleaned = $false
+    logDirectory = $directory; stdoutWriter = $null; stderrWriter = $null; ownershipFailure = $null
+  }
+  if ($null -eq $script:UiaGateOwnedCaptures) {
+    $script:UiaGateOwnedCaptures = [Collections.Generic.List[object]]::new()
+  }
+  $script:UiaGateOwnedCaptures.Add($capture)
+  try {
+    foreach ($stream in @(
+      @{ key = "stdoutWriter"; path = $standardOutputPath },
+      @{ key = "stderrWriter"; path = $standardErrorPath }
+    )) {
+      $fileStream = [IO.File]::Open($stream.path, [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write, [IO.FileShare]::Read)
+      try {
+        $capture[$stream.key] = [IO.StreamWriter]::new($fileStream, [Text.UTF8Encoding]::new($false))
+      } catch {
+        $fileStream.Dispose()
+        throw
+      }
+      $capture[$stream.key].AutoFlush = $true
+    }
+    $info = [Diagnostics.ProcessStartInfo]::new($file)
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = [bool]$Hidden
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.WorkingDirectory = (Get-Location).ProviderPath
+    foreach ($argument in $arguments) { $info.ArgumentList.Add($argument) }
+    $capture.process = Start-ShellOwnedProcess $capture.scope $info `
+      -StandardOutputWriter $capture.stdoutWriter -StandardErrorWriter $capture.stderrWriter
+    Register-UiaHeldProcess $capture.process
+    return $capture.process
+  } catch {
+    $primary = $_
+    if (Test-ShellOwnershipUnproven $primary) {
+      $capture.ownershipFailure = $primary.Exception
+      throw
+    }
+    try { $null = Complete-UiaHeldCapture $capture } catch {
+      $primary.Exception.Data["UiaHeldCleanupFailure"] = $_.Exception
+      if (Test-ShellOwnershipUnproven $_) {
+        $primary.Exception.Data["GraphCodeValidationRootRetentionRequired"] = $true
+      }
+    }
+    throw $primary
+  }
+}
+
+function Register-UiaHeldProcess([Diagnostics.Process] $process) {
+  [GraphCodeUiaGateState]::RetainProcess($process)
+}
+
+function Complete-UiaHeldCapture($capture, [ValidateRange(0, 5000)][int] $TimeoutMilliseconds = 5000) {
+  if ($capture.ownershipFailure) { throw $capture.ownershipFailure }
+  if ($capture.cleaned) { return }
+  try {
+    Close-ShellProcessScope $capture.scope -TimeoutMilliseconds $TimeoutMilliseconds
+  } catch {
+    $capture.ownershipFailure = Set-ShellOwnershipUnproven $_.Exception
+    $capture.ownershipFailure.Data["UiaRetainedCapture"] = $capture
+    throw $capture.ownershipFailure
+  }
+  $errors = [Collections.Generic.List[Exception]]::new()
+  foreach ($key in @("stdoutWriter", "stderrWriter")) {
+    try { if ($capture[$key]) { $capture[$key].Dispose() } }
+    catch { $errors.Add($_.Exception) }
+  }
+  $capture.cleaned = $true
+  if ($errors.Count) { throw [AggregateException]::new("UIA held output persistence failed", $errors.ToArray()) }
+  Write-Host "UIA_HELD_CAPTURE_CLEANUP=verified originalScope=true pipeEof=true"
 }
 
 function Start-MultiProjectOwnedProcess(

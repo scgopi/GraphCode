@@ -16,7 +16,7 @@ $jobReplacements = @{
     '[GraphCode.Validation.Ownership.StandaloneProcessJob]' = '[GraphCode.Validation.Ownership.OwnershipJobFixture]'
 }
 . Import-OwnershipProductionFunctions $gate @('New-UiaOwnershipFailure', 'Complete-MultiProjectCapture',
-    'Start-UiaOwnedProcess', 'Invoke-UiaCleanupActions') $jobReplacements
+    'Start-UiaOwnedProcess', 'Complete-UiaHeldCapture', 'Invoke-UiaCleanupActions') $jobReplacements
 $saved = [Environment]::GetEnvironmentVariables('Process')
 Remove-OwnershipEnvironment 'GRAPHCODE_VALIDATION_ROOT'
 try {
@@ -126,26 +126,39 @@ try {
         }
     } finally { $reader.Dispose() }
     $launch = @{}
-    function Start-MultiProjectOwnedProcess {
-        param($file, $arguments, $environment, $stem, [switch]$Visible, [switch]$RegisterForUia,
-            $standardOutputPath, $standardErrorPath, $logDirectory, $targetWorkingDirectory)
-        $launch.arguments = $arguments; $launch.environment = $environment
-        $launch.visible = $Visible; $launch.registered = $RegisterForUia
-        $launch.cwd = $targetWorkingDirectory; $launch.stdout = $standardOutputPath
-        return @{ process = 'controlled-owned-target' }
+    $controlled = [Diagnostics.Process]::new()
+    function New-ShellProcessScope { return [pscustomobject]@{ Closed = $false } }
+    function Start-ShellOwnedProcess($Scope, $StartInfo, $StandardOutputWriter, $StandardErrorWriter) {
+        $launch.arguments = $StartInfo.ArgumentList; $launch.environment = $StartInfo.Environment
+        $launch.visible = -not $StartInfo.CreateNoWindow
+        $launch.cwd = $StartInfo.WorkingDirectory
+        $launch.stdout = $StandardOutputWriter.BaseStream.Name
+        Assert-Ownership ($script:UiaGateOwnedCaptures.Count -eq 1) 'Held scope was not registered before launch.'
+        return $controlled
+    }
+    function Register-UiaHeldProcess($Process) { $launch.registered = [Object]::ReferenceEquals($Process, $controlled) }
+    function Close-ShellProcessScope($Scope, [int] $TimeoutMilliseconds) {
+        Assert-Ownership ($TimeoutMilliseconds -eq 5000) 'Default capture reset its cleanup budget.'
+        $Scope.Closed = $true
     }
     foreach ($hidden in @($false, $true)) {
         Invoke-OwnershipCase "owned-routing-hidden-$hidden" {
-            $stderr = Join-Path $ArtifactRoot 'fixture-stderr.log'
-            $result = Start-UiaOwnedProcess -file 'controlled.exe' -arguments @('space argument', '', '"literal"') -standardErrorPath $stderr -Hidden:$hidden
-            Assert-Ownership ($result -ceq 'controlled-owned-target' -and $launch.arguments.Count -eq 3 -and
+            $script:UiaGateOwnedCaptures = [Collections.Generic.List[object]]::new()
+            $stderr = Join-Path $ArtifactRoot "fixture-$hidden-stderr.log"
+            try {
+              $result = Start-UiaOwnedProcess -file 'controlled.exe' -arguments @('space argument', '', '"literal"') -standardErrorPath $stderr -Hidden:$hidden
+              Assert-Ownership ([Object]::ReferenceEquals($result, $controlled) -and $launch.arguments.Count -eq 3 -and
                 $launch.arguments[0] -ceq 'space argument' -and $launch.arguments[1] -ceq '' -and
                 $launch.arguments[2] -ceq '"literal"' -and $launch.visible -eq (-not $hidden) -and
                 $launch.registered -and $launch.cwd -ceq (Get-Location).ProviderPath -and
                 $launch.environment.TEMP -ceq $env:TEMP -and
-                $launch.stdout -ceq (Join-Path $ArtifactRoot 'fixture-stdout.log')) 'Actual launch wrapper changed argv/environment/cwd/visibility/stdio/registry routing.'
+                $launch.stdout -ceq (Join-Path $ArtifactRoot "fixture-$hidden-stdout.log")) 'Actual launch wrapper changed argv/environment/cwd/visibility/stdio/registry routing.'
+            } finally {
+              foreach ($capture in $script:UiaGateOwnedCaptures) { $null = Complete-UiaHeldCapture $capture }
+            }
         }
     }
+    $controlled.Dispose()
     Invoke-OwnershipCase 'actual-assignment-membership-retain-order' {
         $definition = $gate.Find({ param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Start-MultiProjectOwnedProcess'

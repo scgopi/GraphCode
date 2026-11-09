@@ -969,10 +969,19 @@ evidence only. Main changes product and native image/window surfaces, so a new
 integrated source-bound build and separately admitted functional rerun are
 required before claiming this head is natively qualified.
 
-The normal default UIA gate sets synthetic fixture and
-connection-failure flags and uses its identity-file/PID-reopen launcher. It
-does not establish real-daemon/session restoration and is unchanged. The new
-route returns before that default path and uses `ShellProcessOwnership.psm1`
+The normal default UIA gate sets synthetic fixture and connection-failure
+flags. Its default and secondary-shell launch entry now uses
+`ShellProcessOwnership.psm1`: the original target starts suspended, joins its
+scope/private jobs before release, and registers the original generation-checked
+process while its native launch handle remains held. Caller-owned UTF-8 writers
+tee both independently drained streams into create-new logs before launch.
+UNKNOWN retains the scope and writers without retrying cleanup. Cleanup passes
+the original remaining budget through scope/job/root/pipe checks; stopwatch
+budgets do not guarantee kernel scheduling. The legacy multi-project launcher
+is unchanged and still has a separate PID-file path, so this correction must
+not be claimed for that route. Neither synthetic path establishes real-daemon
+session restoration. The restored-input route returns before that default path
+and uses `ShellProcessOwnership.psm1`
 suspended original launches and retained jobs, private profile/support/temp,
 explicit child environments with no inherited UIA or synthetic workspace flags,
 and normal production CLI commands. Since Swift's zmx locator ignores `PATH`,
