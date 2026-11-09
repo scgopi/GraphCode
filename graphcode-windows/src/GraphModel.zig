@@ -31,6 +31,7 @@ pub const Node = struct {
     state: []u8,
     activity: []u8,
     presence: []u8,
+    presence_exit_code: ?i64 = null,
     backend: []u8 = &.{},
     pilot_state: []u8 = &.{},
     goal_summary: []u8 = &.{},
@@ -58,6 +59,36 @@ pub const Node = struct {
     subgraph_json: []u8 = &.{},
     follows_template: bool = false,
 };
+
+test "jump activation presence exit status survives decoding cloning and replacement" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"event":{"graphChanged":{"revision":1,"project":{"path":"A","name":"A"},"nodes":[{"id":"exited","state":"blocked","presence":{"presence":"busy","exitCode":0}},{"id":"negative","presence":{"presence":"idle","exitCode":-9223372036854775808}},{"id":"large","presence":{"presence":"idle","exitCode":9223372036854775807}},{"id":"null","presence":{"presence":"idle","exitCode":null}},{"id":"missing","presence":{"presence":"busy"}},{"id":"legacy","presence":"idle"},{"id":"scoped","metadata":{"presence":{"exitCode":99}},"presence":{"presence":"busy","metadata":{"exitCode":88}}}],"edges":[]}}}
+    );
+    const nodes = model.graph.?.nodes.items;
+    try std.testing.expectEqual(@as(?i64, 0), nodes[0].presence_exit_code);
+    try std.testing.expectEqual(@as(?i64, std.math.minInt(i64)), nodes[1].presence_exit_code);
+    try std.testing.expectEqual(@as(?i64, std.math.maxInt(i64)), nodes[2].presence_exit_code);
+    for (nodes[3..]) |node| try std.testing.expect(node.presence_exit_code == null);
+    const copied = try cloneNode(std.testing.allocator, nodes[0]);
+    defer freeNode(std.testing.allocator, copied);
+    try std.testing.expectEqual(@as(?i64, 0), copied.presence_exit_code);
+    _ = try model.updateFromFrame(
+        \\{"event":{"nodesChanged":{"revision":2,"projectPath":"A","nodes":[{"id":"exited","state":"blocked","presence":{"presence":"idle"}}]}}}
+    );
+    try std.testing.expect(model.graph.?.nodes.items[0].presence_exit_code == null);
+}
+
+test "jump activation rejects malformed presence exit status" {
+    for ([_][]const u8{ "\"0\"", "true", "1.5", "9223372036854775808", "-9223372036854775809", "{}", "[]" }) |value| {
+        var model = Model.init(std.testing.allocator);
+        defer model.deinit();
+        const frame = try std.fmt.allocPrint(std.testing.allocator, "{{\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":\"A\"}},\"nodes\":[{{\"id\":\"a\",\"presence\":{{\"presence\":\"busy\",\"exitCode\":{s}}}}}],\"edges\":[]}}}}}}", .{value});
+        defer std.testing.allocator.free(frame);
+        try std.testing.expectError(error.MalformedPresenceExitCode, model.updateFromFrame(frame));
+    }
+}
 
 pub const ActivityEvent = struct {
     title: []u8,
@@ -1644,6 +1675,7 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
         .state = &.{},
         .activity = &.{},
         .presence = &.{},
+        .presence_exit_code = node.presence_exit_code,
         .heartbeat_interval_seconds = node.heartbeat_interval_seconds,
         .poll_interval_seconds = node.poll_interval_seconds,
         .stall_after_seconds = node.stall_after_seconds,
@@ -2174,6 +2206,8 @@ fn decodeNodes(
             var reading_fields = try JsonFields.init(allocator, reading);
             defer reading_fields.deinit();
             node.presence = try reading_fields.get("presence").duplicateString(allocator, "");
+            const exit_code = reading_fields.get("exitCode");
+            node.presence_exit_code = if (exit_code.isNull()) null else std.fmt.parseInt(i64, exit_code.raw, 10) catch return error.MalformedPresenceExitCode;
         } else {
             node.presence = try presence.duplicateString(allocator, "");
         }

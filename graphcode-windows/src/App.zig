@@ -63,12 +63,63 @@ const WorkspaceTeardown = @import("WorkspaceTeardown.zig");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
 
+fn loopOpensOnHumanTap(node: GraphModel.Node) bool {
+    if (!std.mem.eql(u8, node.state, "blocked")) return true;
+    if (!std.mem.eql(u8, node.loop_type, "goalBased") and !std.mem.eql(u8, node.loop_type, "timeBased")) return true;
+    return node.presence_exit_code == null and (std.mem.eql(u8, node.presence, "busy") or
+        std.mem.eql(u8, node.presence, "idle") or std.mem.eql(u8, node.presence, "awaitingInput"));
+}
+
+fn blockedLoopMessage(allocator: std.mem.Allocator, node_id: []const u8, nodes: []const GraphModel.Node, edges: []const GraphModel.Edge) ![]u8 {
+    var upstream: std.ArrayList(u8) = .empty;
+    defer upstream.deinit(allocator);
+    for (nodes) |node| {
+        const waiting = for (edges) |edge| {
+            if (edge.blocks_target and !edge.fired and std.mem.eql(u8, edge.to, node_id) and
+                std.mem.eql(u8, edge.from, node.id)) break true;
+        } else false;
+        if (!waiting) continue;
+        if (upstream.items.len != 0) try upstream.appendSlice(allocator, " and ");
+        try upstream.writer(allocator).print("“{s}”", .{node.title});
+    }
+    return if (upstream.items.len == 0)
+        allocator.dupe(u8, "It's waiting on a hand-off that hasn't fired yet — the hand-off will release it automatically.")
+    else
+        std.fmt.allocPrint(allocator, "It's waiting on {s} to finish — the hand-off will release it automatically.", .{upstream.items});
+}
+
+test "jump activation headless blocked admission matches macOS human taps" {
+    for ([_][]const u8{ "turnBased", "sketch", "goalBased", "timeBased", "proactive", "composite" }) |kind| {
+        for ([_][]const u8{ "idle", "running", "succeeded", "failed", "stalled", "stopped", "blocked" }) |state| {
+            for ([_][]const u8{ "", "absent", "unknown", "busy", "idle", "awaitingInput" }) |presence| {
+                for ([_]?i64{ null, 0, -1 }) |exit_code| {
+                    const node = GraphModel.Node{
+                        .id = @constCast("target"),
+                        .title = @constCast("Target"),
+                        .loop_type = @constCast(kind),
+                        .state = @constCast(state),
+                        .activity = &.{},
+                        .presence = @constCast(presence),
+                        .presence_exit_code = exit_code,
+                    };
+                    const unattended = std.mem.eql(u8, kind, "goalBased") or std.mem.eql(u8, kind, "timeBased");
+                    const live = exit_code == null and (std.mem.eql(u8, presence, "busy") or
+                        std.mem.eql(u8, presence, "idle") or std.mem.eql(u8, presence, "awaitingInput"));
+                    try std.testing.expectEqual(!std.mem.eql(u8, state, "blocked") or live or !unattended, loopOpensOnHumanTap(node));
+                }
+            }
+        }
+    }
+}
+
 /// Lets tests observe each production UIA publication (`syncAccessibility`); absent from product builds.
 var accessibility_publication_observer: if (builtin.is_test) ?*const fn (*App) void else void = if (builtin.is_test) null else {};
 
 /// Lets tests observe the update offer a banner click or UIA invoke opens, instead of raising the
 /// modal dialog; absent from product builds.
 var update_offer_observer: if (builtin.is_test) ?*const fn (*App, []const u8, []const u8) void else void = if (builtin.is_test) null else {};
+
+var blocked_loop_notice_observer: if (builtin.is_test) ?*const fn ([]const u8, []const u8) void else void = if (builtin.is_test) null else {};
 
 const title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Windows");
 const workspace_restart_message = "Workspace identity changed or could not be verified. Restart GraphCode before managing workspaces.";
@@ -4805,26 +4856,27 @@ pub const App = struct {
             return;
         } orelse return;
         defer selection.deinit(self.allocator);
+        _ = self.activateJumpSelection(selection.project_path, selection.node_id);
+    }
+
+    fn activateJumpSelection(self: *App, project_path: []const u8, node_id: []const u8) bool {
         const project_index = for (self.model.graphs.items, 0..) |graph, index| {
-            if (std.mem.eql(u8, graph.project.path, selection.project_path)) break index;
+            if (std.mem.eql(u8, graph.project.path, project_path)) break index;
         } else {
             self.setStatus("Matching loop is no longer available");
-            return;
+            return false;
         };
         const node_index = for (self.model.graphs.items[project_index].nodes.items, 0..) |node, index| {
-            if (std.mem.eql(u8, node.id, selection.node_id)) break index;
+            if (std.mem.eql(u8, node.id, node_id)) break index;
         } else {
             self.setStatus("Matching loop is no longer available");
-            return;
+            return false;
         };
-        if (!self.selectProject(selection.project_path) or !self.selectNodeIndex(node_index)) return;
-        self.surface = .project;
-        self.workspace_controls.setPanelVisible(false);
-        self.layoutWorkspace();
-        self.layoutEmptyStateControls();
-        self.ensureLoopVisible(selection.project_path, node_index);
+        if (!self.activateLoop(project_path, node_id)) return false;
+        self.ensureLoopVisible(project_path, node_index);
         self.syncAccessibility();
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
+        return true;
     }
 
     fn openSelectedNode(self: *App) void {
@@ -4836,6 +4888,18 @@ pub const App = struct {
     }
 
     fn activateLoop(self: *App, project_path: []const u8, node_id: []const u8) bool {
+        const target_graph = self.model.graphFor(project_path) orelse {
+            self.setStatus("Selected loop is no longer available");
+            return false;
+        };
+        const target_index = GraphModel.findNodeIndexByID(target_graph.nodes.items, node_id) orelse {
+            self.setStatus("Selected loop is no longer available");
+            return false;
+        };
+        if (!loopOpensOnHumanTap(target_graph.nodes.items[target_index])) {
+            self.showBlockedLoopNotice(target_graph, target_graph.nodes.items[target_index]);
+            return false;
+        }
         if (self.pending_session_restart) |pending| {
             if (std.mem.eql(u8, pending.project_path, project_path) and std.mem.eql(u8, pending.node_id, node_id)) {
                 self.setStatus("Session restart is still waiting for daemon confirmation");
@@ -4889,6 +4953,38 @@ pub const App = struct {
         self.syncAccessibility();
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
         return true;
+    }
+
+    fn showBlockedLoopNotice(self: *App, graph: *const GraphModel.GraphSummary, node: GraphModel.Node) void {
+        const notice_title = std.fmt.allocPrint(self.allocator, "“{s}” is waiting its turn", .{node.title}) catch {
+            self.setStatus("Unable to explain blocked loop");
+            return;
+        };
+        defer self.allocator.free(notice_title);
+        const message = blockedLoopMessage(self.allocator, node.id, graph.nodes.items, graph.edges.items) catch {
+            self.setStatus("Unable to explain blocked loop");
+            return;
+        };
+        defer self.allocator.free(message);
+        self.setStatus(notice_title);
+        if (builtin.is_test) {
+            if (blocked_loop_notice_observer) |observe| {
+                observe(notice_title, message);
+                return;
+            }
+        }
+        const wide_title = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, notice_title) catch {
+            self.setStatus("Unable to show blocked loop notice");
+            return;
+        };
+        defer self.allocator.free(wide_title);
+        const wide_message = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, message) catch {
+            self.setStatus("Unable to show blocked loop notice");
+            return;
+        };
+        defer self.allocator.free(wide_message);
+        if (c.MessageBoxW(self.window.hwnd, wide_message.ptr, wide_title.ptr, c.MB_OK | c.MB_ICONINFORMATION) == 0)
+            self.setStatus("Unable to show blocked loop notice");
     }
 
     fn stopSelectedNode(self: *App) void {
@@ -23781,8 +23877,7 @@ test "wire capture real window procedure preserves reentrant same-window SetCapt
     try MainWindow.registerClass(instance);
     app.window.hwnd = null;
     app.window.context = &app;
-    const hwnd = c.CreateWindowExW(0, app.window.class_name, app.window.class_name,
-        c.WS_POPUP, 0, 0, 1200, 700, null, null, instance, &app.window) orelse {
+    const hwnd = c.CreateWindowExW(0, app.window.class_name, app.window.class_name, c.WS_POPUP, 0, 0, 1200, 700, null, null, instance, &app.window) orelse {
         app.window.hwnd = original;
         return error.WindowCreationFailed;
     };
@@ -23816,9 +23911,7 @@ test "wire capture real window procedure preserves reentrant same-window SetCapt
     _ = c.SendMessageW(hwnd, c.WM_ACTIVATEAPP, 0, 0);
     try std.testing.expect(!app.canvas.edge_dragging);
     try std.testing.expectEqual(@as(usize, 0), app.edge_drag_source_id.len);
-    const foreign = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
-        std.unicode.utf8ToUtf16LeStringLiteral("Capture peer"), c.WS_POPUP,
-        0, 0, 100, 100, null, null, instance, null) orelse return error.WindowCreationFailed;
+    const foreign = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC"), std.unicode.utf8ToUtf16LeStringLiteral("Capture peer"), c.WS_POPUP, 0, 0, 100, 100, null, null, instance, null) orelse return error.WindowCreationFailed;
     defer _ = c.DestroyWindow(foreign);
     app.beginWireSelectedNode(0);
     _ = c.SetCapture(foreign);
@@ -24831,6 +24924,157 @@ test "jump matching ranks exact results across projects" {
     try std.testing.expectEqual(@as(usize, 1), prefix.project_index);
     try std.testing.expectEqual(@as(usize, 0), prefix.node_index);
     try std.testing.expectEqual(@as(u8, 2), prefix.score);
+}
+
+test "jump activation headless blocked notice names only unfired sequencing upstreams in node order" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"event":{"graphChanged":{"project":{"path":"A"},"nodes":[{"id":"a","title":"First"},{"id":"b","title":"Second"},{"id":"c","title":"Already fired"},{"id":"d","title":"Message only"},{"id":"target","title":"Waiting","state":"blocked"}],"edges":[{"from":"b","to":"target","blocksTarget":true},{"from":"a","to":"target","blocksTarget":true},{"from":"a","to":"target","blocksTarget":true},{"from":"c","to":"target","blocksTarget":true,"fired":true},{"from":"d","to":"target","kind":"message","blocksTarget":false}]}}}
+    );
+    const graph = model.graph.?;
+    const message = try blockedLoopMessage(std.testing.allocator, "target", graph.nodes.items, graph.edges.items);
+    defer std.testing.allocator.free(message);
+    try std.testing.expectEqualStrings("It's waiting on “First” and “Second” to finish — the hand-off will release it automatically.", message);
+    const fallback = try blockedLoopMessage(std.testing.allocator, "missing", graph.nodes.items, graph.edges.items);
+    defer std.testing.allocator.free(fallback);
+    try std.testing.expectEqualStrings("It's waiting on a hand-off that hasn't fired yet — the hand-off will release it automatically.", fallback);
+}
+
+test "jump activation native running and finished destinations bind the same workspace as sidebar rows" {
+    for ([_][]const u8{ "running", "succeeded", "failed", "stalled", "stopped" }) |state| {
+        var fixture: ShowGraphFixture = undefined;
+        try fixture.initSized(Dpi.base_dpi, 1200);
+        defer fixture.deinit();
+        const app = &fixture.app;
+        try deliverSessionRestartGraph(app, reopen_fixture_path, state, 0);
+        try std.testing.expect(app.selectNodeIndex(0));
+        const before = app.client.outbound_count;
+        try std.testing.expect(app.activateJumpSelection(reopen_fixture_path, "loop-b"));
+        try expectLoopBarAndPane(app, &fixture.workspace, "loop-b");
+        try std.testing.expectEqualStrings(reopen_fixture_path, fixture.workspace.projectPath());
+        try std.testing.expectEqualStrings("loop-b", fixture.workspace.loop_id);
+        try std.testing.expectEqual(before + 1, app.client.outbound_count);
+        const command = app.client.outbound[(app.client.outbound_head + before) % app.client.outbound.len];
+        try std.testing.expect(std.mem.indexOf(u8, command, "\"resumeSession\":{\"_0\":\"loop-b\"}") != null);
+        var sink = SidebarUiaSink{};
+        app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 700 });
+        const identity = try std.fmt.allocPrint(app.allocator, "loop:{s}:loop-b", .{reopen_fixture_path});
+        defer app.allocator.free(identity);
+        try expectSidebarNavigationSelection(&sink, identity, true);
+        const project_identity = try std.fmt.allocPrint(app.allocator, "open-project:{s}", .{reopen_fixture_path});
+        defer app.allocator.free(project_identity);
+        try expectSidebarNavigationSelection(&sink, project_identity, false);
+
+        app.handleAction(.show_graph);
+        const before_sidebar = app.client.outbound_count;
+        try clickSidebarLoopRow(app, reopen_fixture_path, "loop-b");
+        try std.testing.expectEqual(before_sidebar + 1, app.client.outbound_count);
+        try expectLoopBarAndPane(app, &fixture.workspace, "loop-b");
+        try std.testing.expectEqualStrings(reopen_fixture_path, fixture.workspace.projectPath());
+    }
+}
+
+test "jump activation native cross-project identity and stale results preserve the actual destination" {
+    var fixture: ShowGraphFixture = undefined;
+    try fixture.initSized(Dpi.base_dpi, 1200);
+    defer fixture.deinit();
+    const app = &fixture.app;
+    const other = "C:\\jump-other";
+    try deliverSessionRestartGraph(app, other, "running", 0);
+    try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-a"));
+    try std.testing.expect(app.activateJumpSelection(other, "loop-b"));
+    try expectLoopBarAndPane(app, &fixture.workspace, "loop-b");
+    try std.testing.expectEqualStrings(other, app.currentProject().?);
+    try std.testing.expectEqualStrings(other, fixture.workspace.projectPath());
+    const before = app.client.outbound_count;
+    for ([_]struct { path: []const u8, id: []const u8 }{
+        .{ .path = "C:\\deleted-project", .id = "loop-b" },
+        .{ .path = reopen_fixture_path, .id = "deleted-loop" },
+        .{ .path = other, .id = "deleted-loop" },
+    }) |stale| {
+        try std.testing.expect(!app.activateJumpSelection(stale.path, stale.id));
+        try std.testing.expectEqualStrings("Matching loop is no longer available", app.status());
+        try std.testing.expectEqualStrings(other, app.currentProject().?);
+        try std.testing.expectEqualStrings(other, fixture.workspace.projectPath());
+        try std.testing.expectEqualStrings("loop-b", fixture.workspace.loop_id);
+        try std.testing.expectEqual(before, app.client.outbound_count);
+        try expectLoopBarAndPane(app, &fixture.workspace, "loop-b");
+    }
+}
+
+test "jump activation native blocked refusal preserves the previous workspace and shows the sidebar notice" {
+    const Probe = struct {
+        var count: usize = 0;
+        fn observe(notice_title: []const u8, message: []const u8) void {
+            std.testing.expectEqualStrings("“Blocked goal” is waiting its turn", notice_title) catch @panic("wrong notice title");
+            std.testing.expectEqualStrings("It's waiting on “Upstream” to finish — the hand-off will release it automatically.", message) catch @panic("wrong notice message");
+            count += 1;
+        }
+    };
+    var fixture: ShowGraphFixture = undefined;
+    try fixture.initSized(Dpi.base_dpi, 1200);
+    defer fixture.deinit();
+    const app = &fixture.app;
+    try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-b"));
+    _ = try app.model.updateFromFrame(
+        \\{"event":{"graphChanged":{"project":{"path":"C:\\blocked-other","name":"Blocked project"},"nodes":[{"id":"upstream","title":"Upstream","state":"running"},{"id":"blocked","title":"Blocked goal","loopType":"goalBased","state":"blocked","presence":{"presence":"busy","exitCode":0}}],"edges":[{"from":"upstream","to":"blocked","kind":"handoff","fired":false}]}}}
+    );
+    Probe.count = 0;
+    blocked_loop_notice_observer = Probe.observe;
+    defer blocked_loop_notice_observer = null;
+    const before = app.client.outbound_count;
+    try std.testing.expect(!app.activateJumpSelection("C:\\blocked-other", "blocked"));
+    try std.testing.expect(!app.activateLoop("C:\\blocked-other", "blocked"));
+    try std.testing.expectEqual(@as(usize, 2), Probe.count);
+    try std.testing.expectEqual(before, app.client.outbound_count);
+    try std.testing.expectEqualStrings(reopen_fixture_path, app.currentProject().?);
+    try std.testing.expectEqualStrings(reopen_fixture_path, fixture.workspace.projectPath());
+    try expectLoopBarAndPane(app, &fixture.workspace, "loop-b");
+}
+
+test "jump activation native attended and live blocked loops still open" {
+    for ([_]struct { kind: []const u8, presence: []const u8 }{
+        .{ .kind = "sketch", .presence = "{\"presence\":\"absent\",\"exitCode\":0}" },
+        .{ .kind = "turnBased", .presence = "null" },
+        .{ .kind = "goalBased", .presence = "{\"presence\":\"busy\"}" },
+        .{ .kind = "timeBased", .presence = "{\"presence\":\"idle\"}" },
+        .{ .kind = "goalBased", .presence = "{\"presence\":\"awaitingInput\"}" },
+    }) |case| {
+        var fixture: ShowGraphFixture = undefined;
+        try fixture.initSized(Dpi.base_dpi, 1200);
+        defer fixture.deinit();
+        const app = &fixture.app;
+        const frame = try std.fmt.allocPrint(app.allocator, "{{\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":\"B\",\"name\":\"Blocked live\"}},\"nodes\":[{{\"id\":\"live\",\"title\":\"Live\",\"loopType\":\"{s}\",\"state\":\"blocked\",\"presence\":{s}}}],\"edges\":[]}}}}}}", .{ case.kind, case.presence });
+        defer app.allocator.free(frame);
+        _ = try app.model.updateFromFrame(frame);
+        const before = app.client.outbound_count;
+        try std.testing.expect(app.activateJumpSelection("B", "live"));
+        try expectLoopBarAndPane(app, &fixture.workspace, "live");
+        try std.testing.expectEqualStrings("B", fixture.workspace.projectPath());
+        try std.testing.expectEqual(before + 1, app.client.outbound_count);
+    }
+}
+
+test "jump activation native composite targets reuse the sidebar group destination" {
+    for ([_][]const u8{ "composite", "proactive" }) |kind| {
+        var app = try overviewTestApp(Dpi.base_dpi);
+        defer deinitOverviewTestApp(&app);
+        const frame = try std.fmt.allocPrint(app.allocator, "{{\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":\"A\",\"name\":\"A\"}},\"nodes\":[{{\"id\":\"group\",\"title\":\"Group\",\"loopType\":\"{s}\",\"state\":\"running\",\"subGraph\":{{\"nodes\":[{{\"id\":\"child\",\"title\":\"Child\",\"state\":\"idle\"}}],\"edges\":[]}}}}],\"edges\":[]}}}}}}", .{kind});
+        defer app.allocator.free(frame);
+        _ = try app.model.updateFromFrame(frame);
+        try std.testing.expect(app.activateJumpSelection("A", "group"));
+        try std.testing.expect(app.model.isCompositeOpen());
+        try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+        try std.testing.expectEqualStrings("child", app.model.graph.?.nodes.items[0].id);
+        try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+        app.closeCompositeGroup();
+        try clickSidebarLoopRow(&app, "A", "group");
+        try std.testing.expect(app.model.isCompositeOpen());
+        try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+        try std.testing.expectEqualStrings("child", app.model.graph.?.nodes.items[0].id);
+        try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+    }
 }
 
 test "node form validation errors keep the validation status" {
