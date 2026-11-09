@@ -22,7 +22,7 @@
     },
     "sessionNaming": {
       "beta": 100,
-      "stable": 0
+      "stable": 100
     }
   }
 }
