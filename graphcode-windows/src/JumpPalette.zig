@@ -341,6 +341,74 @@ fn freeEntries(allocator: std.mem.Allocator, entries: []Entry) void {
     allocator.free(entries);
 }
 
+test "jump query refresh follows the actual search buffer and preserves the selected destination" {
+    const allocator = std.testing.allocator;
+    const previous = std.process.getEnvVarOwned(allocator, "GRAPHCODE_UIA_GATE") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+    defer if (previous) |value| allocator.free(value);
+    const previous_wide = if (previous) |value| try utf8ToWideZ(allocator, value) else null;
+    defer if (previous_wide) |value| allocator.free(value);
+    const variable = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_UIA_GATE");
+    try std.testing.expect(c.SetEnvironmentVariableW(variable.ptr, std.unicode.utf8ToUtf16LeStringLiteral("1")) != 0);
+    defer _ = c.SetEnvironmentVariableW(variable.ptr, if (previous_wide) |value| value.ptr else null);
+
+    try registerClass();
+    const entries = [_]Entry{
+        .{ .project_path = "A", .project_name = "UIA project", .node_id = "loop-a", .title = "UIA loop A", .loop_type = "goalBased", .state = "succeeded" },
+        .{ .project_path = "A", .project_name = "UIA project", .node_id = "loop-b", .title = "UIA loop B", .loop_type = "proactive", .state = "running" },
+        .{ .project_path = "B", .project_name = "Jump fixture", .node_id = "loop-c", .title = "UIA loop C", .loop_type = "timeBased", .state = "awaitingInput" },
+    };
+    var dialog = Dialog{ .state = State.init(allocator, &entries) };
+    defer dialog.state.deinit();
+    defer releaseDrawingResources(&dialog);
+    try dialog.state.filter("");
+    try std.testing.expect(active == null);
+    active = &dialog;
+    defer active = null;
+    const hwnd = c.CreateWindowExW(0, class_name.ptr, null, c.WS_POPUP, 0, 0, 460, 380, null, null, c.GetModuleHandleW(null), null) orelse return error.PaletteCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+    try std.testing.expect(c.IsWindowVisible(hwnd) == 0);
+    for ([_]struct { query: []const u8, count: usize, node_id: ?[]const u8 }{
+        .{ .query = "UIA loop A", .count = 1, .node_id = "loop-a" },
+        .{ .query = "UIA loop B", .count = 1, .node_id = "loop-b" },
+        .{ .query = "UIA loop C", .count = 1, .node_id = "loop-c" },
+        .{ .query = "", .count = 3, .node_id = "loop-a" },
+        .{ .query = "no matching loop", .count = 0, .node_id = null },
+    }) |case| {
+        const query = try utf8ToWideZ(allocator, case.query);
+        defer allocator.free(query);
+        try std.testing.expect(c.SendMessageW(dialog.edit, c.WM_SETTEXT, 0, @intCast(@intFromPtr(query.ptr))) != 0);
+        try std.testing.expectEqual(case.count, dialog.state.matches.items.len);
+        if (case.node_id) |id| try std.testing.expectEqualStrings(id, dialog.state.selectedEntry().?.node_id);
+        try dialog.state.filter("UIA loop B");
+        try std.testing.expect(c.PostMessageW(hwnd, c.WM_APP + 43, 0, 0) != 0);
+        var message: c.MSG = undefined;
+        var refreshes: usize = 0;
+        while (c.PeekMessageW(&message, hwnd, c.WM_APP + 43, c.WM_APP + 43, c.PM_REMOVE) != 0) {
+            _ = c.DispatchMessageW(&message);
+            refreshes += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 1), refreshes);
+        try std.testing.expect(dialog.failure == null);
+        try std.testing.expectEqual(case.count, dialog.state.matches.items.len);
+        try std.testing.expectEqual(@as(c.LRESULT, @intCast(case.count)), c.SendMessageW(dialog.list, c.LB_GETCOUNT, 0, 0));
+        if (case.node_id) |id| {
+            try std.testing.expectEqualStrings(id, dialog.state.selectedEntry().?.node_id);
+            try std.testing.expect(handleKey(&dialog, c.VK_RETURN));
+            try std.testing.expect(dialog.accepted and dialog.closed);
+            try std.testing.expectEqualStrings(id, dialog.state.selectedEntry().?.node_id);
+            dialog.accepted = false;
+            dialog.closed = false;
+        } else {
+            try std.testing.expect(handleKey(&dialog, c.VK_RETURN));
+            try std.testing.expect(!dialog.accepted and !dialog.closed);
+            try std.testing.expect(dialog.state.selectedEntry() == null);
+        }
+    }
+}
+
 test "empty palette creates native search controls and cancels without a selection" {
     try registerClass();
     var dialog = Dialog{ .state = State.init(std.testing.allocator, &.{}) };
@@ -652,17 +720,7 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             const command: u16 = @truncate(wparam);
             const notification: u16 = @truncate(wparam >> 16);
             if (command == search_id and notification == c.EN_CHANGE) {
-                const query = readWindowText(dialog.state.allocator, dialog.edit) catch |err| {
-                    fail(dialog, err);
-                    return 0;
-                };
-                defer dialog.state.allocator.free(query);
-                dialog.state.filter(query) catch |err| {
-                    fail(dialog, err);
-                    return 0;
-                };
-                refillList(dialog) catch |err| fail(dialog, err);
-                _ = c.InvalidateRect(hwnd, null, 1);
+                refreshQuery(hwnd, dialog);
                 return 0;
             }
             if (command == results_id and notification == c.LBN_SELCHANGE) {
@@ -685,11 +743,7 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
         },
         c.WM_APP + 43 => {
             if (!envFlag("GRAPHCODE_UIA_GATE")) return 0;
-            dialog.state.filter("UIA loop B") catch |err| {
-                fail(dialog, err);
-                return 0;
-            };
-            refillList(dialog) catch |err| fail(dialog, err);
+            refreshQuery(hwnd, dialog);
             return 0;
         },
         c.WM_CLOSE => {
@@ -699,6 +753,20 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
         else => {},
     }
     return c.DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+fn refreshQuery(hwnd: c.HWND, dialog: *Dialog) void {
+    const query = readWindowText(dialog.state.allocator, dialog.edit) catch |err| {
+        fail(dialog, err);
+        return;
+    };
+    defer dialog.state.allocator.free(query);
+    dialog.state.filter(query) catch |err| {
+        fail(dialog, err);
+        return;
+    };
+    refillList(dialog) catch |err| fail(dialog, err);
+    _ = c.InvalidateRect(hwnd, null, 1);
 }
 
 fn refillList(dialog: *Dialog) !void {
