@@ -166,6 +166,12 @@ pass in the current-source native gate. The loop is restored after the sequence.
 Worktrees events and the headless controls do not establish this live evidence.
 This sequence covers navigation `Select`/`ElementSelected`, not additional
 navigation event types or a broader accessibility claim.
+The multi-project owner predicate uses the same canonical rule: project surfaces
+select only the owning project row; workspace surfaces select only its loop row.
+Overview, Quick Chats and other owners select neither of those rows. The
+`ownership.mixed-ui-policy` suite checks all 32 surface/owner/selection combinations
+without changing the independent roster, card, metadata, bounds or foreign-owner
+requirements.
 
 UIA, packaging contracts, shell ownership, and managed/native tests consume those
 same implementations. The loader verifies the exact file/type, worktree,

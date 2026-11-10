@@ -317,18 +317,38 @@ foreach($mutation in @('project-only','missing-loop','missing-toolbar','wrong-pr
 }
 Invoke-Mixed 3524 'project-refuses-workspace-chrome' {Assert-Mixed (-not (Test-MultiProjectObservedSurface project $true (New-MixedWorkspace) $workspaceOwner 4242)) 'Project accepted workspace chrome'}
 foreach($test in @(
-  @{line=3530;surface='project';owner=0;project=$true;loop=$true;expected=$true},
+  @{line=3530;surface='project';owner=0;project=$true;loop=$false;expected=$true},
   @{line=3535;surface='project';owner=1;project=$false;loop=$false;expected=$true},
   @{line=3540;surface='workspace';owner=0;project=$false;loop=$true;expected=$true},
-  @{line=3545;surface='overview';owner=0;project=$false;loop=$true;expected=$true},
-  @{line=3550;surface='quick_chats';owner=0;project=$false;loop=$true;expected=$true},
+  @{line=3545;surface='overview';owner=0;project=$false;loop=$false;expected=$true},
+  @{line=3550;surface='quick_chats';owner=0;project=$false;loop=$false;expected=$true},
   @{line=3555;surface='workspace';owner=0;project=$true;loop=$true;expected=$false},
   @{line=3560;surface='project';owner=0;project=$false;loop=$true;expected=$false},
   @{line=3565;surface='overview';owner=0;project=$true;loop=$true;expected=$false},
   @{line=3570;surface='quick_chats';owner=0;project=$true;loop=$true;expected=$false},
   @{line=3575;surface='workspace';owner=0;project=$false;loop=$false;expected=$false}
 )) {
-  Invoke-Mixed $test.line $test.surface {Assert-Mixed ((Test-MultiProjectOwnerSelection $test.surface $rosterOwners[$test.owner] $workspaceOwner $test.project $test.loop) -eq $test.expected) 'Owner/loop selection boundary changed'}
+  Invoke-Mixed $test.line $test.surface {
+    Assert-Mixed ((Test-MultiProjectOwnerSelection $test.surface $rosterOwners[$test.owner] $workspaceOwner $test.project $test.loop) -eq $test.expected) 'Owner/loop selection boundary changed'
+    if ($test.line -eq 3530) {
+      $truthRows = 0
+      foreach ($surface in @('project', 'workspace', 'overview', 'quick_chats')) {
+        foreach ($ownerIndex in @(0, 1)) {
+          foreach ($projectSelected in @($false, $true)) {
+            foreach ($loopSelected in @($false, $true)) {
+              $expectedProject = $surface -ceq 'project' -and $ownerIndex -eq 0
+              $expectedLoop = $surface -ceq 'workspace' -and $ownerIndex -eq 0
+              $expected = $projectSelected -eq $expectedProject -and $loopSelected -eq $expectedLoop
+              Assert-Mixed ((Test-MultiProjectOwnerSelection $surface $rosterOwners[$ownerIndex] $workspaceOwner $projectSelected $loopSelected) -eq $expected) `
+                "Surface/owner truth table differs: $surface owner=$ownerIndex project=$projectSelected loop=$loopSelected"
+              $truthRows++
+            }
+          }
+        }
+      }
+      Assert-Mixed ($truthRows -eq 32) 'Owner selection truth table must execute all 32 combinations'
+    }
+  }
 }
 Invoke-Mixed 3596 'complete-two-owner-four-fragment-roster' {Assert-Mixed (Test-MultiProjectObservedRoster overview (New-MixedRoster) $rosterOwners $null 4242) 'Complete roster rejected'}
 Invoke-Mixed 3601 'obsolete-node-dimensions-refused' {

@@ -3941,7 +3941,8 @@ function Test-MultiProjectOwnerSelection([string] $surface, $owner, $selectedOwn
   $selected = $false
   if ($null -ne $selectedOwner) { $selected = $selectedOwner.path -ceq $owner.path }
   $expectedProjectSelected = $surface -ceq "project" -and $selected
-  return $projectSelected -eq $expectedProjectSelected -and $loopSelected -eq $selected
+  $expectedLoopSelected = $surface -ceq "workspace" -and $selected
+  return $projectSelected -eq $expectedProjectSelected -and $loopSelected -eq $expectedLoopSelected
 }
 
 function Test-MultiProjectObservedRoster([string] $surface, $projection, $expectedOwners, $selectedOwner, [int] $processId) {
