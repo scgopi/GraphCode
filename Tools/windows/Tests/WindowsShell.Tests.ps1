@@ -2,6 +2,7 @@
 param(
   [switch] $List,
   [switch] $WorkspaceTabSelectorOnly,
+  [switch] $JumpDestinationOnly,
   [string] $ZigExecutable,
   # Hosted CI splits the executable sections across runners. Shard/ShardCount
   # select one part of a deterministic, complete partition; the defaults run
@@ -224,6 +225,173 @@ function Assert-WorkspaceTabSelectors {
 
 Assert-WorkspaceTabSelectors
 if ($WorkspaceTabSelectorOnly) { exit 0 }
+
+function Assert-JumpDestinationContract {
+  $path = Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1"
+  $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errors)
+  Assert-Contract ($errors.Count -eq 0) "Jump destination gate must parse"
+  $definitions = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+      $node.Name -ceq "Assert-UiaJumpWorkspaceDestination"
+  }, $true))
+  Assert-Contract ($definitions.Count -eq 1) "Jump needs one actual workspace destination oracle"
+  Assert-Contract ($definitions[0].Extent.Text -notmatch 'System\.Windows\.Automation|GraphCodeUiaGateState|GetCurrentPattern|Invoke\(') `
+    "Jump destination predicate must consume observations without native UIA or input"
+  . ([scriptblock]::Create($definitions[0].Extent.Text))
+  $cases = @(
+    "exact", "project-only", "wrong-loop", "wrong-project", "duplicate-loop-bar",
+    "foreign-loop-bar", "foreign-toolbar", "unselected-row", "wrong-row",
+    "foreign-row", "missing-show-graph", "wrong-show-graph", "offscreen-loop-bar",
+    "zero-loop-bar-bounds", "duplicate-toolbar", "duplicate-row"
+  )
+  foreach ($name in $cases) {
+    $children = @(
+      [pscustomobject]@{ Current = [pscustomobject]@{ AutomationId = "workspace-loop-bar-1"; Name = "Selected loop workspace"; ProcessId = 42; IsOffscreen = $false; BoundingRectangle = @{ Width = 100; Height = 20 } } },
+      [pscustomobject]@{ Current = [pscustomobject]@{ AutomationId = "workspace-toolbar-2"; Name = "Owned project"; ProcessId = 42; IsOffscreen = $false; BoundingRectangle = @{ Width = 100; Height = 20 } } },
+      [pscustomobject]@{ Current = [pscustomobject]@{ AutomationId = "workspace-show-graph-3"; Name = "Show in Graph"; ProcessId = 42; IsOffscreen = $false; BoundingRectangle = @{ Width = 100; Height = 20 } } }
+    )
+    $rows = @([pscustomobject]@{ Current = [pscustomobject]@{
+      AutomationId = "loop-row-4"; Name = "Owned loop"; ProcessId = 42
+    } })
+    $selected = $true
+    switch ($name) {
+      "project-only" { $children = @() }
+      "wrong-loop" { $children[0].Current.AutomationId = "workspace-loop-bar-9" }
+      "wrong-project" { $children[1].Current.AutomationId = "workspace-toolbar-9" }
+      "duplicate-loop-bar" { $children += $children[0] }
+      "foreign-loop-bar" { $children[0].Current.ProcessId = 99 }
+      "foreign-toolbar" { $children[1].Current.ProcessId = 99 }
+      "unselected-row" { $selected = $false }
+      "wrong-row" { $rows[0].Current.AutomationId = "loop-row-9" }
+      "foreign-row" { $rows[0].Current.ProcessId = 99 }
+      "missing-show-graph" { $children = @($children[0], $children[1]) }
+      "wrong-show-graph" { $children[2].Current.AutomationId = "workspace-show-graph-9" }
+      "offscreen-loop-bar" { $children[0].Current.IsOffscreen = $true }
+      "zero-loop-bar-bounds" { $children[0].Current.BoundingRectangle.Width = 0 }
+      "duplicate-toolbar" { $children += $children[1] }
+      "duplicate-row" { $rows += $rows[0] }
+    }
+    $failure = $null
+    try {
+      Assert-UiaJumpWorkspaceDestination $children $rows $selected 42 `
+        "workspace-loop-bar-1" "workspace-toolbar-2" "workspace-show-graph-3" `
+        "loop-row-4" "Owned project" "Owned loop"
+    } catch { $failure = $_ }
+    Assert-Contract (($null -eq $failure) -eq ($name -ceq "exact")) "Jump destination oracle accepted wrong observation: $name"
+    if ($failure) {
+      Assert-Contract ($failure.Exception.Message -like "Jump destination:*") "Jump refusal came from an unrelated failure: $name"
+    }
+  }
+  $source = [IO.File]::ReadAllText($path)
+  Assert-Contract ($source.Contains('Assert-UiaJumpWorkspaceDestination $jumpWorkspaceChildren $jumpDestinationRows') -and
+    $source.Contains('SetFirstEditText($jumpWindow, "UIA loop A")') -and
+    $source.Contains('$jumpExpectedLoopBarId = Get-MultiProjectAutomationId "workspace-loop-bar" $dynamicProjectNodeIds[0]')) `
+    "Jump leaf destination observations must reach the actual production oracle"
+  Write-Host "UIA Jump destination contract: $($cases.Count) cases passed (nativeCalls=0)"
+  return $cases.Count
+}
+
+$null = Assert-JumpDestinationContract
+
+function Assert-JumpEditTextContract {
+  $path = Join-Path $repoRoot "Tools\windows\ValidationRunner\Ui\Production\GraphCodeUiaGateState.cs"
+  $source = [IO.File]::ReadAllText($path)
+  $start = $source.IndexOf('  public static bool SetFirstEditText(')
+  $end = $source.IndexOf('  public static string EditTextById(', [Math]::Max(0, $start))
+  Assert-Contract ($start -ge 0 -and $end -gt $start) "Jump edit helpers must have one extractable production region"
+  $methods = $source.Substring($start, $end - $start)
+  Assert-Contract ([regex]::Matches($methods, 'public static bool SetFirstEditText\(').Count -eq 1 -and
+    [regex]::Matches($methods, 'public static bool SetEditTextById\(').Count -eq 1 -and
+    $methods -notmatch 'DllImport|System\.Windows\.Automation') "Jump edit fixture must contain only the two actual method bodies"
+  Add-Type -TypeDefinition (@'
+using System;
+public static class JumpEditTextFixture {
+  public static string Caption, Buffer, NotifiedBuffer;
+  public static int Notifications, Writes, ControlId, NotifiedId;
+  public static bool Missing, RefuseWrite;
+  public static void Reset() {
+    Caption = Buffer = "UIA loop B"; NotifiedBuffer = null;
+    Notifications = Writes = NotifiedId = 0; ControlId = 9904;
+    Missing = RefuseWrite = false;
+  }
+  private static IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string name) {
+    if (parent != new IntPtr(1) || after != IntPtr.Zero || cls != "Edit" || name != null)
+      throw new InvalidOperationException("Unexpected first-edit lookup");
+    return Missing ? IntPtr.Zero : new IntPtr(2);
+  }
+  private static int GetDlgCtrlID(IntPtr edit) {
+    if (edit != new IntPtr(2)) throw new InvalidOperationException("Wrong edit id lookup");
+    return ControlId;
+  }
+  private static IntPtr ControlById(IntPtr parent, int id) {
+    if (parent != new IntPtr(1) || id != ControlId)
+      throw new InvalidOperationException("Wrong parent or control id");
+    return Missing ? IntPtr.Zero : new IntPtr(2);
+  }
+  private static bool SetWindowText(IntPtr edit, string text) {
+    if (edit != new IntPtr(2)) throw new InvalidOperationException("Wrong caption target");
+    Caption = text; return true;
+  }
+  public static void CaptionOnly(string text) { SetWindowText(new IntPtr(2), text); }
+  private static IntPtr SendMessageString(IntPtr edit, uint message, UIntPtr wparam, string text) {
+    if (edit != new IntPtr(2) || message != 0x000C || wparam != UIntPtr.Zero)
+      throw new InvalidOperationException("Expected WM_SETTEXT to the actual edit");
+    if (RefuseWrite) return IntPtr.Zero;
+    Buffer = text; Writes++; return new IntPtr(1);
+  }
+  private static IntPtr SendMessage(IntPtr parent, uint message, UIntPtr command, IntPtr edit) {
+    if (parent != new IntPtr(1) || message != 0x0111 || edit != new IntPtr(2) ||
+        (command.ToUInt64() >> 16) != 0x0300)
+      throw new InvalidOperationException("Expected EN_CHANGE to the original parent");
+    Notifications++; NotifiedBuffer = Buffer; NotifiedId = (int)(command.ToUInt64() & 0xffff);
+    return IntPtr.Zero;
+  }
+'@ + $methods + "`n}")
+  $cases = @("caption-only", "query-A", "repeat-query", "empty-query", "unicode-query",
+    "missing-edit", "refused-write", "actual-control-id")
+  foreach ($name in $cases) {
+    [JumpEditTextFixture]::Reset()
+    if ($name -ceq "caption-only") {
+      [JumpEditTextFixture]::CaptionOnly("UIA loop A")
+      Assert-Contract ([JumpEditTextFixture]::Caption -ceq "UIA loop A" -and
+        [JumpEditTextFixture]::Buffer -ceq "UIA loop B" -and
+        [JumpEditTextFixture]::Notifications -eq 0) "caption-only negative control must leave the edit buffer unchanged"
+      continue
+    }
+    $text = "UIA loop A"
+    switch ($name) {
+      "repeat-query" {
+        Assert-Contract ([JumpEditTextFixture]::SetFirstEditText([IntPtr]1, "intermediate")) "first replacement must succeed"
+      }
+      "empty-query" { $text = "" }
+      "unicode-query" { $text = "loop " + [char]0x96EA }
+      "missing-edit" { [JumpEditTextFixture]::Missing = $true }
+      "refused-write" { [JumpEditTextFixture]::RefuseWrite = $true }
+      "actual-control-id" { [JumpEditTextFixture]::ControlId = 8123 }
+    }
+    $ok = [JumpEditTextFixture]::SetFirstEditText([IntPtr]1, $text)
+    if ($name -in @("missing-edit", "refused-write")) {
+      Assert-Contract (-not $ok -and [JumpEditTextFixture]::Writes -eq 0 -and
+        [JumpEditTextFixture]::Notifications -eq 0 -and
+        [JumpEditTextFixture]::Buffer -ceq "UIA loop B") "Jump edit refusal must not dispatch EN_CHANGE or change the buffer: $name"
+    } else {
+      $expected = if ($name -ceq "repeat-query") { 2 } else { 1 }
+      Assert-Contract ($ok -and [JumpEditTextFixture]::Buffer -ceq $text -and
+        [JumpEditTextFixture]::NotifiedBuffer -ceq $text -and
+        [JumpEditTextFixture]::NotifiedId -eq [JumpEditTextFixture]::ControlId -and
+        [JumpEditTextFixture]::Writes -eq $expected -and
+        [JumpEditTextFixture]::Notifications -eq $expected -and
+        [JumpEditTextFixture]::Caption -ceq "UIA loop B") "Jump must set the EDIT buffer before EN_CHANGE, not only its caption: $name"
+    }
+  }
+  Write-Host "UIA Jump edit-buffer contract: $($cases.Count) cases passed (intercepted actual methods; nativeCalls=0)"
+  return $cases.Count
+}
+
+$null = Assert-JumpEditTextContract
+if ($JumpDestinationOnly) { exit 0 }
 
 $shellSource = Get-Content $shellScript -Raw
 $appSource = Get-Content (Join-Path $shellRoot "src\App.zig") -Raw

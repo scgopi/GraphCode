@@ -11,7 +11,7 @@ public static class SuiteRegistration
 {
     public static IReadOnlyList<IValidationSuite> CreateSuites() => new IValidationSuite[]
     {
-        new ActivationSuite(), new ManagedUiSuite(), new CardsAcceptanceControlsSuite(), new NativeUiSuite(), new ControlClickTopologySuite(),
+        new ActivationSuite(), new ManagedUiSuite(), new CardsAcceptanceControlsSuite(), new NativeUiSuite(), new EditBufferSuite(), new ControlClickTopologySuite(),
         new StandaloneSuites.CaseScriptSuite("ui.navigation-runner-contracts",
             @"Tools\windows\Tests\AccessibilityProvider.Native.Tests.Harness.Tests.ps1",
             "UI_CASE_RESULT=", new[] { "ui.navigation.headless-runner-plan" }, new[] { "-PlanOnly" }),

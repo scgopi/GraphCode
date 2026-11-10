@@ -2137,6 +2137,43 @@ function Wait-ForGraphChildren(
   return [pscustomobject]@{ Graph = $liveGraph; Items = $observed; Children = $children }
 }
 
+function Assert-UiaJumpWorkspaceDestination(
+  [object[]] $Children,
+  [object[]] $Rows,
+  [bool] $Selected,
+  [int] $ProcessId,
+  [string] $LoopBarId,
+  [string] $ToolbarId,
+  [string] $ShowGraphId,
+  [string] $RowId,
+  [string] $ProjectName,
+  [string] $LoopName
+) {
+  if ($ProcessId -le 0 -or $Rows.Count -ne 1 -or -not $Selected -or
+      $Rows[0].Current.ProcessId -ne $ProcessId -or
+      $Rows[0].Current.AutomationId -cne $RowId -or
+      $Rows[0].Current.Name -cne $LoopName) {
+    throw "Jump destination: exact owned loop row is not uniquely selected"
+  }
+  foreach ($expected in @(
+    @{ id = $LoopBarId; name = "Selected loop workspace" },
+    @{ id = $ToolbarId; name = $ProjectName },
+    @{ id = $ShowGraphId; name = "Show in Graph" }
+  )) {
+    $matches = @($Children | Where-Object { $_.Current.AutomationId -ceq $expected.id })
+    if ($matches.Count -ne 1 -or
+        $matches[0].Current.ProcessId -ne $ProcessId -or
+        $matches[0].Current.Name -cne $expected.name -or
+        $matches[0].Current.IsOffscreen) {
+      throw "Jump destination: missing, duplicate, foreign or offscreen workspace identity $($expected.id)"
+    }
+    $bounds = $matches[0].Current.BoundingRectangle
+    if ($bounds.Width -le 0 -or $bounds.Height -le 0) {
+      throw "Jump destination: workspace identity has empty bounds $($expected.id)"
+    }
+  }
+}
+
 function Get-WorkspaceTabMountDecision(
   [object[]] $Before,
   [object[]] $AfterNew,
@@ -3779,6 +3816,7 @@ function Get-MultiProjectAutomationId([string] $kind, [string] $path, [string] $
     "overview-worktree-notice" { "canvas-card" }
     "workspace-loop-bar" { "workspace-loop-bar" }
     "workspace-toolbar" { "workspace-toolbar" }
+    "workspace-show-graph" { "workspace-show-graph" }
     "composite-back" { "canvas-card" }
     default { throw "MULTIPROJECT_KIND: unsupported automation identity kind" }
   }
@@ -9177,14 +9215,14 @@ try {
   Require (($jumpNames -match '(?s)^UIA loop C\nTimed · NEEDS YOU · Jump fixture$').Count -ge 1) `
     "jump palette did not expose a contextual cross-project result"
   $jumpWindow = [IntPtr]$jumpPalette.Current.NativeWindowHandle
-  Require ([GraphCodeUiaGateState]::SetFirstEditText($jumpWindow, "UIA loop B")) `
+  Require ([GraphCodeUiaGateState]::SetFirstEditText($jumpWindow, "UIA loop A")) `
     "jump palette rejected live query input"
   Require ([GraphCodeUiaGateState]::PostPaletteRefresh($jumpWindow)) `
     "jump palette rejected deterministic live-filter refresh"
   Start-Sleep -Milliseconds 100
   $filteredJumpNames = @([GraphCodeUiaGateState]::GetListItems($jumpListHandle))
   Require (($filteredJumpNames.Count -eq 1) -and
-           ($filteredJumpNames[0] -match '(?s)^UIA loop B\nComposite · RUNNING · UIA project$')) `
+           ($filteredJumpNames[0] -match '(?s)^UIA loop A\nGoal · DONE · UIA project$')) `
     "jump palette did not live-filter to the ranked keyboard destination ($($filteredJumpNames -join '|'))"
   Require ([GraphCodeUiaGateState]::PostKeyboard($jumpWindow, 0x0D)) `
     "jump palette rejected Return activation"
@@ -9197,19 +9235,34 @@ try {
     if ($null -eq $remainingJump) { break }
   }
   Require ($null -eq $remainingJump) "Return did not activate and close the jump palette"
+  $jumpExpectedLoopBarId = Get-MultiProjectAutomationId "workspace-loop-bar" $dynamicProjectNodeIds[0]
+  $jumpExpectedToolbarId = Get-MultiProjectAutomationId "workspace-toolbar" $fixtureProjectPath
+  $jumpExpectedShowGraphId = Get-MultiProjectAutomationId "workspace-show-graph" "show-graph"
+  $jumpExpectedRowId = Get-MultiProjectAutomationId "loop" $fixtureProjectPath $dynamicProjectNodeIds[0]
+  $jumpWorkspace = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -cin @($jumpExpectedLoopBarId, $jumpExpectedToolbarId, $jumpExpectedShowGraphId) } `
+    { param($items) @($items).Count -eq 3 }
+  $jumpWorkspaceChildren = @($jumpWorkspace.Items)
   $loopsAfterJump = Find-FragmentById $root "loops" $rawWalker
-  $loopBAfterJump = @(Get-DirectChildren $loopsAfterJump $rawWalker |
-    Where-Object { $_.Current.Name -eq "UIA loop B" }) | Select-Object -First 1
-  Require ($null -ne $loopBAfterJump) "jump navigation did not retain the destination loop row"
-  $selectedAfterJump = $loopBAfterJump.GetCurrentPattern(
+  $jumpDestinationRows = @(Get-DirectChildren $loopsAfterJump $rawWalker |
+    Where-Object { $_.Current.AutomationId -ceq $jumpExpectedRowId })
+  Require ($jumpDestinationRows.Count -eq 1) "Jump did not retain exactly one destination loop row"
+  $selectedAfterJump = $jumpDestinationRows[0].GetCurrentPattern(
     [System.Windows.Automation.SelectionItemPattern]::Pattern
   ).Current.IsSelected
-  Require $selectedAfterJump "jump palette activation did not navigate to UIA loop B"
+  Assert-UiaJumpWorkspaceDestination $jumpWorkspaceChildren $jumpDestinationRows `
+    $selectedAfterJump $process.Id $jumpExpectedLoopBarId $jumpExpectedToolbarId `
+    $jumpExpectedShowGraphId $jumpExpectedRowId "UIA project" "UIA loop A"
   $jumpPaletteEvidence = [ordered]@{
     resultCount = $jumpNames.Count
     results = @($jumpNames | ForEach-Object { [string]$_ })
     filteredResults = @($filteredJumpNames | ForEach-Object { [string]$_ })
-    destination = [string]$loopBAfterJump.Current.Name
+    destination = [string]$jumpDestinationRows[0].Current.Name
+    destinationRow = [string]$jumpDestinationRows[0].Current.AutomationId
+    selected = $selectedAfterJump
+    workspaceLoopBar = $jumpExpectedLoopBarId
+    workspaceToolbar = $jumpExpectedToolbarId
+    showInGraph = $jumpExpectedShowGraphId
   }
   Write-Host ("UIA_JUMP_PALETTE_EVIDENCE=" + ($jumpPaletteEvidence | ConvertTo-Json -Compress))
 

@@ -11,6 +11,8 @@ finally { await TerminalSafety.PreserveRetainedAuthorityAsync(OwnedChildSupervis
 
 static async Task<int> RunAsync(string[] args)
 {
+    if (args.Length == 2 && args[0] == "--edit-buffer-fixture")
+        return GraphCode.Validation.Ui.Fixtures.PromptLookupFixture.RunEditBufferChild(args[1]);
     if (args.SequenceEqual(new[] { "--native-popup-effect-fixture" }))
         return GraphCode.Validation.Ui.NativeUiSuite.RunPopupEffects();
     if (HostFixture.TryRun(args) is int hostFixtureExit) return hostFixtureExit;

@@ -173,6 +173,8 @@ internal static class UiAdapterCases
     };
     internal static readonly string[] FunctionalIds =
     {
+        "ui.jump.workspace-destination-controls",
+        "ui.jump.edit-buffer-controls",
         "ui.connector.blank-title",
         "ui.connector.different-target-title",
         "ui.connector.duplicate-source",
