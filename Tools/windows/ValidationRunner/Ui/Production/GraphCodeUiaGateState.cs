@@ -155,8 +155,6 @@ public static class GraphCodeUiaGateState {
   private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   private static extern int GetClassName(IntPtr window, StringBuilder className, int capacity);
-  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-  private static extern bool SetWindowText(IntPtr window, string text);
   [DllImport("user32.dll")]
   private static extern int GetDlgCtrlID(IntPtr window);
   [DllImport("user32.dll")]
@@ -817,10 +815,7 @@ public static class GraphCodeUiaGateState {
   }
   public static bool SetFirstEditText(IntPtr parent, string text) {
     var edit = FindWindowEx(parent, IntPtr.Zero, "Edit", null);
-    if (edit == IntPtr.Zero || !SetWindowText(edit, text)) return false;
-    ulong command = ((ulong)0x0300 << 16) | (uint)GetDlgCtrlID(edit);
-    SendMessage(parent, 0x0111, (UIntPtr)command, edit);
-    return true;
+    return edit != IntPtr.Zero && SetEditTextById(parent, GetDlgCtrlID(edit), text);
   }
   public static bool SetEditTextById(IntPtr parent, int controlId, string text) {
     var edit = ControlById(parent, controlId);

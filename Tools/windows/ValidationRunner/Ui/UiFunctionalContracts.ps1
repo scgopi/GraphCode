@@ -48,6 +48,24 @@ Invoke-Functional 'ui.jump.workspace-destination-controls' {
   $count = Assert-JumpDestinationContract
   Assert-Functional ($count -eq 16) 'Shared Jump controls did not execute exactly 16 cases'
 } 16
+Invoke-Functional 'ui.jump.edit-buffer-controls' {
+  $shellErrors = $null
+  $shellAst = [Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $RepositoryRoot 'Tools\windows\Tests\WindowsShell.Tests.ps1'),
+    [ref]$null, [ref]$shellErrors)
+  Assert-Functional ($shellErrors.Count -eq 0) 'Shell edit-buffer acceptance source does not parse'
+  foreach ($name in @('Assert-Contract', 'Assert-JumpEditTextContract')) {
+    $definitions = @($shellAst.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+    }, $true))
+    Assert-Functional ($definitions.Count -eq 1) "Missing unique shared Jump edit-buffer control: $name"
+    . ([scriptblock]::Create($definitions[0].Extent.Text))
+  }
+  $repoRoot = $RepositoryRoot
+  $count = Assert-JumpEditTextContract
+  Assert-Functional ($count -eq 8) 'Shared Jump edit-buffer controls did not execute exactly eight cases'
+} 8
 foreach ($binding in @(
   @{ line = 5380; name = 'Test-MultiProjectSourceSupportedChromeId' },
   @{ line = 5407; name = 'Wait-MultiProjectWorkspaceMarkerPublication' },

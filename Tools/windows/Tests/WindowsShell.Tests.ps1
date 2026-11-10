@@ -294,6 +294,103 @@ function Assert-JumpDestinationContract {
 }
 
 $null = Assert-JumpDestinationContract
+
+function Assert-JumpEditTextContract {
+  $path = Join-Path $repoRoot "Tools\windows\ValidationRunner\Ui\Production\GraphCodeUiaGateState.cs"
+  $source = [IO.File]::ReadAllText($path)
+  $start = $source.IndexOf('  public static bool SetFirstEditText(')
+  $end = $source.IndexOf('  public static string EditTextById(', [Math]::Max(0, $start))
+  Assert-Contract ($start -ge 0 -and $end -gt $start) "Jump edit helpers must have one extractable production region"
+  $methods = $source.Substring($start, $end - $start)
+  Assert-Contract ([regex]::Matches($methods, 'public static bool SetFirstEditText\(').Count -eq 1 -and
+    [regex]::Matches($methods, 'public static bool SetEditTextById\(').Count -eq 1 -and
+    $methods -notmatch 'DllImport|System\.Windows\.Automation') "Jump edit fixture must contain only the two actual method bodies"
+  Add-Type -TypeDefinition (@'
+using System;
+public static class JumpEditTextFixture {
+  public static string Caption, Buffer, NotifiedBuffer;
+  public static int Notifications, Writes, ControlId, NotifiedId;
+  public static bool Missing, RefuseWrite;
+  public static void Reset() {
+    Caption = Buffer = "UIA loop B"; NotifiedBuffer = null;
+    Notifications = Writes = NotifiedId = 0; ControlId = 9904;
+    Missing = RefuseWrite = false;
+  }
+  private static IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string name) {
+    if (parent != new IntPtr(1) || after != IntPtr.Zero || cls != "Edit" || name != null)
+      throw new InvalidOperationException("Unexpected first-edit lookup");
+    return Missing ? IntPtr.Zero : new IntPtr(2);
+  }
+  private static int GetDlgCtrlID(IntPtr edit) {
+    if (edit != new IntPtr(2)) throw new InvalidOperationException("Wrong edit id lookup");
+    return ControlId;
+  }
+  private static IntPtr ControlById(IntPtr parent, int id) {
+    if (parent != new IntPtr(1) || id != ControlId)
+      throw new InvalidOperationException("Wrong parent or control id");
+    return Missing ? IntPtr.Zero : new IntPtr(2);
+  }
+  private static bool SetWindowText(IntPtr edit, string text) {
+    if (edit != new IntPtr(2)) throw new InvalidOperationException("Wrong caption target");
+    Caption = text; return true;
+  }
+  public static void CaptionOnly(string text) { SetWindowText(new IntPtr(2), text); }
+  private static IntPtr SendMessageString(IntPtr edit, uint message, UIntPtr wparam, string text) {
+    if (edit != new IntPtr(2) || message != 0x000C || wparam != UIntPtr.Zero)
+      throw new InvalidOperationException("Expected WM_SETTEXT to the actual edit");
+    if (RefuseWrite) return IntPtr.Zero;
+    Buffer = text; Writes++; return new IntPtr(1);
+  }
+  private static IntPtr SendMessage(IntPtr parent, uint message, UIntPtr command, IntPtr edit) {
+    if (parent != new IntPtr(1) || message != 0x0111 || edit != new IntPtr(2) ||
+        (command.ToUInt64() >> 16) != 0x0300)
+      throw new InvalidOperationException("Expected EN_CHANGE to the original parent");
+    Notifications++; NotifiedBuffer = Buffer; NotifiedId = (int)(command.ToUInt64() & 0xffff);
+    return IntPtr.Zero;
+  }
+'@ + $methods + "`n}")
+  $cases = @("caption-only", "query-A", "repeat-query", "empty-query", "unicode-query",
+    "missing-edit", "refused-write", "actual-control-id")
+  foreach ($name in $cases) {
+    [JumpEditTextFixture]::Reset()
+    if ($name -ceq "caption-only") {
+      [JumpEditTextFixture]::CaptionOnly("UIA loop A")
+      Assert-Contract ([JumpEditTextFixture]::Caption -ceq "UIA loop A" -and
+        [JumpEditTextFixture]::Buffer -ceq "UIA loop B" -and
+        [JumpEditTextFixture]::Notifications -eq 0) "caption-only negative control must leave the edit buffer unchanged"
+      continue
+    }
+    $text = "UIA loop A"
+    switch ($name) {
+      "repeat-query" {
+        Assert-Contract ([JumpEditTextFixture]::SetFirstEditText([IntPtr]1, "intermediate")) "first replacement must succeed"
+      }
+      "empty-query" { $text = "" }
+      "unicode-query" { $text = "loop " + [char]0x96EA }
+      "missing-edit" { [JumpEditTextFixture]::Missing = $true }
+      "refused-write" { [JumpEditTextFixture]::RefuseWrite = $true }
+      "actual-control-id" { [JumpEditTextFixture]::ControlId = 8123 }
+    }
+    $ok = [JumpEditTextFixture]::SetFirstEditText([IntPtr]1, $text)
+    if ($name -in @("missing-edit", "refused-write")) {
+      Assert-Contract (-not $ok -and [JumpEditTextFixture]::Writes -eq 0 -and
+        [JumpEditTextFixture]::Notifications -eq 0 -and
+        [JumpEditTextFixture]::Buffer -ceq "UIA loop B") "Jump edit refusal must not dispatch EN_CHANGE or change the buffer: $name"
+    } else {
+      $expected = if ($name -ceq "repeat-query") { 2 } else { 1 }
+      Assert-Contract ($ok -and [JumpEditTextFixture]::Buffer -ceq $text -and
+        [JumpEditTextFixture]::NotifiedBuffer -ceq $text -and
+        [JumpEditTextFixture]::NotifiedId -eq [JumpEditTextFixture]::ControlId -and
+        [JumpEditTextFixture]::Writes -eq $expected -and
+        [JumpEditTextFixture]::Notifications -eq $expected -and
+        [JumpEditTextFixture]::Caption -ceq "UIA loop B") "Jump must set the EDIT buffer before EN_CHANGE, not only its caption: $name"
+    }
+  }
+  Write-Host "UIA Jump edit-buffer contract: $($cases.Count) cases passed (intercepted actual methods; nativeCalls=0)"
+  return $cases.Count
+}
+
+$null = Assert-JumpEditTextContract
 if ($JumpDestinationOnly) { exit 0 }
 
 $shellSource = Get-Content $shellScript -Raw
