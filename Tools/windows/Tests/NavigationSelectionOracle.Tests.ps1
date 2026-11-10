@@ -81,7 +81,7 @@ $calls = @($ast.FindAll({
   $node -is [Management.Automation.Language.CommandAst] -and
     $node.GetCommandName() -ceq "Assert-UiaSingleNavigationSelection"
 }, $true))
-if ($calls.Count -ne 5) { throw "Live gate must check Graph, Quick Chats, project, loop and active chat selection" }
+if ($calls.Count -ne 6) { throw "Live gate must check five navigation destinations and each event transition readback" }
 $derivedAst = [Management.Automation.Language.Parser]::ParseFile(
   (Join-Path $RepositoryRoot "Tools\windows\ValidationRunner\Ui\UiDerivedContracts.ps1"),
   [ref]$null, [ref]$errors)
@@ -173,6 +173,51 @@ foreach ($case in @("live-binding", "live-alias-exclusion", "live-delayed-select
   $results.Add([pscustomobject]@{ name = $case; passed = $passed; error = $(if (-not $passed) { [string]$failure } else { "" }) })
 }
 $failed = @($results | Where-Object { -not $_.passed })
+$eventResults = [Collections.Generic.List[object]]::new()
+$eventDefinition = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -ceq "Assert-UiaNavigationSelectionEventReceipt"
+}, $true))
+if ($eventDefinition.Count -ne 1) { throw "Missing unique navigation event receipt oracle" }
+. ([scriptblock]::Create($eventDefinition[0].Extent.Text))
+foreach ($case in @("graph", "quick-chats", "project", "loop", "chat",
+    "zero", "duplicate", "wrong-id", "wrong-runtime", "foreign", "alias", "empty-runtime")) {
+  $index = switch ($case) { "quick-chats" { 1 } "project" { 2 } "loop" { 3 } "chat" { 4 } default { 0 } }
+  $expected = $ids[$index]
+  $receipt = [pscustomobject]@{ count = 1; id = $expected; runtime = "42,1"; process = 42 }
+  switch ($case) {
+    "zero" { $receipt.count = 0 }
+    "duplicate" { $receipt.count = 2 }
+    "wrong-id" { $receipt.id = "loop-row-99" }
+    "wrong-runtime" { $receipt.runtime = "42,99" }
+    "foreign" { $receipt.process = 99 }
+    "alias" { $receipt.id = "needs-you-row-1"; $expected = $receipt.id }
+    "empty-runtime" { $receipt.runtime = "" }
+  }
+  $failure = $null
+  try { Assert-UiaNavigationSelectionEventReceipt $receipt $expected "42,1" 42 } catch { $failure = $_ }
+  $passed = ($null -eq $failure) -eq ($case -cin @("graph", "quick-chats", "project", "loop", "chat"))
+  if ($failure -and $failure.Exception.Message -notlike "Navigation event:*") { $passed = $false }
+  $eventResults.Add([pscustomobject]@{ name = $case; passed = $passed })
+}
+$bindingSource = [IO.File]::ReadAllText((Join-Path $RepositoryRoot "Tools\windows\ValidationRunner\Ui\Production\GraphCodeUiaGateState.cs"))
+if ($bindingSource -notmatch '(?s)private static void HandleSelected\(.*?SelectionSourceProcessId = element.Current.ProcessId;.*?SelectedEvents\+\+;') {
+  throw "Navigation event process receipt must come from the actual UIA event sender before count publication"
+}
+$eventWrappers = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -ceq "Assert-UiaNavigationSelectionEvents"
+}, $true))
+if ($eventWrappers.Count -ne 1 -or
+    $eventWrappers[0].Extent.Text -notmatch 'AddAutomationEventHandler' -or
+    $eventWrappers[0].Extent.Text -notmatch 'RemoveAutomationEventHandler' -or
+    $eventWrappers[0].Extent.Text -notmatch 'Assert-UiaSingleNavigationSelection' -or
+    $gateSource -notmatch 'Assert-UiaNavigationSelectionEvents \$root \$rawWalker @\("overview-destination", "quick-chats-destination", \$dynamicInvokedProjectRow, \$dynamicInvokedLoopRow, \$firstQuickRowId\)') {
+  throw "Live navigation event subscription/readback must cover all five canonical destinations"
+}
+$eventComplete = $eventResults.Count -eq 12 -and @($eventResults | Where-Object { -not $_.passed }).Count -eq 0
 $complete = $results.Count -eq 27 -and @($results.name | Sort-Object -Unique).Count -eq 27 -and $failed.Count -eq 0
 $null = New-Item -ItemType Directory -Force -Path $ArtifactRoot
 $resultPath = Join-Path $ArtifactRoot ("navigation-oracle-" + [guid]::NewGuid().ToString("N") + ".json")
@@ -184,4 +229,9 @@ Write-Output ("UI_CASE_RESULT=" + ([ordered]@{
   executedCount = $results.Count; groups = @($results | Where-Object passed | ForEach-Object name)
   evidence = "Actual shared navigation snapshot oracle; source-derived in-memory observations; no UIA import or native calls"
 } | ConvertTo-Json -Compress))
-if (-not $complete) { exit 1 }
+Write-Output ("UI_CASE_RESULT=" + ([ordered]@{
+  id = "ui.navigation.selection-event-controls"; status = $(if ($eventComplete) { "Passed" } else { "Failed" })
+  executedCount = $eventResults.Count; groups = @($eventResults | Where-Object passed | ForEach-Object name)
+  evidence = "Actual navigation event receipt predicate and source-bound real handler wiring; nativeCalls=0"
+} | ConvertTo-Json -Compress))
+if (-not $complete -or -not $eventComplete) { exit 1 }

@@ -17,7 +17,7 @@ public static class SuiteRegistration
             "UI_CASE_RESULT=", new[] { "ui.navigation.headless-runner-plan" }, new[] { "-PlanOnly" }),
         new StandaloneSuites.CaseScriptSuite("ui.navigation-oracle-contracts",
             @"Tools\windows\Tests\NavigationSelectionOracle.Tests.ps1",
-            "UI_CASE_RESULT=", new[] { "ui.navigation.selection-snapshot-controls" })
+            "UI_CASE_RESULT=", new[] { "ui.navigation.selection-snapshot-controls", "ui.navigation.selection-event-controls" })
     }.Concat(UiAdapterCases.CreateSuites()).ToArray();
 }
 

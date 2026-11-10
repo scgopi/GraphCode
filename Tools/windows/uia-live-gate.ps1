@@ -2083,6 +2083,69 @@ function Assert-UiaSingleNavigationSelection($root, $walker, [string] $expectedI
   } | ConvertTo-Json -Compress -Depth 6))
 }
 
+function Assert-UiaNavigationSelectionEventReceipt($Receipt, [string] $ExpectedId, [string] $ExpectedRuntime, [int] $ProcessId) {
+  if (-not (Test-UiaCanonicalNavigationId $ExpectedId) -or $ProcessId -le 0 -or
+      [string]::IsNullOrWhiteSpace($ExpectedRuntime) -or $Receipt.count -ne 1 -or
+      $Receipt.id -cne $ExpectedId -or $Receipt.runtime -cne $ExpectedRuntime -or
+      $Receipt.process -ne $ProcessId) {
+    throw "Navigation event: expected exactly one owned canonical ElementSelected sender with the subscribed runtime identity"
+  }
+}
+
+function Assert-UiaNavigationSelectionEvents($root, $walker, [string[]] $Ids, [int] $ProcessId) {
+  Require ($Ids.Count -eq 5 -and @($Ids | Sort-Object -Unique).Count -eq 5) `
+    "Navigation events require five distinct canonical destinations"
+  foreach ($id in $Ids) {
+    Require (Test-UiaCanonicalNavigationId $id) "Navigation event target is an action alias"
+    $target = Find-FragmentById $root $id $walker
+    Require ($null -ne $target -and $target.Current.ProcessId -eq $ProcessId) `
+      "Navigation event target is missing or foreign"
+    $runtime = Get-RuntimeIdentity $target
+    $item = $target.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+    Require (-not $item.Current.IsSelected) "Navigation event must measure a transition, not idempotent Select"
+    $event = [System.Windows.Automation.SelectionItemPattern]::ElementSelectedEvent
+    $handler = [GraphCodeUiaGateState]::SelectedHandler
+    [GraphCodeUiaGateState]::SelectedEvents = 0
+    [GraphCodeUiaGateState]::SelectionSourceAutomationId = $null
+    [GraphCodeUiaGateState]::SelectionSourceRuntimeId = $null
+    [GraphCodeUiaGateState]::SelectionSourceProcessId = 0
+    $subscribed = $false
+    $primary = $null
+    try {
+      [System.Windows.Automation.Automation]::AddAutomationEventHandler(
+        $event, $target, [System.Windows.Automation.TreeScope]::Element, $handler)
+      $subscribed = $true
+      $clock = [Diagnostics.Stopwatch]::StartNew()
+      $item.Select()
+      while ($clock.ElapsedMilliseconds -lt 1000) { Start-Sleep -Milliseconds 25 }
+      $receipt = [pscustomobject]@{
+        count = [GraphCodeUiaGateState]::SelectedEvents
+        id = [GraphCodeUiaGateState]::SelectionSourceAutomationId
+        runtime = [GraphCodeUiaGateState]::SelectionSourceRuntimeId
+        process = [GraphCodeUiaGateState]::SelectionSourceProcessId
+      }
+      Write-Host ("UIA_NAVIGATION_SELECTION_EVENT_EVIDENCE=" + ([ordered]@{
+        expected = $id; expectedRuntime = $runtime; process = $ProcessId
+        event = "ElementSelected"; budgetMilliseconds = 1000; receipt = $receipt
+      } | ConvertTo-Json -Compress -Depth 4))
+      Assert-UiaNavigationSelectionEventReceipt $receipt $id $runtime $ProcessId
+      Assert-UiaSingleNavigationSelection $root $walker $id $ProcessId
+    } catch {
+      $primary = $_
+      throw
+    } finally {
+      if ($subscribed) {
+        try {
+          [System.Windows.Automation.Automation]::RemoveAutomationEventHandler($event, $target, $handler)
+        } catch {
+          if ($primary) { $primary.Exception.Data["NavigationEventUnsubscribeFailure"] = $_.Exception }
+          else { throw }
+        }
+      }
+    }
+  }
+}
+
 function Get-SidebarNavigationChildren(
   [System.Windows.Automation.AutomationElement] $root,
   [System.Windows.Automation.AutomationElement] $projects,
@@ -8042,6 +8105,9 @@ try {
   Assert-UiaSingleNavigationSelection $root $rawWalker $dynamicInvokedProjectRow $process.Id
   $activeLoopRow.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
   Assert-UiaSingleNavigationSelection $root $rawWalker $dynamicInvokedLoopRow $process.Id
+  Assert-UiaNavigationSelectionEvents $root $rawWalker @("overview-destination", "quick-chats-destination", $dynamicInvokedProjectRow, $dynamicInvokedLoopRow, $firstQuickRowId) $process.Id
+  $activeLoopRow = Find-FragmentById $root $dynamicInvokedLoopRow $rawWalker
+  $activeLoopRow.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
   Start-Sleep -Milliseconds 250
   $process.Refresh()
   $dynamicInvocationHasExited = $process.HasExited

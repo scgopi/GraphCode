@@ -155,6 +155,18 @@ fresh fixture directory on success or failure. It sends no input, changes no
 focus and calls no UIA API. This fixture establishes the helper's cross-process
 behavior, not the complete Jump destination workflow.
 
+The navigation oracle adapter also runs 12 headless event-receipt controls.
+The live gate separately subscribes to real `ElementSelected` handlers while
+selecting Graph, Quick Chats, a project, a loop and a chat, in that order.
+Each non-idempotent transition has one original one-second observation window
+and requires exactly one sender with the subscribed automation/runtime identity
+and owned process, followed by the shared single-selection/container readback.
+`UIA_NAVIGATION_SELECTION_EVENT_EVIDENCE` records each receipt; all five must
+pass in the current-source native gate. The loop is restored after the sequence.
+Worktrees events and the headless controls do not establish this live evidence.
+This sequence covers navigation `Select`/`ElementSelected`, not additional
+navigation event types or a broader accessibility claim.
+
 UIA, packaging contracts, shell ownership, and managed/native tests consume those
 same implementations. The loader verifies the exact file/type, worktree,
 current source and compiler-reference fingerprints, and loaded module identity.
