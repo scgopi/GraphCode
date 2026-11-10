@@ -24,6 +24,82 @@ public static class PromptLookupFixture {
   }
   private delegate IntPtr WindowProc(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam);
   private static readonly WindowProc procedure = DefWindowProc;
+  private static readonly WindowProc editProcedure = EditWindowProc;
+  private static IntPtr crossProcessEdit;
+  private static int editChanges;
+  private static string changedBuffer;
+  [StructLayout(LayoutKind.Sequential)]
+  private struct Message {
+    public IntPtr Window;
+    public uint Id;
+    public UIntPtr WParam;
+    public IntPtr LParam;
+    public uint Time;
+    public int X, Y;
+    public uint Private;
+  }
+  [DllImport("user32.dll", EntryPoint = "GetMessageW")]
+  private static extern int GetMessage(out Message message, IntPtr window, uint first, uint last);
+  [DllImport("user32.dll")]
+  private static extern bool TranslateMessage(ref Message message);
+  [DllImport("user32.dll", EntryPoint = "DispatchMessageW")]
+  private static extern IntPtr DispatchMessage(ref Message message);
+  [DllImport("user32.dll")]
+  private static extern void PostQuitMessage(int exitCode);
+  [DllImport("user32.dll", EntryPoint = "SetWindowTextW", CharSet = CharSet.Unicode)]
+  public static extern bool SetCaptionForRegression(IntPtr window, string text);
+  private static IntPtr EditWindowProc(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam) {
+    if (message == 0x0111 && (wparam.ToUInt64() >> 16) == 0x0300 && lparam == crossProcessEdit) {
+      editChanges++;
+      changedBuffer = GraphCodeUiaGateState.EditTextById(window, 9904);
+    }
+    if (message == 0x0010) {
+      PostQuitMessage(0);
+      return IntPtr.Zero;
+    }
+    return DefWindowProc(window, message, wparam, lparam);
+  }
+  public static int RunEditBufferChild(string root) {
+    if (!System.IO.Path.IsPathFullyQualified(root) || !System.IO.Directory.Exists(root))
+      throw new ArgumentException("Existing absolute owned fixture root required.");
+    var cls = new WindowClass { Name = "GraphCodeEditBufferFixture", Instance = GetModuleHandle(null),
+      Procedure = Marshal.GetFunctionPointerForDelegate(editProcedure) };
+    if (RegisterClass(ref cls) == 0)
+      throw new InvalidOperationException("Edit fixture registration failed: " + Marshal.GetLastWin32Error());
+    IntPtr parent = Create(cls.Name, IntPtr.Zero, 0);
+    Exception primary = null;
+    try {
+      crossProcessEdit = Create("EDIT", parent, 9904);
+      if (!GraphCodeUiaGateState.SetEditTextById(parent, 9904, "UIA loop B"))
+        throw new InvalidOperationException("Initial child edit buffer write failed.");
+      editChanges = 0;
+      changedBuffer = null;
+      using (var file = new System.IO.FileStream(System.IO.Path.Combine(root, "ready.json"),
+          System.IO.FileMode.CreateNew, System.IO.FileAccess.Write, System.IO.FileShare.None))
+        System.Text.Json.JsonSerializer.Serialize(file, new { pid = Environment.ProcessId, window = parent.ToInt64() });
+      using (System.IO.File.Open(System.IO.Path.Combine(root, "published"), System.IO.FileMode.CreateNew)) { }
+      int status;
+      while ((status = GetMessage(out var message, IntPtr.Zero, 0, 0)) > 0) {
+        TranslateMessage(ref message);
+        DispatchMessage(ref message);
+      }
+      if (status < 0) throw new InvalidOperationException("Edit fixture message pump failed.");
+      Console.WriteLine("EDIT_BUFFER_CHILD=" + System.Text.Json.JsonSerializer.Serialize(new {
+        pid = Environment.ProcessId, buffer = GraphCodeUiaGateState.EditTextById(parent, 9904),
+        changes = editChanges, observed = changedBuffer
+      }));
+      return 0;
+    } catch (Exception failure) {
+      primary = failure;
+      throw;
+    } finally {
+      if (!DestroyWindow(parent)) {
+        var failure = new InvalidOperationException("Edit fixture window cleanup failed.");
+        if (primary == null) throw failure;
+        throw new AggregateException("Edit fixture execution and window cleanup failed.", primary, failure);
+      }
+    }
+  }
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
   private struct WindowClass {
     public uint Style;

@@ -7,6 +7,126 @@ using GraphCode.Validation.Ui.Fixtures;
 
 namespace GraphCode.Validation.Ui;
 
+public sealed class EditBufferSuite : IValidationSuite
+{
+    public string Id => "ui.edit-buffer-cross-process";
+    public IReadOnlyList<string> UnitIds => [Id];
+
+    public async Task<IReadOnlyList<UnitResult>> RunAsync(ValidationContext context, CancellationToken cancellationToken)
+    {
+        string root = System.IO.Path.Combine(context.ArtifactRoot, "edit-buffer-" + Guid.NewGuid().ToString("N"));
+        System.IO.Directory.CreateDirectory(root);
+        string host = Environment.ProcessPath ?? throw new InvalidOperationException("Current executable unavailable.");
+        var start = new ProcessStartInfo(host)
+        {
+            UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = root,
+            RedirectStandardOutput = true, RedirectStandardError = true,
+            StandardOutputEncoding = new System.Text.UTF8Encoding(false, true),
+            StandardErrorEncoding = new System.Text.UTF8Encoding(false, true)
+        };
+        if (System.IO.Path.GetFileNameWithoutExtension(host).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+            start.ArgumentList.Add(System.Reflection.Assembly.GetEntryAssembly()!.Location);
+        start.ArgumentList.Add("--edit-buffer-fixture");
+        start.ArgumentList.Add(root);
+        start.Environment["TEMP"] = root;
+        start.Environment["TMP"] = root;
+        var run = Ownership.OwnedChildSupervisor.Start(start, TimeSpan.FromSeconds(20), root);
+        var completion = run.CompleteAsync(cancellationToken);
+        IntPtr window = IntPtr.Zero;
+        Exception? primary = null;
+        Ownership.OwnedChildResult? result = null;
+        int executed = 0;
+        try
+        {
+            var readyClock = Stopwatch.StartNew();
+            while (!System.IO.File.Exists(System.IO.Path.Combine(root, "published")))
+            {
+                if (completion.IsCompleted || readyClock.ElapsedMilliseconds >= 5000)
+                    throw new TimeoutException("Owned edit fixture did not publish readiness within five seconds.");
+                await Task.Delay(10, cancellationToken).ConfigureAwait(false);
+            }
+            using var ready = System.Text.Json.JsonDocument.Parse(
+                System.IO.File.ReadAllText(System.IO.Path.Combine(root, "ready.json")));
+            window = new IntPtr(ready.RootElement.GetProperty("window").GetInt64());
+            ActivationCases.Require(ready.RootElement.GetProperty("pid").GetUInt32() == run.ProcessId &&
+                run.ProcessId != Environment.ProcessId && !run.Observe().RootExited &&
+                GraphCodeUiaGateState.WindowProcessId(window) == run.ProcessId &&
+                GraphCodeUiaGateState.WindowClass(window) == "GraphCodeEditBufferFixture" &&
+                !GraphCodeUiaGateState.WindowIsVisible(window),
+                "Edit regression requires the hidden window of the original owned foreign process.");
+            executed++;
+            ActivationCases.Require(PromptLookupFixture.SetCaptionForRegression(
+                GraphCodeUiaGateState.ControlById(window, 9904), "caption decoy") &&
+                GraphCodeUiaGateState.EditTextById(window, 9904) == "UIA loop B",
+                "Caption-only negative control unexpectedly changed the foreign EDIT buffer.");
+            executed++;
+            ActivationCases.Require(GraphCodeUiaGateState.SetFirstEditText(window, "UIA loop A") &&
+                GraphCodeUiaGateState.EditTextById(window, 9904) == "UIA loop A",
+                "SetFirstEditText did not replace the foreign EDIT buffer with query A.");
+            executed++;
+        }
+        catch (Exception failure) { primary = failure; }
+        finally
+        {
+            try
+            {
+                if (window != IntPtr.Zero && !run.Observe().RootExited &&
+                    GraphCodeUiaGateState.WindowProcessId(window) == run.ProcessId &&
+                    !GraphCodeUiaGateState.PostClose(window))
+                    throw new InvalidOperationException("Owned edit fixture close message failed.");
+            }
+            catch (Exception failure)
+            {
+                if (primary is null) primary = failure;
+                else primary.Data["EditFixtureCloseFailure"] = failure;
+            }
+            try { result = await completion.ConfigureAwait(false); }
+            catch (Exception failure)
+            {
+                if (primary is null) primary = failure;
+                else primary.Data["EditFixtureCompletionFailure"] = failure;
+            }
+            try
+            {
+                using var proofFile = new System.IO.FileStream(System.IO.Path.Combine(root, "proof.json"),
+                    System.IO.FileMode.CreateNew, System.IO.FileAccess.Write, System.IO.FileShare.Read);
+                System.Text.Json.JsonSerializer.Serialize(proofFile, new {
+                    parentChecksBeforeChildReport = executed, pid = run.ProcessId, creationFileTime = run.CreationFileTime,
+                    exitCode = result?.ExitCode, cleanup = result?.Cleanup,
+                    retainedLeases = Ownership.OwnedChildSupervisor.RetainedLeaseCount,
+                    failure = primary?.ToString()
+                });
+            }
+            catch (Exception failure)
+            {
+                if (primary is null) primary = failure;
+                else primary.Data["EditFixtureProofFailure"] = failure;
+            }
+        }
+        if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+        if (result is null || result.ExitCode != 0 || !result.Cleanup.ResourcesClosed ||
+            !result.Cleanup.CanRelease || !string.IsNullOrWhiteSpace(result.StandardError))
+            throw new InvalidOperationException("Owned edit fixture failed exit/cleanup: " + result?.StandardError);
+        const string prefix = "EDIT_BUFFER_CHILD=";
+        string[] reports = System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Where(
+            result.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries),
+            line => line.StartsWith(prefix, StringComparison.Ordinal)));
+        ActivationCases.Require(reports.Length == 1, "Expected exactly one child buffer report.");
+        using var report = System.Text.Json.JsonDocument.Parse(reports[0][prefix.Length..]);
+        ActivationCases.Require(report.RootElement.GetProperty("pid").GetUInt32() == run.ProcessId &&
+            report.RootElement.GetProperty("buffer").GetString() == "UIA loop A" &&
+            report.RootElement.GetProperty("observed").GetString() == "UIA loop A" &&
+            report.RootElement.GetProperty("changes").GetInt32() > 0,
+            "Foreign message pump did not observe query A through EN_CHANGE.");
+        executed++;
+        Console.WriteLine("EDIT_BUFFER_REGRESSION=" + System.Text.Json.JsonSerializer.Serialize(new {
+            executed, cleanup = result.Cleanup, retainedLeases = Ownership.OwnedChildSupervisor.RetainedLeaseCount
+        }));
+        return [new UnitResult(Id, UnitStatus.Passed, executed,
+            "Real hidden cross-process EDIT buffer, caption-only negative control and child EN_CHANGE; no input/focus/UIA")];
+    }
+}
+
 public sealed class NativeUiSuite : IValidationSuite
 {
     public string Id => "ui.native";

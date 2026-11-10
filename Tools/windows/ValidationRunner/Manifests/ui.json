@@ -1,5 +1,8 @@
 {
   "units": [
+    { "id": "ui.jump.workspace-destination-controls", "owner": "Ui", "minimumCount": 16, "exactCount": 16, "requiredGroups": [] },
+    { "id": "ui.jump.edit-buffer-controls", "owner": "Ui", "minimumCount": 8, "exactCount": 8, "requiredGroups": [] },
+    { "id": "ui.edit-buffer-cross-process", "owner": "Ui", "minimumCount": 4, "exactCount": 4, "requiredGroups": [] },
     { "id": "ui.cards-pilot.target-valid", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.cards-pilot.foreign-project", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.cards-pilot.missing-target", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
@@ -36,6 +39,10 @@
     { "id": "ui.cards-pilot.zip-import-valid", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.cards-pilot.zip-flat-import-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.cards-pilot.zip-stale-identity-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
+    { "id": "ui.navigation.native-runner-safety", "owner": "Ui", "minimumCount": 16, "exactCount": 16,
+      "requiredGroups": ["vcvars", "where-cl", "compile", "compile-repeated-path", "timeout", "timeout-metadata",
+        "shared-budget", "expired-budget", "zero-budget", "zero-retention", "unknown-retention",
+        "unknown-diagnostic-failure", "invalid-byte-refusal", "missing-executable", "two-step-original-budget", "fake-summary"] },
     { "id": "ui.cards-pilot.zip-custody-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.cards-pilot.zip-spawn-scope-refused", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },
     { "id": "ui.cards-pilot.zip-quiescence-higher-total", "owner": "Ui", "minimumCount": 1, "requiredGroups": [] },

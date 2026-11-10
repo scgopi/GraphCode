@@ -9,6 +9,10 @@ using System.Text;
 using System.Threading.Tasks;
 
 public sealed class ShellOwnedLaunch {
+  [DllImport("kernel32.dll")]
+  static extern uint GetOEMCP();
+  public static int OemCodePage() { return checked((int)GetOEMCP()); }
+
   public static string SelectWorkingDirectory(ProcessStartInfo info) {
     return String.IsNullOrEmpty(info.WorkingDirectory) ? null : info.WorkingDirectory;
   }
@@ -141,6 +145,12 @@ public sealed class ShellOwnedLaunch {
   }
 
   public static ShellOwnedLaunch Suspended(ProcessStartInfo info) {
+    return Suspended(info, null, null);
+  }
+
+  public static ShellOwnedLaunch Suspended(ProcessStartInfo info, TextWriter standardOutputWriter,
+      TextWriter standardErrorWriter) {
+    // Supplied writers remain caller-owned until verified teardown and pipe EOF.
     if (info.UseShellExecute || !String.IsNullOrEmpty(info.Arguments))
       throw new InvalidOperationException("Owned launch requires UseShellExecute=false and ArgumentList.");
     var security = new Security { Length = Marshal.SizeOf<Security>(), Inherit = 1 };
@@ -202,8 +212,10 @@ public sealed class ShellOwnedLaunch {
       run.errorReader = new StreamReader(new FileStream(
         new Microsoft.Win32.SafeHandles.SafeFileHandle(errRead, true), FileAccess.Read));
       errRead = IntPtr.Zero;
-      run.outputCapture = new OutputCapture(run.outputReader, ForwardWriter(info.RedirectStandardOutput, Console.Out));
-      run.errorCapture = new OutputCapture(run.errorReader, ForwardWriter(info.RedirectStandardError, Console.Error));
+      run.outputCapture = new OutputCapture(run.outputReader,
+        standardOutputWriter ?? ForwardWriter(info.RedirectStandardOutput, Console.Out));
+      run.errorCapture = new OutputCapture(run.errorReader,
+        standardErrorWriter ?? ForwardWriter(info.RedirectStandardError, Console.Error));
       run.Output = run.outputCapture.Completion;
       run.Error = run.errorCapture.Completion;
       return run;
@@ -270,6 +282,13 @@ public sealed class ShellOwnedLaunch {
   public void Drain() {
     foreach (var task in new[] { Output, Error })
       if (task != null && !task.Wait(5000)) throw new InvalidOperationException("Owned output EOF is unproved.");
+  }
+  public void Drain(int timeoutMilliseconds) {
+    if (timeoutMilliseconds < 0) throw new ArgumentOutOfRangeException(nameof(timeoutMilliseconds));
+    var clock = Stopwatch.StartNew();
+    foreach (var task in new[] { Output, Error })
+      if (task != null && !task.Wait(Math.Max(0, timeoutMilliseconds - (int)clock.ElapsedMilliseconds)))
+        throw new InvalidOperationException("Owned output EOF is unproved.");
   }
   public void Close() {
     if (Handle != IntPtr.Zero) RequireExited();

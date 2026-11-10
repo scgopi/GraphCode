@@ -1,5 +1,7 @@
 {
   "units": [
+    { "id": "host.uia-held-launcher", "owner": "Host", "minimumCount": 16, "exactCount": 16,
+      "requiredGroups": ["actual-streams-and-binding", "actual-exit-failure", "actual-start-failure"] },
     { "id": "host.sdk-prerequisites", "owner": "Host", "minimumCount": 49, "exactCount": 49 },
     { "id": "host.admission-guards", "owner": "Host", "minimumCount": 65, "exactCount": 65 },
     { "id": "host.compiled-assembly-environment", "owner": "Host", "minimumCount": 7, "exactCount": 7 },

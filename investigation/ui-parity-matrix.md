@@ -39,6 +39,23 @@ Statuses:
   approved. Optional additions use enhancement tracking; an unwanted extra's
   removal is not a request to add an enhancement.
 
+## 2026-11-09 Jump acceptance preparation
+
+The Jump palette row remains **Partial** for [#799](https://github.com/scgopi/GraphCode/issues/799).
+The shared gate now queries the finished Goal fixture, not the Composite fixture,
+and requires its exact owned workspace loop bar, project toolbar, Show in Graph
+action and selected sidebar loop row. Selection on the project canvas alone
+cannot satisfy that oracle. Sixteen headless observation controls pass, including
+wrong destination/owner, duplicate identity, missing workspace and unselected-row
+refusals. The canonical compiled functional adapter passes 65 distinct units
+(122 counted executions); its selected report is explicitly incomplete, not
+full-host or native acceptance. The shell catalog remains 66 sections.
+
+No current-source desktop execution was admitted. Workspace mounting, actual
+daemon resume, composite group destination, blocked-loop notice, native input
+and paired visual parity remain unproved. These controls are acceptance
+preparation, not evidence that the pending product implementation passed.
+
 ## 2026-10-14 reference intake
 
 The primary local macOS recording is source

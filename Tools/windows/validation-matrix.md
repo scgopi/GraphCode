@@ -8,6 +8,7 @@ The Windows port must have runnable commands before implementation fleets begin.
 |---|---|
 | Windows investigation spikes | `pwsh Tools/windows/validate.ps1 -Task all` |
 | Compiled validation runner contract | `pwsh -NoProfile -File Tools\windows\Invoke-ValidationRunnerContract.ps1` (builds and runs the normal full C# entry; see [runner documentation](ValidationRunner/README.md)) |
+| Jump destination observation controls (no desktop/UIA calls) | `pwsh -NoProfile -File Tools\windows\Tests\WindowsShell.Tests.ps1 -JumpDestinationOnly` (16 destination fixtures; also executed by the shell gate and compiled `ui.functional-contracts` adapter) |
 | Explicit fixture compiler selection (controlled files and observations; no compiler/GUI execution) | `pwsh -NoProfile -File Tools\windows\Tests\FixtureCompiler.Tests.ps1 -ScratchRoot .build\fixture-compiler-contracts` (fresh directory required; 27 cases; also run by the canonical capture adapter before fresh preparation) |
 | Exclusive validation fixture directories (independent filesystem and static wiring contracts) | `pwsh -NoProfile -File Tools\windows\Tests\ValidationFixtureDirectory.Tests.ps1` |
 | Isolated 30-key process environment boundary | `pwsh -NoProfile -File Tools\windows\Tests\IsolatedProcessEnvironment.Contracts.Tests.ps1 -Phase REGRESSION` |
@@ -36,6 +37,28 @@ The Windows port must have runnable commands before implementation fleets begin.
 | macOS app/daemon/CLI | `make test` |
 | macOS format/lint | `make check` |
 | DCO commit range | `git log --format=%B <base>..HEAD` plus trailer validation |
+
+### Jump destination acceptance
+
+The finished Goal fixture is the leaf-workspace oracle; the Composite fixture
+opens a group and must not stand in for leaf mounting. The destination check
+requires exact owned loop-bar, project-toolbar and Show in Graph identities
+with visible nonempty bounds, plus the unique selected sidebar loop row.
+The 16 in-memory controls exercise the actual production observation helper,
+not native navigation. The functional adapter has no compiled-UIA import:
+its executed source/managed fixtures do not need a binding assembly, and the
+ordinary loader registers real UIA clientside providers. Its existing 64 units
+and the new exact-16 unit execute headlessly (65 distinct units, 122 counted
+executions). The full registry contains 685 unique units; that is an inventory,
+not a full-run result. Shell coverage remains 66 sections across 23/18/25.
+
+The selected canonical invocation is
+`ValidationRunner.exe --repository-root $PWD.Path --artifact-root $ownedFreshRoot --suite ui.functional-contracts`
+after the normal pinned build. It deliberately exits 1 with `complete=false`
+and `fullInvocation=false` because the other required units did not run.
+Require all 65 selected unit identities to pass; do not relabel this as the
+full CI-equivalent invocation. Full shell units still include native fixtures,
+and `-SkipTrayLive` is not headless admission.
 
 ### Validation-runner fixture ownership
 
@@ -75,6 +98,38 @@ known-file preflight: the case runner's `$Name` parameter shadowed the loop's
 assert one owned-file receipt and its preserved hash, and emit distinct
 `UNTRACKED_OWNED_FILE_PREFLIGHT_KIND` markers. Require both markers as well as a
 positive test count when interpreting that coverage.
+
+### Native accessibility runner admission
+
+The existing native entry now uses the compiled runner's
+`OwnedChildSupervisor.RunAsync` for discovery and the compile/test command.
+Both consume the same original `-TimeoutMilliseconds` clock (default 120000),
+with the supervisor's separate five-second bounded cleanup reserve. Targets
+start suspended under the original held handle/non-breakaway job; raw stdout
+and stderr, cleanup proof, timeout and codec context stay in fresh scratch.
+The runner never deletes that scratch, and UNKNOWN stops further work in a
+passive original-authority hold rather than closing or retrying the lease.
+A passive hold is not permission for an unbounded workload. A caller that
+later removes its enclosing validation directory can still remove successful
+evidence; runtime admission must separately account for that existing outer
+cleanup policy and preserve protected outputs.
+
+The headless harness has 16 distinct safety cases, including actual runner
+invocation with controlled abrupt/failing/timeout tools, partial stdout/stderr,
+metadata-report failure, two actual steps sharing one clock, a missing executable,
+invalid-byte refusal and a fake success-summary refusal. No real compiler or C++
+fixture executes in that harness. Its existing 25 failure-attribution checks and 14 compile-plan checks
+remain separate. The compiled safety suite is `ui.native-runner-safety`.
+
+The console-free `cmd` channel uses the observed Windows OEM code page;
+`vswhere -utf8` uses strict UTF-8. Raw bytes remain authoritative. Non-ASCII
+display diagnostics use explicitly labeled JSON escaping without changing
+console/OS code pages or rewriting the raw logs. The controlled non-ASCII path
+roundtrip does not prove that every compiler/descendant emits that codec or
+qualify all Unicode paths/MSVC diagnostics. The original UTF-8/OEM decode failure
+and subsequent nested-host decode failure remain failed evidence, distinct from
+the corrected passing run. Default native 280-check execution still requires
+specific runtime approval; the headless switch is not a desktop grant.
 
 ### Stable canvas card context menu
 
@@ -946,10 +1001,19 @@ evidence only. Main changes product and native image/window surfaces, so a new
 integrated source-bound build and separately admitted functional rerun are
 required before claiming this head is natively qualified.
 
-The normal default UIA gate sets synthetic fixture and
-connection-failure flags and uses its identity-file/PID-reopen launcher. It
-does not establish real-daemon/session restoration and is unchanged. The new
-route returns before that default path and uses `ShellProcessOwnership.psm1`
+The normal default UIA gate sets synthetic fixture and connection-failure
+flags. Its default and secondary-shell launch entry now uses
+`ShellProcessOwnership.psm1`: the original target starts suspended, joins its
+scope/private jobs before release, and registers the original generation-checked
+process while its native launch handle remains held. Caller-owned UTF-8 writers
+tee both independently drained streams into create-new logs before launch.
+UNKNOWN retains the scope and writers without retrying cleanup. Cleanup passes
+the original remaining budget through scope/job/root/pipe checks; stopwatch
+budgets do not guarantee kernel scheduling. The legacy multi-project launcher
+is unchanged and still has a separate PID-file path, so this correction must
+not be claimed for that route. Neither synthetic path establishes real-daemon
+session restoration. The restored-input route returns before that default path
+and uses `ShellProcessOwnership.psm1`
 suspended original launches and retained jobs, private profile/support/temp,
 explicit child environments with no inherited UIA or synthetic workspace flags,
 and normal production CLI commands. Since Swift's zmx locator ignores `PATH`,

@@ -45,8 +45,9 @@ function Invoke-ShellJob([string] $Operation, [IntPtr] $Job = [IntPtr]::Zero,
   }
 }
 
-function New-ShellSuspendedLaunch([Diagnostics.ProcessStartInfo] $StartInfo) {
-  [ShellOwnedLaunch]::Suspended($StartInfo)
+function New-ShellSuspendedLaunch([Diagnostics.ProcessStartInfo] $StartInfo,
+    [IO.TextWriter] $StandardOutputWriter, [IO.TextWriter] $StandardErrorWriter) {
+  [ShellOwnedLaunch]::Suspended($StartInfo, $StandardOutputWriter, $StandardErrorWriter)
 }
 
 function Test-ShellOwnershipUnproven($Failure) {
@@ -219,9 +220,13 @@ function New-ShellProcessScope {
   }
 }
 
-function Start-ShellOwnedProcess($Scope, [Diagnostics.ProcessStartInfo] $StartInfo) {
+function Start-ShellOwnedProcess($Scope, [Diagnostics.ProcessStartInfo] $StartInfo,
+    [IO.TextWriter] $StandardOutputWriter, [IO.TextWriter] $StandardErrorWriter) {
   if ($Scope.Closed) { throw "Owned shell scope is closed" }
-  try { $run = New-ShellSuspendedLaunch $StartInfo } catch {
+  try {
+    $run = New-ShellSuspendedLaunch $StartInfo `
+      -StandardOutputWriter $StandardOutputWriter -StandardErrorWriter $StandardErrorWriter
+  } catch {
     if (Test-ShellOwnershipUnproven $_) {
       throw (Set-ShellOwnershipUnproven $_.Exception -FailureRecord $_)
     }
@@ -310,18 +315,23 @@ function Receive-ShellOwnedOutput($Scope, [Diagnostics.Process] $Process,
   }
 }
 
-function Complete-ShellLaunch($Run) {
+function Complete-ShellLaunch($Run, [Nullable[int]] $TimeoutMilliseconds) {
   if ($Run.Finalized) { return }
+  $clock = [Diagnostics.Stopwatch]::StartNew()
   try {
     $Run.RequireExited()
     if ($Run.LaunchJob -ne [IntPtr]::Zero -and -not $Run.LaunchJobClosed) {
       Invoke-ShellJob "Terminate" $Run.LaunchJob
-      Invoke-ShellJob "Wait" $Run.LaunchJob
+      $remaining = if ($null -eq $TimeoutMilliseconds) { 5000 } else {
+        [Math]::Max(0, [int]$TimeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
+      }
+      Invoke-ShellJob "Wait" $Run.LaunchJob -TimeoutMilliseconds $remaining
       if ((Invoke-ShellJob "Active" $Run.LaunchJob) -ne 0) {
         throw "OWNED_CLEANUP_UNPROVEN: private launch job not empty"
       }
     }
-    $Run.Drain()
+    if ($null -eq $TimeoutMilliseconds) { $Run.Drain() }
+    else { $Run.Drain([Math]::Max(0, [int]$TimeoutMilliseconds - [int]$clock.ElapsedMilliseconds)) }
     if ($Run.LaunchJob -ne [IntPtr]::Zero -and -not $Run.LaunchJobClosed) {
       Invoke-ShellJob "Close" $Run.LaunchJob
       $Run.LaunchJobClosed = $true
@@ -346,22 +356,22 @@ function Complete-ShellOwnedProcess($Scope, [Diagnostics.Process] $Process) {
   Complete-ShellLaunch $runs[0]
 }
 
-function Close-ShellProcessScope($Scope) {
+function Close-ShellProcessScope($Scope, [ValidateRange(0, 5000)][int] $TimeoutMilliseconds = 5000) {
   if ($Scope.Closed) { return }
   $exitClock = [Diagnostics.Stopwatch]::StartNew()
   try {
     Invoke-ShellJob "Terminate" $Scope.Job
-    Invoke-ShellJob "Wait" $Scope.Job -TimeoutMilliseconds ([Math]::Max(0, 5000 - [int]$exitClock.ElapsedMilliseconds))
+    Invoke-ShellJob "Wait" $Scope.Job -TimeoutMilliseconds ([Math]::Max(0, $TimeoutMilliseconds - [int]$exitClock.ElapsedMilliseconds))
     if ((Invoke-ShellJob "Active" $Scope.Job) -ne 0) { throw "OWNED_CLEANUP_UNPROVEN: job not empty" }
     # Job accounting can reach zero before the original process objects signal.
     # Prove every held root within the same termination deadline before closing any.
     foreach ($run in $Scope.Runs) {
       if ($run.Finalized) { continue }
       if (-not $run.ScopeAssigned) { $run.Stop() }
-      $run.RequireExited([Math]::Max(0, 5000 - [int]$exitClock.ElapsedMilliseconds))
+      $run.RequireExited([Math]::Max(0, $TimeoutMilliseconds - [int]$exitClock.ElapsedMilliseconds))
     }
     foreach ($run in $Scope.Runs) {
-      Complete-ShellLaunch $run
+      Complete-ShellLaunch $run -TimeoutMilliseconds ([Math]::Max(0, $TimeoutMilliseconds - [int]$exitClock.ElapsedMilliseconds))
       $run.Close()
     }
     foreach ($member in $Scope.Members) { $member.Dispose() }

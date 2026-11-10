@@ -46,6 +46,8 @@ public static class StandaloneSuites
             "HOST_CASE_RESULT=", ["host.provider-build"]),
         new CaseScriptSuite("host.legacy-ownership.shell-scope", "Tools\\windows\\ValidationRunner\\Adapters\\LegacyOwnership.Contracts.ps1",
             "HOST_CASE_RESULT=", ["host.legacy-ownership.shell-scope"], ["-Contract", "shell-scope"]),
+        new CaseScriptSuite("host.uia-held-launcher", "Tools\\windows\\Tests\\UiaHeldLauncher.Tests.ps1",
+            "HOST_CASE_RESULT=", ["host.uia-held-launcher"]),
         new CaseScriptSuite("host.legacy-ownership.live-adapter", "Tools\\windows\\ValidationRunner\\Adapters\\LegacyOwnership.Contracts.ps1",
             "HOST_CASE_RESULT=", ["host.legacy-ownership.live-adapter"], ["-Contract", "live-adapter"]),
         new CaseScriptSuite("host.compiled-assembly-environment", "Tools\\windows\\ValidationRunner\\Adapters\\LegacyOwnership.Contracts.ps1",
