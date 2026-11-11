@@ -3,14 +3,16 @@
 Checks that the Windows parity ledger and open parity backlog stay synchronized.
 
 .DESCRIPTION
-The ledger's canonical rows end with `| Partial |`. Each Partial row must link
-an open `parity` issue either in the row itself or in the marked mapping table.
-Every open parity issue must have one P1/P2/P3 priority, at least one assignee,
-and evidence metadata in its body.
+The ledger has exactly 89 named canonical rows ending with `| Partial |`. Each
+Partial row must link an open `parity` issue either in the row itself or in the
+marked mapping table. Every open parity issue must map back to a row unless it
+has an explicit metadata/infrastructure exemption, and must have one P1/P2/P3
+priority, at least one assignee, and evidence metadata in its body.
 
-Use IssuesPath with a JSON array containing number, title, labels, assignees,
-and body fields to audit a captured snapshot. Without it, the script reads the
-current issue state through the GitHub CLI.
+Use IssuesPath with a JSON array containing number, state, title, labels,
+assignees, and body fields to audit a captured snapshot. Snapshot entries must
+be OPEN; missing or closed states fail closed. Without IssuesPath, the script
+reads the current open issue state through the GitHub CLI.
 #>
 [CmdletBinding()]
 param(
@@ -36,7 +38,7 @@ if ($IssuesPath) {
     --state open `
     --label parity `
     --limit 200 `
-    --json number,title,labels,assignees,body
+    --json number,state,title,labels,assignees,body
   if ($LASTEXITCODE -ne 0) {
     throw "GitHub CLI could not read open parity issues for $Repository."
   }
@@ -48,9 +50,111 @@ $openParity = @{}
 $errors = [System.Collections.Generic.List[string]]::new()
 $priorityNames = @("P1 layout", "P2 feature", "P3 polish")
 $evidencePattern = "Current Windows evidence/status|Still open / Partial|Windows today:|Evidence:|Evidence limits:"
+$expectedPartialRows = @(
+  "Main split view",
+  "Window toolbar",
+  "Jump palette",
+  "File/Loop/Terminal menus",
+  "Workspace lifecycle",
+  "Update command",
+  "Tray lifecycle",
+  "Connection failure presentation",
+  "Five-page onboarding",
+  "No-project Welcome detail",
+  "Empty global graph",
+  "Empty project canvas",
+  "Empty Quick Chats canvas",
+  "Graph row",
+  "Quick Chats group",
+  "Local/remote sections",
+  "Project rows",
+  "Nested loop tree",
+  "Loop row presentation",
+  "Project context menu",
+  "Loop context menu",
+  "Recent projects",
+  "Add Folder menu",
+  "Sidebar update banner",
+  "Sidebar error footer",
+  "Activity strip",
+  "Cross-project global graph",
+  "Folder lanes/bands",
+  "Notebook grid",
+  "Pan and anchored zoom",
+  "Zoom controls",
+  "New Loop canvas button",
+  "Composite breadcrumb",
+  "Canvas attention rail",
+  "Node positioning",
+  "Connector handles",
+  "Loop card identity",
+  "Loop card live detail",
+  "Loop card attention",
+  "Unwired card recovery",
+  "Worktree reclaim offer",
+  "Composite card actions",
+  "Edge presentation",
+  "Edge creation sheet",
+  "Custody child creation",
+  "Node creation sheet",
+  "Node update/rename",
+  "Delete confirmations",
+  "Canvas context menu",
+  "Sketch promotion",
+  "Quick Chats canvas",
+  "Quick Chat cards",
+  "Create chat",
+  "Rename chat",
+  "Delete chat",
+  "Chat workspace",
+  "Terminal VT state and rendering",
+  "Folder toolbar identity",
+  "Loop bar",
+  "Tab pills",
+  "Split controls",
+  "Pane headers",
+  "Right loop panel",
+  "Open Folder",
+  "Clone Repository sheet",
+  "Add Remote Repository sheet",
+  "Remote Connection info",
+  "Add Codespace sheet",
+  "Product Settings window",
+  "Project Settings sheet",
+  "Worktree sweep sheet",
+  "Worktree notice chip",
+  "Available update alert",
+  "Install progress",
+  "Relaunch prompt",
+  "Install failure",
+  "Loop rename",
+  "Loop delete",
+  "Chat rename/delete",
+  "Project delete loops",
+  "Project remove/trash",
+  "UI Automation tree",
+  "Keyboard discovery",
+  "Clipboard/selection",
+  "Per-monitor DPI",
+  "Dark visual language",
+  "Font rendering quality",
+  "Line/shape anti-aliasing",
+  "Color palette fidelity"
+)
 
 foreach ($issue in $issues) {
   $number = [int] $issue.number
+  $stateProperty = $issue.PSObject.Properties["state"]
+  if ($null -eq $stateProperty) {
+    $errors.Add("#$number snapshot entry has no state; expected OPEN.")
+    continue
+  }
+  $state = [string] $stateProperty.Value
+  if ($state -cne "OPEN") {
+    $errors.Add("#$number snapshot entry has state '$state'; expected OPEN.")
+    continue
+  }
+
   $labelNames = @($issue.labels | ForEach-Object { [string] $_.name })
   if ("parity" -notin $labelNames) {
     continue
@@ -74,7 +178,10 @@ foreach ($issue in $issues) {
 
 $ledgerLines = Get-Content -LiteralPath $LedgerPath
 $mappedByRow = @{}
+$exemptIssues = @{}
+$mappedIssues = @{}
 $insideMappingTable = $false
+$insideExemptionTable = $false
 foreach ($line in $ledgerLines) {
   if ($line -eq "<!-- parity-backlog-map:start -->") {
     $insideMappingTable = $true
@@ -84,7 +191,30 @@ foreach ($line in $ledgerLines) {
     $insideMappingTable = $false
     continue
   }
-  if (-not $insideMappingTable) {
+  if ($line -eq "<!-- parity-backlog-exempt:start -->") {
+    $insideExemptionTable = $true
+    continue
+  }
+  if ($line -eq "<!-- parity-backlog-exempt:end -->") {
+    $insideExemptionTable = $false
+    continue
+  }
+  if (-not $insideMappingTable -and -not $insideExemptionTable) {
+    continue
+  }
+
+  if ($insideExemptionTable) {
+    $exemption = [regex]::Match(
+      $line,
+      '^\|\s*\[#(?<number>\d+)\]\([^)]+\)\s*\|\s*(?<reason>.+?)\s*\|\s*$'
+    )
+    if ($exemption.Success) {
+      $number = [int] $exemption.Groups["number"].Value
+      if ($exemptIssues.ContainsKey($number)) {
+        $errors.Add("Open parity issue #$number has duplicate exemptions.")
+      }
+      $exemptIssues[$number] = $exemption.Groups["reason"].Value.Trim()
+    }
     continue
   }
 
@@ -115,6 +245,9 @@ foreach ($line in $ledgerLines) {
 
   $partialRows++
   $row = $rowMatch.Groups["row"].Value.Trim()
+  if ($partialRowNames.ContainsKey($row)) {
+    $errors.Add("Canonical Partial row '$row' appears more than once.")
+  }
   $partialRowNames[$row] = $true
   $linked = [System.Collections.Generic.List[int]]::new()
   foreach ($match in [regex]::Matches($line, '#(?<number>\d+)')) {
@@ -130,7 +263,7 @@ foreach ($line in $ledgerLines) {
   foreach ($number in $linked) {
     if ($openParity.ContainsKey($number)) {
       $hasOpenMapping = $true
-      break
+      $mappedIssues[$number] = $true
     }
   }
   if (-not $hasOpenMapping) {
@@ -138,21 +271,44 @@ foreach ($line in $ledgerLines) {
   }
 }
 
-if ($partialRows -eq 0) {
-  $errors.Add("The ledger contains no canonical Partial rows.")
+if ($partialRows -ne 89) {
+  $errors.Add("The ledger has $partialRows canonical Partial rows; expected 89.")
+}
+if ($partialRowNames.Count -ne 89) {
+  $errors.Add("The ledger has $($partialRowNames.Count) unique canonical Partial row identities; expected 89.")
+}
+foreach ($expectedRow in $expectedPartialRows) {
+  if (-not $partialRowNames.ContainsKey($expectedRow)) {
+    $errors.Add("Canonical Partial row '$expectedRow' is missing.")
+  }
+}
+foreach ($actualRow in $partialRowNames.Keys) {
+  if ($actualRow -notin $expectedPartialRows) {
+    $errors.Add("Canonical Partial row '$actualRow' is not in the expected identity set.")
+  }
 }
 
 foreach ($row in $mappedByRow.Keys) {
   if (-not $partialRowNames.ContainsKey($row)) {
     $errors.Add("Mapping table row '$row' is not a canonical Partial row.")
   }
-  if ($mappedByRow[$row].Count -ne 1) {
-    $errors.Add("Mapping table row '$row' has $($mappedByRow[$row].Count) issues; expected exactly one.")
-  }
   foreach ($number in $mappedByRow[$row]) {
     if (-not $openParity.ContainsKey($number)) {
       $errors.Add("Mapping table row '$row' references #$number, which is not an open parity issue.")
+    } else {
+      $mappedIssues[$number] = $true
     }
+  }
+}
+
+foreach ($number in $exemptIssues.Keys) {
+  if (-not $openParity.ContainsKey($number)) {
+    $errors.Add("Exemption #$number is not an open parity issue.")
+  }
+}
+foreach ($number in $openParity.Keys) {
+  if (-not $mappedIssues.ContainsKey($number) -and -not $exemptIssues.ContainsKey($number)) {
+    $errors.Add("Open parity issue #$number is neither mapped to a Partial row nor explicitly exempt.")
   }
 }
 
