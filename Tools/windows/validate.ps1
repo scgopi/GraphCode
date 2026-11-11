@@ -97,6 +97,7 @@ if ($List) {
 }
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
+. (Join-Path $repoRoot "Tools\windows\CandidateAdmission.ps1")
 
 function Resolve-SwiftExecutable {
   if ($SwiftExecutable) {
@@ -370,12 +371,19 @@ function Invoke-WindowsShellValidationIsolation(
   [string] $UserProfileRoot = $env:USERPROFILE,
   [string] $LocalAppDataRoot = $env:LOCALAPPDATA
 ) {
+  $validationParent = if ($ValidationRootParent) {
+    [IO.Path]::GetFullPath($ValidationRootParent)
+  } else {
+    Join-Path $WorkspaceRoot ".build\windows-shell-validation"
+  }
+  Assert-WindowsShellCandidateEnvironment
+  Assert-WindowsShellValidationRootsFresh -Parent $validationParent
   $defaultSupport = Join-Path $UserProfileRoot ".graphcode"
   $defaultLocalAppData = Join-Path $LocalAppDataRoot "GraphCode"
   $supportBefore = Get-WindowsShellProfileSnapshot $defaultSupport
   $localAppDataBefore = Get-WindowsShellProfileSnapshot $defaultLocalAppData
   $validationRoot = if ($ValidationRootParent) {
-    $parent = [IO.Path]::GetFullPath($ValidationRootParent)
+    $parent = $validationParent
     New-Item -ItemType Directory -Force -Path $parent | Out-Null
     Join-Path $parent ([guid]::NewGuid().ToString("N"))
   } else {
@@ -1245,7 +1253,8 @@ function Invoke-Task([string] $name) {
       $isolationResults = Invoke-Pester `
         -Path @(
           (Join-Path $repoRoot "Tools\windows\Tests\ValidationIsolation.Tests.ps1"),
-          (Join-Path $repoRoot "Tools\windows\Tests\CompiledValidationEnvironment.Tests.ps1")
+          (Join-Path $repoRoot "Tools\windows\Tests\CompiledValidationEnvironment.Tests.ps1"),
+          (Join-Path $repoRoot "Tools\windows\Tests\CandidateAdmission.Tests.ps1")
         ) `
         -PassThru
       if ($isolationResults.TotalCount -le 0 -or
@@ -1272,31 +1281,14 @@ function Invoke-Task([string] $name) {
             sessionId = [int]$_.SessionId
           }
         }) -Compress -Depth 4))
-      $zig0152 = Resolve-ZigVersion "0.15.2" "GRAPHCODE_ZIG0152"
-      $runShellUnit = $ShellPart -ne "integration"
-      $runShellIntegration = $ShellPart -ne "unit"
-      if ($runShellIntegration) {
-        $swift = Resolve-SwiftExecutable
-        Initialize-SwiftEnvironment $swift
-        $daemonRuntime = Build-SwiftReleaseRuntime $swift "shell daemon handoff"
-      }
-      $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
-      $winghosttyRoot = [Environment]::GetEnvironmentVariable(
-        "GRAPHCODE_WINGHOSTTY_ROOT"
-      )
-      if (-not $winghosttyRoot) {
-        $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
-      }
-      $zmxRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_ZMX_ROOT")
-      if (-not $zmxRoot) {
-        $zmxRoot = Join-Path $depotRoot "zmx-worktrees\quickchat-hang"
-      }
-      if (-not (Test-Path -LiteralPath $winghosttyRoot -PathType Container) -or
-        -not (Test-Path -LiteralPath $zmxRoot -PathType Container)) {
-        throw "Windows shell provider worktrees unavailable; real smoke is mandatory."
-      }
-      $pins = Get-Content (Join-Path $repoRoot "graphcode-windows\provider-pins.json") -Raw |
-        ConvertFrom-Json
+      $providerRoots = Resolve-ProviderRoots "zmx-worktrees\quickchat-hang" "Windows shell validation"
+      $zig0152 = $providerRoots.Zig0152
+      $zig0160 = $providerRoots.Zig0160
+      $winghosttyRoot = $providerRoots.Winghostty
+      $zmxRoot = $providerRoots.Zmx
+      $pins = Read-SemanticSource (
+        Join-Path $repoRoot "graphcode-windows\provider-pins.json"
+      ) | ConvertFrom-Json
       if (-not (Test-Path -LiteralPath (Join-Path $winghosttyRoot ".git"))) {
         throw "Winghostty provider root is not a Git worktree: $winghosttyRoot"
       }
@@ -1308,6 +1300,40 @@ function Invoke-Task([string] $name) {
       if ($LASTEXITCODE -ne 0 -or $actualWinghosttyPin -ne $pins.winghostty.sha) {
         throw "Winghostty provider does not match the pinned commit"
       }
+      $runShellUnit = $ShellPart -ne "integration"
+      $runShellIntegration = $ShellPart -ne "unit"
+      if ($runShellIntegration) {
+        $swift = Resolve-SwiftExecutable
+        Initialize-SwiftEnvironment $swift
+        $daemonRuntime = Build-SwiftReleaseRuntime $swift "shell daemon handoff"
+      }
+      $bindingDirectory = Split-Path $env:GRAPHCODE_VALIDATION_ASSEMBLY -Parent
+      $bindingPaths = @(
+        $env:GRAPHCODE_VALIDATION_ASSEMBLY,
+        (Join-Path $bindingDirectory "ValidationFixtureBindings.dll"),
+        (Join-Path $bindingDirectory "WindowsValidationBindings.dll")
+      ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+      $manifestPaths = Get-WindowsShellCandidateManifestPaths -WorkspaceRoot $repoRoot
+      $candidateAdmission = Write-WindowsShellCandidateAdmission `
+        -WorkspaceRoot $repoRoot `
+        -ValidationRoot $env:GRAPHCODE_VALIDATION_ROOT `
+        -BindingPaths $bindingPaths `
+        -WinghosttyRoot $winghosttyRoot `
+        -ZmxRoot $zmxRoot `
+        -Zig0152 $zig0152 `
+        -Zig0160 $zig0160 `
+        -ManifestPaths $manifestPaths `
+        -SourcePaths @(
+          (Join-Path $repoRoot "Tools\windows\validate.ps1"),
+          (Join-Path $repoRoot "Tools\windows\CandidateAdmission.ps1"),
+          (Join-Path $repoRoot "Tools\windows\SourceReader.ps1"),
+          (Join-Path $repoRoot "Tools\windows\Build-CompiledValidationRunner.ps1"),
+          (Join-Path $repoRoot "Tools\windows\Import-CompiledValidationAssembly.ps1"),
+          (Join-Path $repoRoot "Tools\windows\ValidationRunner\Ownership\OwnedChildSupervisor.cs"),
+          (Join-Path $repoRoot "Tools\windows\ValidationRunner\Ownership\OwnedByteStreamCapture.cs")
+        )
+      Write-Host "WINDOWS_SHELL_CANDIDATE_ADMISSION_SHA256=$($candidateAdmission.Sha256)"
+      Write-Host "WINDOWS_SHELL_CANDIDATE_ADMISSION_JSON=$($candidateAdmission.Json)"
       Invoke-Native "Pinned Winghostty host build for App contracts" {
         Push-Location $winghosttyRoot
         try { & $zig0152 build -Demit-win32-host=true } finally { Pop-Location }
@@ -1340,7 +1366,6 @@ function Invoke-Task([string] $name) {
       }
       # The unit part ends here; `break` leaves this switch clause only.
       if (-not $runShellIntegration) { break }
-      $zig0160 = Resolve-ZigVersion "0.16.0" "GRAPHCODE_ZIG0160"
       Invoke-Native "Pinned GraphCode Windows shell build and smoke" {
         & (Join-Path $repoRoot "Tools\windows\windows-shell.ps1") `
           -WinghosttyRoot $winghosttyRoot `

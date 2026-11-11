@@ -9,6 +9,9 @@ public interface IUiaInputOperations {
   uint WindowProcessId(IntPtr window);
   bool WindowIsVisible(IntPtr window);
   bool WindowIsEnabled(IntPtr window);
+  IntPtr WindowOwner(IntPtr window);
+  string WindowClass(IntPtr window);
+  string WindowTitle(IntPtr window);
   IntPtr GetForegroundWindow();
   IntPtr FocusedControlInDialog(IntPtr window);
   IntPtr GetAncestor(IntPtr window, uint flags);
@@ -66,6 +69,8 @@ public struct KeyInputRecord {
     public uint Pad0, Pad1;
   }
 public sealed class PopupItemHit {
+    public PopupCompletion Completion { get; set; }
+    public IntPtr ModalWindow { get; set; }
     public PopupInputReceipt InputReceipt { get; set; }
     public int Position, ItemId, Left, Top, Right, Bottom;
     public int ScreenX, ScreenY, ClientX, ClientY, CursorBeforeX, CursorBeforeY;
@@ -73,6 +78,7 @@ public sealed class PopupItemHit {
     public bool Hilite, UsedKeyboardFallback, UsedSelectItemFallback;
     public bool HiliteAtEnterFallback, HiliteBeforeEnter;
   }
+public enum PopupCompletion { InputReceiptOnly, ExpectedOwnedModal }
 public sealed class PopupInputSample {
     public string Phase { get; set; }
     public long Timestamp { get; set; }
@@ -281,13 +287,19 @@ public static bool IsOwnedPopupInput(
 public PopupItemHit ClickPopupMenuItem(IntPtr popup, IntPtr owner, int position, int commandId, uint expectedProcessId) {
     return ClickPopupMenuItemCore(popup, owner, position, commandId, expectedProcessId, true);
   }
+public PopupItemHit ClickPopupMenuItemForModal(IntPtr popup, IntPtr owner, int position, int commandId,
+    uint expectedProcessId, string expectedModalTitle) {
+    if (String.IsNullOrWhiteSpace(expectedModalTitle))
+      throw new ArgumentException("An exact expected modal title is required", nameof(expectedModalTitle));
+    return ClickPopupMenuItemCore(popup, owner, position, commandId, expectedProcessId, false, expectedModalTitle);
+  }
 public PopupItemHit ClickPopupMenuItemStrict(IntPtr popup, IntPtr owner, int position, int commandId, uint expectedProcessId) {
     var hit = ClickPopupMenuItemCore(popup, owner, position, commandId, expectedProcessId, false);
     if (hit == null)
       throw new InvalidOperationException("Strict popup target identity or geometry is invalid; no input was injected");
     return hit;
   }
-private PopupItemHit ClickPopupMenuItemCore(IntPtr popup, IntPtr owner, int position, int commandId, uint expectedProcessId, bool allowFallback) {
+private PopupItemHit ClickPopupMenuItemCore(IntPtr popup, IntPtr owner, int position, int commandId, uint expectedProcessId, bool allowFallback, string expectedModalTitle = null) {
     PopupInputReceipt receipt = Environment.GetEnvironmentVariable("GRAPHCODE_UIA_GATE") == "1" &&
       Environment.GetEnvironmentVariable("GRAPHCODE_UIA_EDGE_ACTION_TRACE") == "1"
       ? new PopupInputReceipt() : null;
@@ -410,6 +422,29 @@ private PopupItemHit ClickPopupMenuItemCore(IntPtr popup, IntPtr owner, int posi
     }
     if (!hilite)
       throw new InvalidOperationException("Popup item did not acknowledge hover before click");
+    PopupItemHit CompletedModal() {
+      if (expectedModalTitle == null) return null;
+      IntPtr modal = operations.GetForegroundWindow();
+      IntPtr root = operations.GetAncestor(modal, 2);
+      if (root == owner || root == popup) return null;
+      if (modal == IntPtr.Zero || modal != root ||
+          !operations.IsRetainedProcessAlive(expectedProcessId) ||
+          operations.WindowProcessId(owner) != expectedProcessId ||
+          operations.WindowProcessId(modal) != expectedProcessId ||
+          operations.WindowOwner(modal) != owner ||
+          !String.Equals(operations.WindowClass(modal), "GraphCodeSheetHost", StringComparison.Ordinal) ||
+          !String.Equals(operations.WindowTitle(modal), expectedModalTitle, StringComparison.Ordinal) ||
+          !operations.WindowIsVisible(modal) || !operations.WindowIsEnabled(modal) ||
+          operations.IsWindowVisible(popup) || operations.GetForegroundWindow() != modal ||
+          operations.WindowProcessId(modal) != expectedProcessId || operations.WindowOwner(modal) != owner)
+        throw new InvalidOperationException("Popup input ownership changed; expected modal identity was not proved");
+      return new PopupItemHit {
+        Completion = PopupCompletion.ExpectedOwnedModal, ModalWindow = modal, InputReceipt = receipt,
+        Position = position, ItemId = commandId, Left = item.Left, Top = item.Top, Right = item.Right, Bottom = item.Bottom,
+        ScreenX = screenX, ScreenY = screenY, ClientX = point.X, ClientY = point.Y,
+        CursorBeforeX = before.X, CursorBeforeY = before.Y, CursorAtX = at.X, CursorAtY = at.Y, Hilite = hilite
+      };
+    }
     var inputs = new[] {
       new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0002 } },
       new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0004 } }
@@ -432,6 +467,16 @@ private PopupItemHit ClickPopupMenuItemCore(IntPtr popup, IntPtr owner, int posi
     ObserveInput("after-send", (uint)inputs.Length, sent);
     if (sent != inputs.Length)
       throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} popup mouse events: Win32Error={2}", sent, inputs.Length, Marshal.GetLastWin32Error()));
+    if (expectedModalTitle != null) {
+      for (int attempt = 0; attempt < 20; attempt++) {
+        var completedModal = CompletedModal();
+        if (completedModal != null) return completedModal;
+        operations.Sleep(10);
+      }
+      var finalModal = CompletedModal();
+      if (finalModal != null) return finalModal;
+      throw new InvalidOperationException("Popup pointer input did not produce the exact expected owned modal; no fallback input was injected");
+    }
     for (int attempt = 0; attempt < 20 && operations.IsWindowVisible(popup); attempt++) operations.Sleep(10);
     if (receipt != null && !operations.IsWindowVisible(popup))
       ObserveInput("popup-closed", (uint)inputs.Length, sent);
@@ -446,6 +491,7 @@ private PopupItemHit ClickPopupMenuItemCore(IntPtr popup, IntPtr owner, int posi
       // item ends TrackPopupMenu with command 0: the popup closes exactly as if
       // the item had been chosen, but no command reaches the shell. Re-assert
       // the intended item and prove its hilite immediately before Enter.
+      RequireOwnedPopupForeground(popup, owner, expectedProcessId);
       hiliteAtEnterFallback = ReadMenuHilite();
       operations.SendMessage(popup, 0x01E5, (UIntPtr)position, IntPtr.Zero);
       hiliteBeforeEnter = ReadMenuHilite();

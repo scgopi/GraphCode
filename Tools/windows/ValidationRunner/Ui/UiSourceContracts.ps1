@@ -4,13 +4,11 @@ param(
   [Parameter(Mandatory)][string] $AssemblyPath
 )
 $ErrorActionPreference = 'Stop'
-function ConvertTo-SourceLineEndings([string] $Source) {
-  return $Source.Replace("`r`n", "`n")
-}
+. (Join-Path $RepositoryRoot 'Tools\windows\SourceReader.ps1')
 $uiRoot = Join-Path $RepositoryRoot 'Tools\windows\ValidationRunner\Ui'
-$activation = [IO.File]::ReadAllText((Join-Path $RepositoryRoot 'Tools\windows\UiaWindowActivation.cs'))
-$gate = [IO.File]::ReadAllText((Join-Path $uiRoot 'Production\GraphCodeUiaGateState.cs'))
-$inputSource = ConvertTo-SourceLineEndings ([IO.File]::ReadAllText((Join-Path $uiRoot 'Production\UiaInputSafety.cs')))
+$activation = Read-SemanticSource (Join-Path $RepositoryRoot 'Tools\windows\UiaWindowActivation.cs')
+$gate = Read-SemanticSource (Join-Path $uiRoot 'Production\GraphCodeUiaGateState.cs')
+$inputSource = Read-SemanticSource (Join-Path $uiRoot 'Production\UiaInputSafety.cs')
 $results = [Collections.Generic.List[object]]::new()
 
 function Assert-UiContract([bool] $Condition, [string] $Message) {
@@ -84,6 +82,7 @@ function Confirm-PopupSource([string] $Source) {
   try {
     $default = Read-CSharpMethod $Source 'public PopupItemHit ClickPopupMenuItem('
     $strict = Read-CSharpMethod $Source 'public PopupItemHit ClickPopupMenuItemStrict('
+    $modal = Read-CSharpMethod $Source 'public PopupItemHit ClickPopupMenuItemForModal('
     $click = Read-CSharpMethod $Source 'private PopupItemHit ClickPopupMenuItemCore('
   } catch { return $false }
   if ([regex]::Matches($default, '\bClickPopupMenuItemCore\(').Count -ne 1 -or
@@ -93,10 +92,13 @@ function Confirm-PopupSource([string] $Source) {
       -not $strict.Contains('if (hit == null)') -or
       -not $strict.Contains('throw new InvalidOperationException("Strict popup target identity or geometry is invalid; no input was injected");') -or
       -not $strict.Contains('return hit;') -or
-      ($default + $strict) -match '\b(SendInput|PostMessage|SetForegroundWindow|SetFocus|BringWindowToTop)\(') { return $false }
+      [regex]::Matches($modal, '\bClickPopupMenuItemCore\(').Count -ne 1 -or
+      -not $modal.Contains('if (String.IsNullOrWhiteSpace(expectedModalTitle))') -or
+      -not $modal.Contains('return ClickPopupMenuItemCore(popup, owner, position, commandId, expectedProcessId, false, expectedModalTitle);') -or
+      ($default + $strict + $modal) -match '\b(SendInput|PostMessage|SetForegroundWindow|SetFocus|BringWindowToTop)\(') { return $false }
   if ([regex]::Matches($click, '\boperations\.SendInput\(').Count -ne 1 -or
-      [regex]::Matches($click, 'RequireOwnedPopupForeground\(popup, owner, expectedProcessId\);').Count -ne 2 -or
-      -not $click.Contains('int commandId, uint expectedProcessId, bool allowFallback)') -or
+      [regex]::Matches($click, 'RequireOwnedPopupForeground\(popup, owner, expectedProcessId\);').Count -ne 3 -or
+      -not $click.Contains('int commandId, uint expectedProcessId, bool allowFallback, string expectedModalTitle = null)') -or
       $click -match '\b(SetForegroundWindow|SetFocus|BringWindowToTop)\(') { return $false }
   $offset = 0
   foreach ($needle in @(
@@ -135,7 +137,7 @@ $rootEvaluator = @($rootAst.FindAll({ param($node)
 }, $true))
 Assert-UiContract ($rootPopup.Count -eq 1 -and $rootEvaluator.Count -eq 1) `
   'Actual declarative popup predicate or evaluator is missing or duplicated'
-$gateSource = [IO.File]::ReadAllText((Join-Path $RepositoryRoot 'Tools\windows\uia-live-gate.ps1'))
+$gateSource = Read-SemanticSource (Join-Path $RepositoryRoot 'Tools\windows\uia-live-gate.ps1')
 $rootPopupResults = [Collections.Generic.List[bool]]::new()
 function Confirm-RootPopupSource([string] $Source) {
   $rootResources = @{ gate = $gateSource; 'input-safety' = $Source }
@@ -170,7 +172,7 @@ foreach ($case in $popupCases) {
         '      ObserveInput("popup-closed", (uint)inputs.Length, sent);'
       $lfSource = $inputSource.Replace("`r`n", "`n")
       foreach ($checkoutSource in @($lfSource, $lfSource.Replace("`n", "`r`n"))) {
-        $normalizedSource = ConvertTo-SourceLineEndings $checkoutSource
+        $normalizedSource = ConvertTo-SemanticSourceText $checkoutSource
         Assert-UiContract ([regex]::Matches($normalizedSource, [regex]::Escape($closureObservation)).Count -eq 1) `
           'LF and CRLF checkouts must identify exactly one production closure observation'
         Assert-UiContract ((Confirm-PopupSource $normalizedSource) -and (Confirm-RootPopupSource $normalizedSource)) `
@@ -234,11 +236,18 @@ foreach ($case in $popupCases) {
         @{ from = 'if (hit == null)'; to = 'if (false)' },
         @{ from = 'return hit;'; to = 'return ClickPopupMenuItemCore(popup, owner, position, commandId, expectedProcessId, false);' },
         @{ from = 'private PopupItemHit ClickPopupMenuItemCore('; to = 'private PopupItemHit UnsharedPopupCore(' }
+        @{ from = 'expectedProcessId, false, expectedModalTitle);'; to = 'expectedProcessId, true, expectedModalTitle);' }
+        @{ from = 'if (String.IsNullOrWhiteSpace(expectedModalTitle))'; to = 'if (false)' }
       )) {
         Assert-UiContract ($inputSource.Contains($mutation.from)) 'Popup forwarding mutation did not change production source'
         Assert-UiContract (-not (Confirm-PopupSource $inputSource.Replace($mutation.from, $mutation.to))) `
           'Popup source contract accepted an unshared, fallback-enabled, non-refusing or replayed forwarding route'
       }
+      $nativeBindings = Read-SemanticSource (Join-Path $RepositoryRoot 'Tools\windows\ValidationRunner\Ui\Production\GraphCodeUiaGateState.cs')
+      Assert-UiContract ($nativeBindings.Contains('return InputSafety.ClickPopupMenuItemForModal(popup, owner, position, commandId, expectedProcessId, expectedModalTitle);') -and
+        $gateSource.Contains('Sketch-ClickMenu $subMenu $case.Command "Promote $title to $($case.Target)"') -and
+        $gateSource.Contains('$modal = Assert-SketchModal "Promote $title to $($case.Target)"')) `
+        'Known sketch promotion must forward the exact modal expectation and retain independent modal assertions'
     }
   }
 }

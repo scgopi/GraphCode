@@ -5,6 +5,9 @@ using static GraphCode.Windows.UiaInputSafety;
 using GraphCode.Windows;
 namespace GraphCode.Validation.Ui.Fixtures {
 public sealed class InputFixture : IUiaInputOperations {
+  public IntPtr WindowOwner(IntPtr window) => throw new InvalidOperationException("Not a modal operation");
+  public string WindowClass(IntPtr window) => throw new InvalidOperationException("Not a modal operation");
+  public string WindowTitle(IntPtr window) => throw new InvalidOperationException("Not a modal operation");
 
 
 
