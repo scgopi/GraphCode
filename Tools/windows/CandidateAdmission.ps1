@@ -80,16 +80,72 @@ function Assert-WindowsShellValidationRootsFresh([string] $Parent) {
   }
 }
 
+function Get-WindowsShellCandidateManifestPaths([string] $WorkspaceRoot) {
+  $workspace = [IO.Path]::GetFullPath($WorkspaceRoot)
+  $paths = [Collections.Generic.List[string]]::new()
+  foreach ($relative in @(
+      'graphcode-windows\provider-pins.json',
+      'graphcode-windows\build.zig.zon',
+      'graphcode-windows\build.zig',
+      'Tools\windows\ValidationRunner\ValidationRunner.csproj'
+    )) {
+    $paths.Add([IO.Path]::GetFullPath((Join-Path $workspace $relative)))
+  }
+  $manifestRoot = Join-Path $workspace 'Tools\windows\ValidationRunner\Manifests'
+  foreach ($manifest in Get-ChildItem -LiteralPath $manifestRoot -Filter '*.json' -File |
+      Sort-Object FullName) {
+    $paths.Add($manifest.FullName)
+  }
+  return @($paths | Sort-Object -Unique)
+}
+
+function Get-CandidateAdmissionPaths([object[]] $Paths) {
+  $normalized = [Collections.Generic.List[string]]::new()
+  $pending = [Collections.Generic.Queue[object]]::new()
+  foreach ($path in @($Paths)) { $pending.Enqueue($path) }
+  while ($pending.Count -ne 0) {
+    $candidate = $pending.Dequeue()
+    if ($candidate -is [string]) {
+      if ([string]::IsNullOrEmpty($candidate) -or $candidate -match "[`r`n]") {
+        throw 'Candidate admission paths must be nonempty scalar strings without embedded line endings.'
+      }
+      $normalized.Add($candidate)
+      continue
+    }
+    if ($candidate -is [Collections.IEnumerable]) {
+      foreach ($entry in $candidate) { $pending.Enqueue($entry) }
+      continue
+    }
+    throw "Candidate admission path collection contains an unsupported value of type '$($candidate.GetType().FullName)'."
+  }
+  return @($normalized | Sort-Object -Unique)
+}
+
+function Get-CandidateAdmissionFileRecords(
+  [Parameter(Mandatory)][string] $Kind,
+  [Parameter(Mandatory)][object[]] $Paths,
+  [Parameter(Mandatory)][string] $RelativeRoot
+) {
+  $records = [Collections.Generic.List[object]]::new()
+  foreach ($path in @(Get-CandidateAdmissionPaths -Paths $Paths)) {
+    $records.Add((Get-CandidateAdmissionFileRecord `
+      -Kind $Kind `
+      -Path ([string]$path) `
+      -RelativeRoot $RelativeRoot))
+  }
+  return $records.ToArray()
+}
+
 function Write-WindowsShellCandidateAdmission(
   [Parameter(Mandatory)][string] $WorkspaceRoot,
   [Parameter(Mandatory)][string] $ValidationRoot,
-  [Parameter(Mandatory)][string[]] $BindingPaths,
+  [Parameter(Mandatory)][object[]] $BindingPaths,
   [Parameter(Mandatory)][string] $WinghosttyRoot,
   [Parameter(Mandatory)][string] $ZmxRoot,
   [Parameter(Mandatory)][string] $Zig0152,
   [Parameter(Mandatory)][string] $Zig0160,
-  [string[]] $ManifestPaths = @(),
-  [string[]] $SourcePaths = @()
+  [object[]] $ManifestPaths = @(),
+  [object[]] $SourcePaths = @()
 ) {
   Assert-WindowsShellCandidateEnvironment
   $workspace = [IO.Path]::GetFullPath($WorkspaceRoot)
@@ -122,22 +178,19 @@ function Write-WindowsShellCandidateAdmission(
     throw 'Candidate admission provider worktrees do not match graphcode-windows\provider-pins.json.'
   }
 
-  $allManifestPaths = @($ManifestPaths + @($pinsPath) | Sort-Object -Unique)
-  $allSourcePaths = @($SourcePaths | Sort-Object -Unique)
-  $allBindingPaths = @($BindingPaths | Sort-Object -Unique)
+  $allManifestPaths = @(Get-CandidateAdmissionPaths -Paths @($ManifestPaths, $pinsPath))
+  $allSourcePaths = @(Get-CandidateAdmissionPaths -Paths $SourcePaths)
+  $allBindingPaths = @(Get-CandidateAdmissionPaths -Paths $BindingPaths)
   $tools = @(
     (Get-CandidateAdmissionFileRecord 'zig-0.15.2' $Zig0152 $workspace),
     (Get-CandidateAdmissionFileRecord 'zig-0.16.0' $Zig0160 $workspace)
   )
-  $bindings = @($allBindingPaths | ForEach-Object {
-      Get-CandidateAdmissionFileRecord 'validation-binding' $_ $workspace
-    })
-  $manifests = @($allManifestPaths | ForEach-Object {
-      Get-CandidateAdmissionFileRecord 'manifest' $_ $workspace
-    })
-  $sources = @($allSourcePaths | ForEach-Object {
-      Get-CandidateAdmissionFileRecord 'source' $_ $workspace
-    })
+  $bindings = @(Get-CandidateAdmissionFileRecords `
+      -Kind 'validation-binding' -Paths $allBindingPaths -RelativeRoot $workspace)
+  $manifests = @(Get-CandidateAdmissionFileRecords `
+      -Kind 'manifest' -Paths $allManifestPaths -RelativeRoot $workspace)
+  $sources = @(Get-CandidateAdmissionFileRecords `
+      -Kind 'source' -Paths $allSourcePaths -RelativeRoot $workspace)
   if ($bindings.Count -eq 0 -or $manifests.Count -eq 0 -or $sources.Count -eq 0) {
     throw 'Candidate admission requires binding, manifest and source hashes.'
   }

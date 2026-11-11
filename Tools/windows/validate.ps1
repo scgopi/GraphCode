@@ -1297,15 +1297,7 @@ function Invoke-Task([string] $name) {
         (Join-Path $bindingDirectory "ValidationFixtureBindings.dll"),
         (Join-Path $bindingDirectory "WindowsValidationBindings.dll")
       ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
-      $manifestPaths = @(
-        (Join-Path $repoRoot "graphcode-windows\provider-pins.json"),
-        (Join-Path $repoRoot "graphcode-windows\build.zig.zon"),
-        (Join-Path $repoRoot "graphcode-windows\build.zig"),
-        (Join-Path $repoRoot "Tools\windows\ValidationRunner\ValidationRunner.csproj"),
-        @(Get-ChildItem -LiteralPath (
-            Join-Path $repoRoot "Tools\windows\ValidationRunner\Manifests"
-          ) -Filter "*.json" -File | ForEach-Object FullName)
-      )
+      $manifestPaths = Get-WindowsShellCandidateManifestPaths -WorkspaceRoot $repoRoot
       $candidateAdmission = Write-WindowsShellCandidateAdmission `
         -WorkspaceRoot $repoRoot `
         -ValidationRoot $env:GRAPHCODE_VALIDATION_ROOT `

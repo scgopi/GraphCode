@@ -92,6 +92,36 @@ Describe 'Windows validation candidate admission' {
     { Assert-WindowsShellValidationRootsFresh -Parent $parent } | Should -Not -Throw
   }
 
+  It 'returns the admission manifest catalog as individual full paths' {
+    $workspace = Join-Path $TestDrive 'manifest-workspace'
+    $manifestRoot = Join-Path $workspace 'Tools\windows\ValidationRunner\Manifests'
+    $null = New-Item -ItemType Directory -Force -Path (
+      Join-Path $workspace 'graphcode-windows'
+    ),$manifestRoot
+    foreach ($relative in @(
+        'graphcode-windows\provider-pins.json',
+        'graphcode-windows\build.zig.zon',
+        'graphcode-windows\build.zig',
+        'Tools\windows\ValidationRunner\ValidationRunner.csproj',
+        'Tools\windows\ValidationRunner\Manifests\host.json',
+        'Tools\windows\ValidationRunner\Manifests\ownership.json',
+        'Tools\windows\ValidationRunner\Manifests\ui.json'
+      )) {
+      [IO.File]::WriteAllText(
+        (Join-Path $workspace $relative),
+        '{}',
+        [Text.UTF8Encoding]::new($false)
+      )
+    }
+
+    $paths = @(Get-WindowsShellCandidateManifestPaths -WorkspaceRoot $workspace)
+    $paths.Count | Should -Be 7
+    $paths | ForEach-Object { $_ | Should -BeOfType ([string]) }
+    $paths | ForEach-Object { [IO.Path]::IsPathFullyQualified($_) | Should -BeTrue }
+    $paths | ForEach-Object { Test-Path -LiteralPath $_ -PathType Leaf | Should -BeTrue }
+    $paths | Where-Object { $_ -match "[`r`n]" } | Should -BeNullOrEmpty
+  }
+
   It 'captures exact deterministic repository, provider, tool, binding and manifest identities' {
     $winghostty = New-AdmissionRepository (Join-Path $TestDrive 'winghostty') @{
       'provider.txt' = 'winghostty'
@@ -113,14 +143,25 @@ Describe 'Windows validation candidate admission' {
     $binding = Join-Path $workspace 'binding\ValidationFixtureBindings.dll'
     $zig0152 = Join-Path $workspace 'tools\zig-0.15.2\zig.exe'
     $zig0160 = Join-Path $workspace 'tools\zig-0.16.0\zig.exe'
-    $section = Join-Path $workspace 'manifest\sections.json'
-    foreach ($file in @($binding, $zig0152, $zig0160, $section)) {
+    $manifestRoot = Join-Path $workspace 'manifest'
+    $manifests = @(
+      (Join-Path $manifestRoot 'host.json'),
+      (Join-Path $manifestRoot 'ownership.json'),
+      (Join-Path $manifestRoot 'ui.json')
+    )
+    foreach ($file in @($binding, $zig0152, $zig0160) + $manifests) {
       $null = New-Item -ItemType Directory -Force -Path (Split-Path $file -Parent)
     }
     [IO.File]::WriteAllBytes($binding, [byte[]](1, 2, 3))
     [IO.File]::WriteAllBytes($zig0152, [byte[]](2, 3, 4))
     [IO.File]::WriteAllBytes($zig0160, [byte[]](3, 4, 5))
-    [IO.File]::WriteAllText($section, '{"section":"fixture"}', [Text.UTF8Encoding]::new($false))
+    foreach ($manifestPath in $manifests) {
+      [IO.File]::WriteAllText(
+        $manifestPath,
+        '{"section":"fixture"}',
+        [Text.UTF8Encoding]::new($false)
+      )
+    }
     $validationRoot = Join-Path $TestDrive 'validation-root'
     $null = New-Item -ItemType Directory -Path $validationRoot
     $arguments = @{
@@ -133,7 +174,7 @@ Describe 'Windows validation candidate admission' {
       Zig0160 = $zig0160
       ManifestPaths = @(
         (Join-Path $workspace 'graphcode-windows\provider-pins.json'),
-        $section
+        @($manifests)
       )
       SourcePaths = @(
         (Join-Path $workspace 'Tools\windows\validate.ps1'),
@@ -159,7 +200,12 @@ Describe 'Windows validation candidate admission' {
     $manifest.providers.zmx.tree | Should -BeExactly $zmx.Tree
     @($manifest.tools).Count | Should -Be 2
     @($manifest.bindings).Count | Should -Be 1
-    @($manifest.manifests).Count | Should -Be 2
+    @($manifest.manifests).Count | Should -Be 4
+    @($manifest.manifests | Select-Object -ExpandProperty path | Sort-Object -Unique).Count |
+      Should -Be 4
+    foreach ($manifestPath in $manifests) {
+      @($manifest.manifests | Where-Object path -ceq $manifestPath).Count | Should -Be 1
+    }
     @($manifest.sources).Count | Should -Be 2
     ($first.Sha256 -cmatch '^[A-F0-9]{64}$') | Should -BeTrue
 
