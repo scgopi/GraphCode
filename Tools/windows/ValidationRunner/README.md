@@ -200,6 +200,17 @@ artifacts; root console summaries do not forward arbitrary child text.
 The capture suite alone admits its exact path-bound, deliberately injected
 negative-control diagnostics, while still requiring all 182 cases and the
 14 named groups.
+Descendant-refusal diagnostics project only bounded scalar facts, preserving
+the raw context and original error in memory. Projection, JSON serialization
+or trace-write faults attach an explicit bounded secondary diagnostic and must
+not replace the ownership refusal. Focused
+`UiCaptureDriver.Tests.ps1 -AdvisoryDiagnosticContractOnly` covers all three fault
+stages and excludes retained-object graph traversal; `-AppChildContractOnly`
+checks the real held-generation refusal with prepared harmless fixtures.
+`-DescendantMetadataContractOnly` preserves the scalar trace schema, and
+`-PreflightReportContractOnly` verifies that successful report data is accepted
+while a failed case is still rejected. These are no-desktop checks, not a full
+capture-suite or native UI acceptance result.
 
 Each host-supervised child starts suspended in a held, non-breakaway job before it can execute.
 Original monotonic deadlines, independent stream EOF, primary errors, live

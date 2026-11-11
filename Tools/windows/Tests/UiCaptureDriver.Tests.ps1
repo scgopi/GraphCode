@@ -1648,6 +1648,88 @@ function Invoke-CapDescendantLifetimeContract {
     }
 }
 
+function Invoke-CapDescendantRefusalDiagnosticContract {
+    $ast = [Management.Automation.Language.Parser]::ParseFile($modulePath, [ref]$null, [ref]$null)
+    $owner = $ast.Find({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-CapOwnedDescendants'
+    }, $false)
+    Assert-CapTest ($owner.Extent.Text.Contains('Write-CapDescendantRefusalDiagnostic -Failure $failure -Context $context -Refusal $refusal') -and
+        $owner.Extent.Text.Contains('throw $failure')) 'Actual descendant refusal must retain primary-preserving diagnostic dispatch.'
+    foreach ($name in @('Get-CapDescendantRefusalDiagnostic', 'Write-CapDescendantRefusalDiagnostic')) {
+        $definitions = @($ast.FindAll({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+        }, $false))
+        Assert-CapTest ($definitions.Count -eq 1) "Missing unique primary-preserving diagnostic helper: $name"
+        . ([scriptblock]::Create($definitions[0].Extent.Text))
+    }
+    $getterVisits = [Collections.Generic.List[string]]::new()
+    $graph = [pscustomobject]@{}
+    $graph | Add-Member ScriptProperty ForbiddenGraph {
+        $getterVisits.Add('visited')
+        throw 'Diagnostic traversed retained object graph'
+    }
+    $original = [Management.Automation.ErrorRecord]::new(
+        [InvalidOperationException]::new('Held parent generation changed for PID 456; refusing.'),
+        'HeldGeneration', [Management.Automation.ErrorCategory]::InvalidOperation, $graph)
+    $context = [pscustomobject]@{
+        ObservedUtc = '2026-11-11T00:00:00Z'; ParentPid = 456; ParentCreationFileTimeUtc = 200L
+        RawRow = [pscustomobject]@{ ProcessId = 123; ParentProcessId = 456; SessionId = 0
+            CreationDate = $null; ExecutablePath = ('x' * 5000); CommandLine = $graph }
+        NativeSnapshot = $graph; ParentNativeSnapshot = $graph; InitialNativeFailure = $original; ErrorRecord = $null
+    }
+    $diagnostic = Get-CapDescendantRefusalDiagnostic -Context $context -Refusal $original
+    $json = $diagnostic | ConvertTo-Json -Depth 6 -Compress
+    $decoded = $json | ConvertFrom-Json
+    Assert-CapTest ($getterVisits.Count -eq 0 -and $decoded.CimExecutablePath.Length -eq 2048 -and
+        $decoded.omittedGraphs -ccontains 'OriginalErrorRecord.TargetObject' -and
+        @($decoded.omittedFields | Where-Object field -CEQ 'CimCommandLine').Count -eq 1) `
+        'Refusal diagnostic must retain bounded scalars without traversing native/error graphs.'
+    $projection = (Get-Item Function:Get-CapDescendantRefusalDiagnostic).ScriptBlock
+    $faultCases = 0
+    foreach ($stage in @('projection', 'serialization', 'write')) {
+        $primary = [InvalidOperationException]::new('DescendantIdentityMismatch: Held parent generation changed', $original.Exception)
+        $primary.Data['CapCaptureCode'] = 'DescendantIdentityMismatch'
+        $primary.Data['OriginalErrorRecord'] = $original
+        & {
+            param($Stage, $Primary, $Context, $Original, $Projection)
+            function Get-CapDescendantRefusalDiagnostic {
+                param($Context, $Refusal)
+                if ($Stage -ceq 'projection') { throw 'injected projection fault' }
+                & $Projection -Context $Context -Refusal $Refusal
+            }
+            function ConvertTo-Json { param($InputObject, $Depth, [switch]$Compress)
+                if ($Stage -ceq 'serialization') { throw 'injected serialization fault' }
+                return '{}'
+            }
+            function Write-CapTrace { param($Command, $Parameters)
+                if ($Stage -ceq 'write') { throw 'injected write fault' }
+            }
+            $caught = $null
+            $oldError = [Console]::Error
+            $diagnosticOutput = [IO.StringWriter]::new()
+            try {
+                [Console]::SetError($diagnosticOutput)
+                try {
+                    Write-CapDescendantRefusalDiagnostic -Failure $Primary -Context $Context -Refusal $Original
+                    throw $Primary
+                } catch { $caught = $_ }
+            } finally { [Console]::SetError($oldError) }
+            $reported = $diagnosticOutput.ToString()
+            $diagnosticOutput.Dispose()
+            Assert-CapTest ([object]::ReferenceEquals($caught.Exception, $Primary) -and
+                $caught.Exception.Data['CapCaptureCode'] -ceq 'DescendantIdentityMismatch' -and
+                [object]::ReferenceEquals($caught.Exception.Data['OriginalErrorRecord'], $Original) -and
+                $Primary.Data['DescendantDiagnosticFailure'].message -like "*injected $Stage fault*" -and
+                $reported.Contains('CAP_DESCENDANT_DIAGNOSTIC_FAILURE') -and
+                $reported.Contains("injected $Stage fault") -and $reported.Length -lt 2048) `
+                "Diagnostic $Stage fault replaced the original held-generation refusal or hid its secondary failure."
+        } $stage $primary $context $original $projection
+        $faultCases++
+    }
+    Assert-CapTest ($faultCases -eq 3) 'All diagnostic fault stages must execute.'
+    return @{ faultStages = $faultCases; getterVisits = $getterVisits.Count; boundedProjection = $true }
+}
+
 function Invoke-CapAdvisoryDiagnosticContract {
     $tokens=$null;$errors=$null
     $ast=[Management.Automation.Language.Parser]::ParseFile($modulePath,[ref]$tokens,[ref]$errors)
@@ -1696,6 +1778,7 @@ function Invoke-CapAdvisoryDiagnosticContract {
         -not $diagnostic.PSObject.Properties['OriginalErrorRecord']) `
         'Bounded diagnostic lost useful scalar facts, explicit omissions/truncation, or original in-memory error.'
     return [pscustomobject]@{getterVisits=0;originalErrorRetained=$true;scalarDiagnostic=$diagnostic
+        refusalDiagnostic=(Invoke-CapDescendantRefusalDiagnosticContract)
         evidenceMode='SYNTHETIC_GETTER_QUALIFICATION_NOT_ORIGINAL_BLOCKED_STACK'}
 }
 
@@ -6490,6 +6573,9 @@ function Invoke-CapPreflightReportContract {
         } })
     }
     Assert-CapPreflightReport
+    $preflight.cases[0].passed = $false
+    $failedCaseRefusal = Assert-CapRejects { Assert-CapPreflightReport } 'nonempty successful exact-source offline rehearsal'
+    $preflight.cases[0].passed = $true
     $branches = [Collections.Generic.List[object]]::new()
     foreach ($behavior in @('normal','nonzero','timeout')) {
         $rows = @($preflight.cases | Where-Object name -CEQ "real zmx job lifecycle through actual command with target $behavior")
@@ -6504,9 +6590,9 @@ function Invoke-CapPreflightReportContract {
     }
     $traces = @(Get-Content -LiteralPath (Join-Path $scratch 'test-calls.jsonl') | ForEach-Object { ConvertFrom-Json $_ })
     $calls = @($traces | Where-Object command -CEQ 'Assert-CapPreflightReport')
-    Assert-CapTest ($branches.Count -eq 3 -and $calls.Count -eq 7) 'Actual preflight acceptance and all three behavior checks did not execute.'
+    Assert-CapTest ($branches.Count -eq 3 -and $calls.Count -eq 8) 'Actual preflight acceptance, failed-case refusal and all three behavior checks did not execute.'
     return @{ mode = 'SYNTHETIC_REPORT_DATA_NOT_EXECUTED_PROVIDER_OR_LIVE_PREFLIGHT'
-        validDataAccepted = $true; actualFunctionCalls = $calls.Count; behaviorBranches = @($branches.ToArray())
+        validDataAccepted = $true; failedCaseRefusal = $failedCaseRefusal; actualFunctionCalls = $calls.Count; behaviorBranches = @($branches.ToArray())
         syntheticCaseCount = $requiredNames.Count; requiredCaseNamesFromActualAst = $true
         functionSha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
             [Text.Encoding]::UTF8.GetBytes($definition.Extent.Text))) }
