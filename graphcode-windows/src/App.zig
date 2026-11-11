@@ -5209,17 +5209,32 @@ pub const App = struct {
     }
 
     fn editSelectedEdge(self: *App, index: usize) void {
+        Diagnostics.traceEdgeAction(.{
+            .stage = .edit_entry,
+            .project = Diagnostics.EdgeActionTrace.Identity.from(self.selected_edge_project_path),
+            .edge = Diagnostics.EdgeActionTrace.Identity.from(self.selected_edge_id),
+            .index = index,
+            .hwnd = @intFromPtr(self.window.hwnd),
+        });
         const result = EdgeEditing.edit(self.allocator, &self.model, &self.client, index, .{ .context = self, .show = showEdgeEditor }) catch |err| {
+            Diagnostics.traceEdgeAction(.{ .stage = .edit_return, .outcome = "error", .reason = @errorName(err), .index = index });
             var message: [160]u8 = undefined;
             self.setStatus(std.fmt.bufPrint(&message, "Unable to edit edge: {s}", .{@errorName(err)}) catch "Unable to edit edge");
             return;
         };
+        Diagnostics.traceEdgeAction(.{ .stage = .edit_return, .outcome = @tagName(result), .index = index });
         if (result == .queued) self.setStatus("Edge update queued; waiting for daemon");
     }
 
     fn showEdgeEditor(context: ?*anyopaque, allocator: std.mem.Allocator, initial: Forms.EdgeDraft) !?Forms.EdgeDraft {
         const self: *App = @ptrCast(@alignCast(context.?));
-        return NativeForms.editEdge(self.window.hwnd, allocator, initial);
+        Diagnostics.traceEdgeAction(.{ .stage = .modal_callback, .hwnd = @intFromPtr(self.window.hwnd) });
+        const result = NativeForms.editEdge(self.window.hwnd, allocator, initial) catch |err| {
+            Diagnostics.traceEdgeAction(.{ .stage = .modal_return, .outcome = "error", .reason = @errorName(err) });
+            return err;
+        };
+        Diagnostics.traceEdgeAction(.{ .stage = .modal_return, .outcome = if (result == null) "cancelled" else "submitted" });
+        return result;
     }
 
     fn deleteEdge(self: *App, index: usize) void {
@@ -6077,11 +6092,46 @@ pub const App = struct {
                 }
             },
             .edge => |stable| {
-                const graph = self.model.graph orelse return;
-                if (!std.mem.eql(u8, graph.project.path, stable.project_path)) return;
-                if (stable.id.len == 0) return;
-                const index = GraphModel.findEdgeIndexByID(graph.edges.items, stable.id) orelse return;
-                if (!self.selectEdgeIndex(index)) return;
+                var receipt = Diagnostics.EdgeActionTrace.Event{
+                    .stage = .target_entry,
+                    .project = Diagnostics.EdgeActionTrace.Identity.from(stable.project_path),
+                    .edge = Diagnostics.EdgeActionTrace.Identity.from(stable.id),
+                    .action = @tagName(action),
+                    .hwnd = @intFromPtr(self.window.hwnd),
+                };
+                Diagnostics.traceEdgeAction(receipt);
+                const graph = self.model.graph orelse {
+                    receipt.stage = .target_refused;
+                    receipt.reason = "MissingGraph";
+                    Diagnostics.traceEdgeAction(receipt);
+                    return;
+                };
+                if (!std.mem.eql(u8, graph.project.path, stable.project_path)) {
+                    receipt.stage = .target_refused;
+                    receipt.reason = "ProjectChanged";
+                    Diagnostics.traceEdgeAction(receipt);
+                    return;
+                }
+                if (stable.id.len == 0) {
+                    receipt.stage = .target_refused;
+                    receipt.reason = "MissingEdgeIdentity";
+                    Diagnostics.traceEdgeAction(receipt);
+                    return;
+                }
+                const index = GraphModel.findEdgeIndexByID(graph.edges.items, stable.id) orelse {
+                    receipt.stage = .target_refused;
+                    receipt.reason = "EdgeNotFound";
+                    Diagnostics.traceEdgeAction(receipt);
+                    return;
+                };
+                receipt.stage = .target_resolved;
+                receipt.index = index;
+                Diagnostics.traceEdgeAction(receipt);
+                const selected = self.selectEdgeIndex(index);
+                receipt.stage = .selection_result;
+                receipt.outcome = if (selected) "selected" else "refused";
+                Diagnostics.traceEdgeAction(receipt);
+                if (!selected) return;
                 switch (action) {
                     .edit_edge => self.editSelectedEdge(index),
                     .delete_edge => self.deleteEdge(index),
@@ -10635,7 +10685,59 @@ fn onDaemonFrame(
 
 fn onContextAction(context: ?*anyopaque, action: GraphContextMenu.Action, target: GraphContextMenu.Target) void {
     const app: *App = @ptrCast(@alignCast(context.?));
+    if (target == .edge) Diagnostics.traceEdgeAction(.{
+        .stage = .callback_entry,
+        .project = Diagnostics.EdgeActionTrace.Identity.from(target.edge.project_path),
+        .edge = Diagnostics.EdgeActionTrace.Identity.from(target.edge.id),
+        .action = @tagName(action),
+        .hwnd = @intFromPtr(app.window.hwnd),
+    });
     app.handleContextAction(action, target);
+}
+
+test "edge action diagnostic records callback and stable target refusals without native work" {
+    const Probe = struct {
+        var events: [4]Diagnostics.EdgeActionTrace.Event = undefined;
+        var count: usize = 0;
+
+        fn observe(event: Diagnostics.EdgeActionTrace.Event) void {
+            if (count < events.len) events[count] = event;
+            count += 1;
+        }
+    };
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = undefined,
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .sidebar_state = undefined,
+        .declared_entry_ids = undefined,
+        .kept_worktree_paths = undefined,
+    };
+    defer app.model.deinit();
+    Diagnostics.edge_action_test_observer = Probe.observe;
+    defer Diagnostics.edge_action_test_observer = null;
+    const cases = [_]struct { project: []const u8, id: []const u8, reason: []const u8 }{
+        .{ .project = "A", .id = "edge-a", .reason = "MissingGraph" },
+        .{ .project = "B", .id = "edge-a", .reason = "ProjectChanged" },
+        .{ .project = "A", .id = "", .reason = "MissingEdgeIdentity" },
+        .{ .project = "A", .id = "missing", .reason = "EdgeNotFound" },
+    };
+    for (cases, 0..) |case, index| {
+        if (index == 1) _ = try app.model.updateFromFrame(
+            \\{"event":{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[],"edges":[]}}}
+        );
+        Probe.count = 0;
+        onContextAction(&app, .edit_edge, .{ .edge = .{ .project_path = case.project, .id = case.id } });
+        try std.testing.expectEqual(@as(usize, 3), Probe.count);
+        try std.testing.expectEqual(Diagnostics.EdgeActionTrace.Stage.callback_entry, Probe.events[0].stage);
+        try std.testing.expectEqual(Diagnostics.EdgeActionTrace.Stage.target_entry, Probe.events[1].stage);
+        try std.testing.expectEqual(Diagnostics.EdgeActionTrace.Stage.target_refused, Probe.events[2].stage);
+        try std.testing.expectEqualStrings(case.reason, Probe.events[2].reason);
+        try std.testing.expectEqual(@as(usize, 0), app.selected_edge_id.len);
+        try std.testing.expectEqual(@as(?usize, null), app.canvas.selected_edge);
+    }
 }
 
 fn logWireReceiver(app: *App, event: u32, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM, after: bool) void {

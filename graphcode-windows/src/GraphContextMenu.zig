@@ -2,6 +2,7 @@ const c = @import("Win32.zig").c;
 const Wire = @import("Wire.zig");
 const SketchPromotion = @import("SketchPromotion.zig");
 const NativeDialogs = @import("WindowsNativeDialogs.zig");
+const Diagnostics = @import("Diagnostics.zig");
 
 pub const NodeMenuOrigin = enum { canvas, sidebar };
 pub const TransferMenuState = enum { hidden, ready, local_only, busy, context_changed };
@@ -320,7 +321,16 @@ pub fn show(
     context: ?*anyopaque,
     callback: Callback,
 ) void {
-    const menu = buildMenu(target) orelse return;
+    if (target == .edge) Diagnostics.traceEdgeAction(.{
+        .stage = .popup_entry,
+        .project = Diagnostics.EdgeActionTrace.Identity.from(target.edge.project_path),
+        .edge = Diagnostics.EdgeActionTrace.Identity.from(target.edge.id),
+        .hwnd = @intFromPtr(parent),
+    });
+    const menu = buildMenu(target) orelse {
+        if (target == .edge) Diagnostics.traceEdgeAction(.{ .stage = .target_refused, .reason = "MenuCreationFailed" });
+        return;
+    };
     defer _ = c.DestroyMenu(menu);
     const command = c.TrackPopupMenu(
         menu,
@@ -331,8 +341,67 @@ pub fn show(
         parent,
         null,
     );
+    dispatchReturnedCommand(parent, target, command, context, callback);
+}
+
+fn dispatchReturnedCommand(parent: c.HWND, target: Target, command: c.BOOL, context: ?*anyopaque, callback: Callback) void {
     const action = actionForCommand(command);
-    if (action != .none) callback(context, action, target);
+    if (target == .edge) Diagnostics.traceEdgeAction(.{
+        .stage = .popup_return,
+        .project = Diagnostics.EdgeActionTrace.Identity.from(target.edge.project_path),
+        .edge = Diagnostics.EdgeActionTrace.Identity.from(target.edge.id),
+        .hwnd = @intFromPtr(parent),
+        .command = command,
+        .action = @tagName(action),
+    });
+    if (action != .none) {
+        if (target == .edge) Diagnostics.traceEdgeAction(.{
+            .stage = .popup_dispatch,
+            .project = Diagnostics.EdgeActionTrace.Identity.from(target.edge.project_path),
+            .edge = Diagnostics.EdgeActionTrace.Identity.from(target.edge.id),
+            .command = command,
+            .action = @tagName(action),
+        });
+        callback(context, action, target);
+    }
+}
+
+test "edge action diagnostic observes popup return without changing dispatch" {
+    const Probe = struct {
+        var stages: [4]Diagnostics.EdgeActionTrace.Stage = undefined;
+        var count: usize = 0;
+        var callbacks: usize = 0;
+        var action: Action = .none;
+        var target_matches: bool = false;
+
+        fn observe(event: Diagnostics.EdgeActionTrace.Event) void {
+            if (count < stages.len) stages[count] = event.stage;
+            count += 1;
+        }
+
+        fn apply(_: ?*anyopaque, selected: Action, target: Target) void {
+            callbacks += 1;
+            action = selected;
+            target_matches = std.mem.eql(u8, target.edge.id, "edge-a") and std.mem.eql(u8, target.edge.project_path, "A");
+        }
+    };
+    Diagnostics.edge_action_test_observer = Probe.observe;
+    defer Diagnostics.edge_action_test_observer = null;
+    const target = Target{ .edge = .{ .project_path = "A", .id = "edge-a" } };
+    for ([_]c.BOOL{ 0, ids.edit_edge, ids.delete_edge, -1 }) |command| {
+        Probe.count = 0;
+        Probe.callbacks = 0;
+        Probe.action = .none;
+        Probe.target_matches = false;
+        dispatchReturnedCommand(null, target, command, null, Probe.apply);
+        const expected = actionForCommand(command);
+        try std.testing.expectEqual(expected, Probe.action);
+        try std.testing.expectEqual(@as(usize, if (expected == .none) 0 else 1), Probe.callbacks);
+        try std.testing.expectEqual(@as(usize, if (expected == .none) 1 else 2), Probe.count);
+        try std.testing.expectEqual(expected != .none, Probe.target_matches);
+        try std.testing.expectEqual(Diagnostics.EdgeActionTrace.Stage.popup_return, Probe.stages[0]);
+        if (expected != .none) try std.testing.expectEqual(Diagnostics.EdgeActionTrace.Stage.popup_dispatch, Probe.stages[1]);
+    }
 }
 
 fn buildMenu(target: Target) c.HMENU {
@@ -532,8 +601,7 @@ const std = @import("std");
 test "card transfer menu has executable stable actions on canvas and sidebar root rows" {
     for ([_]NodeMenuOrigin{ .canvas, .sidebar }) |origin| {
         const plan = nodeMenuPlan(.{
-            .project_path = "C:\\A",
-            .id = "node",
+            .project_path = "C:\\A", .id = "node",
             .retype = .{ .origin = origin },
             .transfer = .ready,
         });
@@ -579,7 +647,8 @@ test "card transfer menu capacity covers every flag combination without losing r
     var maximum: usize = 0;
     for (0..512) |bits| {
         const plan = nodeMenuPlan(.{
-            .project_path = "C:\\A", .id = "node",
+            .project_path = "C:\\A",
+            .id = "node",
             .composite = bits & 1 != 0,
             .can_arm = bits & 2 != 0,
             .unwired = bits & 4 != 0,
