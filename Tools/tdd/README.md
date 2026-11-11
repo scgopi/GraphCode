@@ -20,3 +20,11 @@ pwsh Tools/tdd/Test-TddEvidence.ps1 -BodyPath <pull-request-body.md>
 ```
 
 The pull-request workflow validates the same contract from the GitHub event payload.
+
+New pull-request bodies that include candidate identity fields must provide a
+valid Tier A/B/C selection, branch, `HEAD / tree` hashes with clean/dirty state,
+and relevant artifact hashes. A stopping handoff is optional when no stop or
+transfer applies; once any handoff value is supplied, every handoff field must
+be complete, the positive count must be nonzero, and the blocker category must
+use the documented classification. Legacy PR bodies that predate these fields
+remain valid when the metadata sections are absent.

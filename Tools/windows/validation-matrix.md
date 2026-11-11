@@ -7,7 +7,7 @@ The Windows port must have runnable commands before implementation fleets begin.
 | Tier | Authority and use |
 |---|---|
 | **Tier A: focused local evidence** | Admitted focused tests, static contracts and builds used for iteration. Require a positive executed count; compilation is not behavioral proof. |
-| **Tier B: required CI merge gate** | The exact-head required pull-request contexts own broad regression and merge admission. Full local runs cannot replace these checks. |
+| **Tier B: required CI merge gate** | Required contexts are admission requirements, but every exact-head PR workflow failure blocks merge, not only failures in required contexts. Full local runs cannot replace exact-head PR results. |
 | **Tier C: live/native devbox evidence** | Separately admitted desktop, Sandbox, UIA, input, visual, device or hardware execution. It closes only the behavior exercised and does not replace Tier B. |
 
 Freeze a candidate before Tier B or Tier C evidence is interpreted: record

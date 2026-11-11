@@ -47,6 +47,8 @@ Freeze this tuple before claiming required-CI or live/native evidence. If the
 candidate changes, replace the tuple and rerun affected evidence. Tier A is
 focused local evidence, Tier B is the required CI merge gate, and Tier C is
 separately admitted live/native devbox evidence. Tier A or C never replaces B.
+Every exact-head PR workflow failure blocks merge; required contexts are
+admission requirements, not the complete failure boundary.
 -->
 
 - **Tier(s):**

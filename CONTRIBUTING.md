@@ -30,7 +30,9 @@ what you write.
 - Run `make test`.
 - Classify each result as focused local evidence, required exact-head CI, or
   separately admitted live/native evidence. Local qualification never replaces
-  the required CI merge gate; see the evidence rules in
+  the required CI merge gate. Required contexts are admission requirements,
+  and every exact-head PR workflow failure blocks merge; see the
+  evidence rules in
   [AGENTS.md](AGENTS.md#evidence-tiers-and-candidate-freeze).
 - Before merge-gate or native execution, freeze the candidate identity (branch,
   `HEAD`, tree hash and relevant artifact hashes). If it changes, rerun the

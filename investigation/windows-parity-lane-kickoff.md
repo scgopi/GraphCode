@@ -223,8 +223,10 @@ self-added validators or gates are out of lease, and permission to read a checke
 
 - **Tier A: focused local evidence** is admitted focused local iteration. Keep
   positive counts and distinguish compilation from behavior.
-- **Tier B: required CI merge gate** is exact-head required CI and owns broad
-  regression for merge. A full local qualification cannot replace it.
+- **Tier B: required CI merge gate.** Required contexts are admission
+  requirements, but every exact-head PR workflow failure blocks merge, not
+  only failures in required contexts. A full local qualification cannot
+  replace it.
 - **Tier C: live/native devbox evidence** is separately admitted desktop,
   sandbox, visual, input, device or hardware behavior. It does not replace
   Tier B.
@@ -354,7 +356,9 @@ Report each step's result, or NotExecuted with the reason.
 5. **Push a draft PR; exact-head CI owns broad/native regression.**
    - Execute locally only the approved exact allow-list. A focused root, script
      edit or hidden-window label grants no exception. No visual-baseline task.
-   - Report nonempty exact-head run/job inventories and failures honestly.
+   - Every exact-head PR workflow failure blocks merge; required contexts are
+     admission requirements, not the complete failure boundary. Report
+     nonempty exact-head run/job inventories and failures honestly.
      Configured path skips are not executed tests; a dispatch is not a PR check.
      Cite actual regression commands/results, not predicted CI outcomes.
 6. **Code review.**

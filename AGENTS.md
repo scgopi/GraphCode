@@ -101,10 +101,11 @@ Use the same tier labels in plans, PRs, handoffs and result summaries:
 - **Tier A: focused local evidence.** Admitted focused unit, contract, static or
   build commands used to iterate. Keep positive execution counts and distinguish
   compilation from behavior. Tier A never replaces a required merge gate.
-- **Tier B: required CI merge gate.** The required exact-head pull-request
-  checks are authoritative for broad regression and merge admission. Full local
-  qualification, manual workflow dispatch, and path skips do not replace the
-  exact-head required contexts.
+- **Tier B: required CI merge gate.** Required contexts are admission
+  requirements, but every exact-head PR workflow failure blocks merge, not only
+  failures in required contexts. Full local qualification,
+  manual workflow dispatch, and path skips do not replace exact-head PR
+  workflow results.
 - **Tier C: live/native devbox evidence.** Separately authorized UI, UIA,
   keyboard/pointer, visual, sandbox, device, or other live behavior. State the
   admitted command, desktop/device, permissions and precise scope. Tier C does
