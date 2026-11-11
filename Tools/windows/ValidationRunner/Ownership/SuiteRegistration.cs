@@ -210,8 +210,56 @@ public sealed class OwnershipSuite : IValidationSuite
             {
                 Reject<ArgumentException>(() => OwnedByteStreamCapture.RequireUtf8NoBom(new UTF8Encoding(true, true)));
                 Reject<ArgumentException>(() => OwnedByteStreamCapture.RequireUtf8NoBom(Encoding.Unicode));
+                Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+                Encoding oem = Encoding.GetEncoding(437, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback);
+                Require(oem.CodePage == 437, "OEM codec control did not select code page 437.");
+                Reject<ArgumentException>(() => OwnedByteStreamCapture.RequireUtf8NoBom(oem));
                 Require(OwnedByteStreamCapture.RequireUtf8NoBom(null).DecoderFallback is DecoderExceptionFallback,
                     "Default owned output encoding was not strict UTF-8.");
+                string capturePath = Path.Combine(root, id + ".log");
+                const string lf = "first\nsecond\n";
+                byte[] bytes = Encoding.UTF8.GetBytes(lf);
+                var capture = new OwnedByteStreamCapture(new MemoryStream(bytes), capturePath,
+                    new UTF8Encoding(false, true), new RetentionSignalObserver(() => { }));
+                Require(await capture.Text.ConfigureAwait(false) == lf &&
+                    File.ReadAllBytes(capturePath).SequenceEqual(bytes),
+                    "Valid UTF-8 LF capture or raw evidence changed.");
+                foreach (string invalidName in new[] { "utf16-capture", "bom-capture", "oem-capture" })
+                {
+                    Encoding invalid = invalidName switch
+                    {
+                        "utf16-capture" => Encoding.Unicode,
+                        "bom-capture" => new UTF8Encoding(true, true),
+                        _ => oem
+                    };
+                    Reject<ArgumentException>(() => new OwnedByteStreamCapture(
+                        new MemoryStream(bytes), Path.Combine(root, id + "-" + invalidName + ".log"),
+                        invalid, new RetentionSignalObserver(() => { })));
+                }
+                foreach ((string name, Encoding output, bool stdout) in new[]
+                {
+                    ("supervisor-stdout-utf16", Encoding.Unicode, true),
+                    ("supervisor-stderr-bom", new UTF8Encoding(true, true), false),
+                    ("supervisor-stdout-oem", oem, true)
+                })
+                {
+                    string childRoot = Path.Combine(root, id + "-" + name);
+                    Directory.CreateDirectory(childRoot);
+                    ProcessStartInfo start = OwnedFixture.Command("normal", childRoot);
+                    if (stdout) start.StandardOutputEncoding = output;
+                    else start.StandardErrorEncoding = output;
+                    Exception? failure = null;
+                    OwnedChildSupervisor? owned = null;
+                    try { owned = OwnedChildSupervisor.Start(start, TimeSpan.FromSeconds(5), childRoot); }
+                    catch (Exception error) { failure = error; }
+                    finally
+                    {
+                        if (owned != null)
+                            await owned.StopAsync(new InvalidOperationException("RED cleanup")).ConfigureAwait(false);
+                    }
+                    Require(failure is ArgumentException,
+                        $"{name} was admitted by OwnedChildSupervisor.");
+                }
                 return;
             }
             if (id == "stream-independent-faults")

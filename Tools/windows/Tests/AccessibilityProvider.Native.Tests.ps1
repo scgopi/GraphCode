@@ -169,6 +169,7 @@ try {
   # Keep batch source ASCII; pass Unicode paths through cmd arguments.
   $command = @'
 @echo off
+chcp 65001 >nul
 cd /d "%~dp0"
 if errorlevel 1 exit /b %errorlevel%
 echo [native-uia] stage=vcvars start
@@ -204,11 +205,8 @@ exit /b %test_exit%
   $native.WorkingDirectory = $scratch
   $native.RedirectStandardOutput = $true
   $native.RedirectStandardError = $true
-  [Text.Encoding]::RegisterProvider([Text.CodePagesEncodingProvider]::Instance)
-  $oemEncoding = [Text.Encoding]::GetEncoding([ShellOwnedLaunch]::OemCodePage(),
-    [Text.EncoderFallback]::ExceptionFallback, [Text.DecoderFallback]::ExceptionFallback)
-  $native.StandardOutputEncoding = $oemEncoding
-  $native.StandardErrorEncoding = $oemEncoding
+  $native.StandardOutputEncoding = [Text.UTF8Encoding]::new($false, $true)
+  $native.StandardErrorEncoding = [Text.UTF8Encoding]::new($false, $true)
   foreach ($argument in @("/d", "/s", "/c", "run-native.cmd")) { $native.ArgumentList.Add($argument) }
   $native.Environment["GRAPHCODE_NATIVE_VCVARS"] = [IO.Path]::GetFullPath($VcVars)
   $native.Environment["GRAPHCODE_NATIVE_TEST"] = $test

@@ -34,8 +34,7 @@ public sealed class OwnedByteStreamCapture
     {
         this.input = input;
         this.observer = observer;
-        var strict = (Encoding)(encoding ?? new UTF8Encoding(false, true)).Clone();
-        strict.DecoderFallback = DecoderFallback.ExceptionFallback;
+        Encoding strict = RequireUtf8NoBom(encoding);
         decoder = strict.GetDecoder();
         evidence = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite, 4096, true);
         RawEof = PumpAsync();

@@ -137,11 +137,8 @@ exit $result
   $start.CreateNoWindow = $true
   $start.RedirectStandardOutput = $true
   $start.RedirectStandardError = $true
-  [Text.Encoding]::RegisterProvider([Text.CodePagesEncodingProvider]::Instance)
-  $wrapperEncoding = [Text.Encoding]::GetEncoding([ShellOwnedLaunch]::OemCodePage(),
-    [Text.EncoderFallback]::ExceptionFallback, [Text.DecoderFallback]::ExceptionFallback)
-  $start.StandardOutputEncoding = $wrapperEncoding
-  $start.StandardErrorEncoding = $wrapperEncoding
+  $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false, $true)
+  $start.StandardErrorEncoding = [Text.UTF8Encoding]::new($false, $true)
   foreach ($argument in @(
       "-NoProfile", "-File", $wrapper, "-NativeScript",
       $NativeScriptUnderTest, "-VcVars", $vcvars,
@@ -221,10 +218,10 @@ exit $result
         -not $proof.cleanup.StdoutEof -or -not $proof.cleanup.StderrEof -or -not $proof.cleanup.ResourcesClosed) {
       throw "Native mock failure did not retain exact exit and successful held cleanup proof"
     }
-    if ($proof.stdoutCodePage -ne [ShellOwnedLaunch]::OemCodePage() -or
+    if ($proof.stdoutCodePage -ne 65001 -or
         $proof.stderrCodePage -ne $proof.stdoutCodePage) { throw "cmd producer encodings were not bound explicitly" }
     if ($Stage -ceq "compile" -and -not $output.Contains((Join-Path $fixture "cl.cmd"))) {
-      throw "Controlled non-ASCII compiler path did not roundtrip through cmd's actual OEM codec"
+      throw "Controlled non-ASCII compiler path did not roundtrip through cmd's UTF-8 codec"
     }
     if ($output -notmatch '\[native-harness\] original PATH restored') {
       throw "RED: native harness did not restore the exact original PATH after $Stage failure"

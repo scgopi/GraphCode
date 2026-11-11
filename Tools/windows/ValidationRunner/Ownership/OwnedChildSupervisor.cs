@@ -182,6 +182,8 @@ public sealed class OwnedChildSupervisor
             throw new ArgumentException("Owned launch requires ArgumentList, UseShellExecute=false and closed stdin.", nameof(start));
         if (!Path.IsPathFullyQualified(start.FileName) || !File.Exists(start.FileName))
             throw new ArgumentException("Owned executable must be an existing absolute path.", nameof(start));
+        _ = OwnedByteStreamCapture.RequireUtf8NoBom(start.StandardOutputEncoding);
+        _ = OwnedByteStreamCapture.RequireUtf8NoBom(start.StandardErrorEncoding);
         var run = new OwnedChildSupervisor(timeout, artifactRoot);
         try
         {
