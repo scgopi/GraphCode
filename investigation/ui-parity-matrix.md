@@ -46,7 +46,9 @@ Run `pwsh -NoProfile -File Tools\windows\Test-UiParityBacklog.ps1` after editing
 the ledger or issue metadata. The audit reads the open `parity` snapshot and
 requires each `Partial` row to map to an open issue, each issue to have exactly
 one `P1 layout`/`P2 feature`/`P3 polish` label, an owner, and structured
-evidence metadata.
+evidence metadata. It also requires exactly 89 unique canonical `Partial`
+identities and reverse-maps every open parity issue to a row or the explicit
+metadata/infrastructure exemption below.
 
 <!-- parity-backlog-map:start -->
 | Partial row | Open parity issue |
@@ -71,10 +73,14 @@ evidence metadata.
 | Worktree reclaim offer | [#985](https://github.com/scgopi/GraphCode/issues/985) |
 | Composite card actions | [#986](https://github.com/scgopi/GraphCode/issues/986) |
 | Loop card live detail | [#984](https://github.com/scgopi/GraphCode/issues/984) |
+| Edge presentation | [#765](https://github.com/scgopi/GraphCode/issues/765) |
+| Edge creation sheet | [#770](https://github.com/scgopi/GraphCode/issues/770) |
+| Node creation sheet | [#769](https://github.com/scgopi/GraphCode/issues/769) |
 | Quick Chats canvas | [#774](https://github.com/scgopi/GraphCode/issues/774) |
 | Quick Chat cards | [#987](https://github.com/scgopi/GraphCode/issues/987) |
 | Rename chat | [#988](https://github.com/scgopi/GraphCode/issues/988) |
 | Delete chat | [#989](https://github.com/scgopi/GraphCode/issues/989) |
+| Terminal VT state and rendering | [#775](https://github.com/scgopi/GraphCode/issues/775) |
 | Folder toolbar identity | [#1000](https://github.com/scgopi/GraphCode/issues/1000) |
 | Open Folder | [#990](https://github.com/scgopi/GraphCode/issues/990) |
 | Clone Repository sheet | [#991](https://github.com/scgopi/GraphCode/issues/991) |
@@ -82,10 +88,17 @@ evidence metadata.
 | Remote Connection info | [#993](https://github.com/scgopi/GraphCode/issues/993) |
 | Project Settings sheet | [#994](https://github.com/scgopi/GraphCode/issues/994) |
 | Available update alert | [#1001](https://github.com/scgopi/GraphCode/issues/1001) |
+| Available update alert | [#780](https://github.com/scgopi/GraphCode/issues/780) |
 | Chat rename/delete | [#995](https://github.com/scgopi/GraphCode/issues/995) |
 | Project delete loops | [#996](https://github.com/scgopi/GraphCode/issues/996) |
 | Project remove/trash | [#997](https://github.com/scgopi/GraphCode/issues/997) |
 <!-- parity-backlog-map:end -->
+
+<!-- parity-backlog-exempt:start -->
+| Open parity issue | Explicit exemption |
+| --- | --- |
+| [#822](https://github.com/scgopi/GraphCode/issues/822) | Metadata/infrastructure: shared verifier and capture driver, not a user-visible ledger surface. |
+<!-- parity-backlog-exempt:end -->
 
 [#801](https://github.com/scgopi/GraphCode/issues/801) is closed and linked to
 merged [#968](https://github.com/scgopi/GraphCode/pull/968); row coverage must
