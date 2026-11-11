@@ -4,10 +4,13 @@ param(
   [Parameter(Mandatory)][string] $AssemblyPath
 )
 $ErrorActionPreference = 'Stop'
+function ConvertTo-SourceLineEndings([string] $Source) {
+  return $Source.Replace("`r`n", "`n")
+}
 $uiRoot = Join-Path $RepositoryRoot 'Tools\windows\ValidationRunner\Ui'
 $activation = [IO.File]::ReadAllText((Join-Path $RepositoryRoot 'Tools\windows\UiaWindowActivation.cs'))
 $gate = [IO.File]::ReadAllText((Join-Path $uiRoot 'Production\GraphCodeUiaGateState.cs'))
-$inputSource = [IO.File]::ReadAllText((Join-Path $uiRoot 'Production\UiaInputSafety.cs'))
+$inputSource = ConvertTo-SourceLineEndings ([IO.File]::ReadAllText((Join-Path $uiRoot 'Production\UiaInputSafety.cs')))
 $results = [Collections.Generic.List[object]]::new()
 
 function Assert-UiContract([bool] $Condition, [string] $Message) {
@@ -165,6 +168,14 @@ foreach ($case in $popupCases) {
         'Declarative popup oracle rejects the actual checked hilite reader'
       $closureObservation = "    if (receipt != null && !operations.IsWindowVisible(popup))`n" +
         '      ObserveInput("popup-closed", (uint)inputs.Length, sent);'
+      $lfSource = $inputSource.Replace("`r`n", "`n")
+      foreach ($checkoutSource in @($lfSource, $lfSource.Replace("`n", "`r`n"))) {
+        $normalizedSource = ConvertTo-SourceLineEndings $checkoutSource
+        Assert-UiContract ([regex]::Matches($normalizedSource, [regex]::Escape($closureObservation)).Count -eq 1) `
+          'LF and CRLF checkouts must identify exactly one production closure observation'
+        Assert-UiContract ((Confirm-PopupSource $normalizedSource) -and (Confirm-RootPopupSource $normalizedSource)) `
+          'LF and CRLF checkouts must accept the actual checked popup source'
+      }
       Assert-UiContract ([regex]::Matches($inputSource, [regex]::Escape($closureObservation)).Count -eq 1) `
         'Receipt boundary positive control must identify exactly one production closure observation'
       Assert-UiContract (Confirm-RootPopupSource $inputSource.Replace($closureObservation, '')) `
@@ -214,8 +225,8 @@ foreach ($case in $popupCases) {
         Replace('bool UncheckedMenuHilite()', "$helper`n    bool UncheckedMenuHilite()")
       Assert-UiContract (-not (Confirm-RootPopupSource $unusedDecoy)) `
         'Declarative popup oracle accepted an unused checked helper while callers used an unchecked reader'
-      Assert-UiContract ($rootPopupResults.Count -eq $rootMutations.Count + $receiptMutations.Count + 3 -and
-        @($rootPopupResults | Where-Object { $_ }).Count -eq 2) `
+      Assert-UiContract ($rootPopupResults.Count -eq $rootMutations.Count + $receiptMutations.Count + 5 -and
+        @($rootPopupResults | Where-Object { $_ }).Count -eq 4) `
         'Declarative popup positive and each source mutation did not execute exactly once'
       foreach ($mutation in @(
         @{ from = 'return ClickPopupMenuItemCore(popup, owner, position, commandId, expectedProcessId, true);'; to = 'return null;' },
@@ -232,7 +243,7 @@ foreach ($case in $popupCases) {
   }
 }
 foreach ($result in $results | Where-Object { $_.id -ceq 'ui.popup.source.actual' -and $_.status -ceq 'Passed' }) {
-  $result.evidence += "; actual declarative predicate/evaluator checks=$($rootPopupResults.Count), accepted=2, refused=$($rootPopupResults.Count - 2)"
+  $result.evidence += "; actual declarative predicate/evaluator checks=$($rootPopupResults.Count), accepted=4, refused=$($rootPopupResults.Count - 4); LF and CRLF checkout controls=2"
 }
 Assert-UiContract ($activationCases.Count -eq 6 -and $popupCases.Count -eq 9 -and $results.Count -eq 15) `
   'Source guard case count changed'
