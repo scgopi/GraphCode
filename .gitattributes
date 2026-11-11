@@ -1,5 +1,9 @@
 *.swift text eol=lf
 *.sh text eol=lf
+*.ps1 text eol=lf
+*.psm1 text eol=lf
+*.cs text eol=lf
+*.zig text eol=lf
 investigation/macos-parity-evidence/evidence/*.png filter=lfs diff=lfs merge=lfs -text
 investigation/visual-baseline/rendered-macos/*.png filter=lfs diff=lfs merge=lfs -text
 investigation/visual-baseline/rendered-windows/*.png filter=lfs diff=lfs merge=lfs -text

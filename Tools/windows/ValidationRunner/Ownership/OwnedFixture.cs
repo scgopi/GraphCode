@@ -20,8 +20,8 @@ public static class OwnedFixture
         {
             UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = root,
-            StandardOutputEncoding = new UTF8Encoding(false, true),
-            StandardErrorEncoding = new UTF8Encoding(false, true)
+            StandardOutputEncoding = OwnedByteStreamCapture.RequireUtf8NoBom(new UTF8Encoding(false, true)),
+            StandardErrorEncoding = OwnedByteStreamCapture.RequireUtf8NoBom(new UTF8Encoding(false, true))
         };
         if (Path.GetFileNameWithoutExtension(host).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
             start.ArgumentList.Add(Assembly.GetEntryAssembly()!.Location);

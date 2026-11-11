@@ -4,8 +4,9 @@ param(
   [Parameter(Mandatory)][string] $AssemblyPath
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $RepositoryRoot 'Tools\windows\SourceReader.ps1')
 $uiRoot = Join-Path $RepositoryRoot 'Tools\windows\ValidationRunner\Ui'
-$catalogText = [IO.File]::ReadAllText((Join-Path $uiRoot 'source-assertions.json'))
+$catalogText = Read-SemanticSource (Join-Path $uiRoot 'source-assertions.json')
 if ($catalogText.Length -gt 1048576) { throw 'UI source assertion data exceeded its size limit' }
 $catalog = @($catalogText | ConvertFrom-Json -Depth 100)
 if ($catalog.Count -ne 58) { throw 'Root UI declarative source assertion count must remain 58' }
@@ -27,7 +28,7 @@ $resources = @{}
 $linkage = @{ verified = $false }
 function Assert-ProductionSourceLinkage {
   if ($linkage.verified) { return }
-  $gateText = [IO.File]::ReadAllText((Join-Path $RepositoryRoot $paths.gate))
+  $gateText = Read-SemanticSource (Join-Path $RepositoryRoot $paths.gate)
   if ($gateText -match '\bclass\s+(GraphCodeUiaGateState|GraphCodeUiaHostInfo|GraphCodeUiaAttribution|GraphCodeMultiProjectRenameNative)\b' -or
       -not $gateText.Contains('Import-CompiledValidationAssembly.ps1') -or
       -not $gateText.Contains('-AssemblyPath $validationAssemblyPath -RequiredType $requiredType')) {
@@ -47,7 +48,7 @@ function Assert-ProductionSourceLinkage {
   if (-not $input -or $input.FieldType -ne $bindings.GetType('GraphCode.Windows.UiaInputSafety', $true)) {
     throw 'Production gate does not use the exact tested shared input component'
   }
-  $project = [IO.File]::ReadAllText((Join-Path $RepositoryRoot 'Tools\windows\ValidationRunner\Bindings\Windows\WindowsValidationBindings.csproj'))
+  $project = Read-SemanticSource (Join-Path $RepositoryRoot 'Tools\windows\ValidationRunner\Bindings\Windows\WindowsValidationBindings.csproj')
   if (-not $project.Contains('Compile Include="..\..\Ui\Production\*.cs"') -or
       -not $project.Contains('Compile Include="..\..\..\UiaWindowActivation.cs"')) {
     throw 'Production binding does not compile the actual current shared sources'
@@ -58,7 +59,7 @@ function Read-SourceResource([string] $Name) {
   if (-not $paths.ContainsKey($Name)) { throw "Undeclared UI source resource: $Name" }
   if (-not $resources.ContainsKey($Name)) {
     if ($Name -cin @('gate-state', 'input-safety', 'host-info')) { Assert-ProductionSourceLinkage }
-    $text = [IO.File]::ReadAllText((Join-Path $RepositoryRoot $paths[$Name]))
+    $text = Read-SemanticSource (Join-Path $RepositoryRoot $paths[$Name])
     $resources[$Name] = $text
   }
   return $resources[$Name]

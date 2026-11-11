@@ -45,8 +45,8 @@ public static class PowerShellPayload
             UseShellExecute = false,
             CreateNoWindow = true,
             WorkingDirectory = context.RepositoryRoot,
-            StandardOutputEncoding = new UTF8Encoding(false, true),
-            StandardErrorEncoding = new UTF8Encoding(false, true)
+            StandardOutputEncoding = OwnedByteStreamCapture.RequireUtf8NoBom(new UTF8Encoding(false, true)),
+            StandardErrorEncoding = OwnedByteStreamCapture.RequireUtf8NoBom(new UTF8Encoding(false, true))
         };
         foreach (var argument in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-File", script }.Concat(arguments))
             start.ArgumentList.Add(argument);

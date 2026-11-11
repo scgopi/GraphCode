@@ -6,6 +6,7 @@ param(
 )
 
 . (Join-Path $PSScriptRoot 'AdapterSupport.ps1')
+. (Join-Path $RepositoryRoot 'Tools\windows\CandidateAdmission.ps1')
 $script:OwnershipMockSignals = $true
 Import-OwnershipBindings $RepositoryRoot $AssemblyPath
 $consumer = Read-OwnershipProductionAst (Join-Path $RepositoryRoot 'Tools\windows\validate.ps1')
@@ -31,7 +32,8 @@ try {
             $state = @{ root = $null; output = [Collections.Generic.List[string]]::new() }
             $failure = $null
             try {
-                Invoke-WindowsShellValidationIsolation -WorkspaceRoot $fixture -ValidationRootParent (Join-Path $fixture 'isolations') `
+                Invoke-WindowsShellValidationIsolation -WorkspaceRoot $fixture `
+                    -ValidationRootParent (Join-Path $fixture "isolations\$($case.id)") `
                     -UserProfileRoot (Join-Path $fixture 'profile') -LocalAppDataRoot (Join-Path $fixture 'local') -Action {
                     $state.root = $env:GRAPHCODE_VALIDATION_ROOT
                     Invoke-Native 'controlled actual UIA retention boundary' {

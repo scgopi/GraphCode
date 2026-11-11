@@ -4,13 +4,11 @@ param(
   [Parameter(Mandatory)][string] $AssemblyPath
 )
 $ErrorActionPreference = 'Stop'
-function ConvertTo-SourceLineEndings([string] $Source) {
-  return $Source.Replace("`r`n", "`n")
-}
+. (Join-Path $RepositoryRoot 'Tools\windows\SourceReader.ps1')
 $uiRoot = Join-Path $RepositoryRoot 'Tools\windows\ValidationRunner\Ui'
-$activation = [IO.File]::ReadAllText((Join-Path $RepositoryRoot 'Tools\windows\UiaWindowActivation.cs'))
-$gate = [IO.File]::ReadAllText((Join-Path $uiRoot 'Production\GraphCodeUiaGateState.cs'))
-$inputSource = ConvertTo-SourceLineEndings ([IO.File]::ReadAllText((Join-Path $uiRoot 'Production\UiaInputSafety.cs')))
+$activation = Read-SemanticSource (Join-Path $RepositoryRoot 'Tools\windows\UiaWindowActivation.cs')
+$gate = Read-SemanticSource (Join-Path $uiRoot 'Production\GraphCodeUiaGateState.cs')
+$inputSource = Read-SemanticSource (Join-Path $uiRoot 'Production\UiaInputSafety.cs')
 $results = [Collections.Generic.List[object]]::new()
 
 function Assert-UiContract([bool] $Condition, [string] $Message) {
@@ -135,7 +133,7 @@ $rootEvaluator = @($rootAst.FindAll({ param($node)
 }, $true))
 Assert-UiContract ($rootPopup.Count -eq 1 -and $rootEvaluator.Count -eq 1) `
   'Actual declarative popup predicate or evaluator is missing or duplicated'
-$gateSource = [IO.File]::ReadAllText((Join-Path $RepositoryRoot 'Tools\windows\uia-live-gate.ps1'))
+$gateSource = Read-SemanticSource (Join-Path $RepositoryRoot 'Tools\windows\uia-live-gate.ps1')
 $rootPopupResults = [Collections.Generic.List[bool]]::new()
 function Confirm-RootPopupSource([string] $Source) {
   $rootResources = @{ gate = $gateSource; 'input-safety' = $Source }
@@ -170,7 +168,7 @@ foreach ($case in $popupCases) {
         '      ObserveInput("popup-closed", (uint)inputs.Length, sent);'
       $lfSource = $inputSource.Replace("`r`n", "`n")
       foreach ($checkoutSource in @($lfSource, $lfSource.Replace("`n", "`r`n"))) {
-        $normalizedSource = ConvertTo-SourceLineEndings $checkoutSource
+        $normalizedSource = ConvertTo-SemanticSourceText $checkoutSource
         Assert-UiContract ([regex]::Matches($normalizedSource, [regex]::Escape($closureObservation)).Count -eq 1) `
           'LF and CRLF checkouts must identify exactly one production closure observation'
         Assert-UiContract ((Confirm-PopupSource $normalizedSource) -and (Confirm-RootPopupSource $normalizedSource)) `

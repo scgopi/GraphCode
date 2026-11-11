@@ -7,6 +7,7 @@ $ErrorActionPreference = "Stop"
 Describe "Windows shell validation profile isolation" {
 BeforeAll {
   $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
+  . (Join-Path $repoRoot "Tools\windows\CandidateAdmission.ps1")
   $runnerPath = Join-Path $repoRoot "Tools\windows\validate.ps1"
   $runnerSource = Get-Content -LiteralPath $runnerPath -Raw
   $tokens = $null

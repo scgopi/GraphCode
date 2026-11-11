@@ -13,10 +13,22 @@ public sealed class OwnedByteStreamCapture
     private readonly Decoder decoder;
     private readonly RetentionSignalObserver observer;
     private readonly StringBuilder text = new();
+    private readonly byte[] prefix = new byte[3];
+    private int prefixLength;
+    private bool bomDetected;
     private DecoderFallbackException? decodingFailure;
 
     public Task RawEof { get; }
     public Task<string> Text { get; }
+
+    public static Encoding RequireUtf8NoBom(Encoding? encoding)
+    {
+        Encoding selected = (Encoding)(encoding ?? new UTF8Encoding(false, true)).Clone();
+        if (selected.CodePage != Encoding.UTF8.CodePage || selected.GetPreamble().Length != 0)
+            throw new ArgumentException("Owned child output encoding must be UTF-8 without BOM.", nameof(encoding));
+        selected.DecoderFallback = DecoderFallback.ExceptionFallback;
+        return selected;
+    }
 
     public OwnedByteStreamCapture(Stream input, string path, Encoding? encoding, RetentionSignalObserver observer)
     {
@@ -42,6 +54,14 @@ public sealed class OwnedByteStreamCapture
                 await evidence.WriteAsync(bytes.AsMemory(0, count)).ConfigureAwait(false);
                 await evidence.FlushAsync().ConfigureAwait(false);
                 observer.OnBytes(bytes.AsSpan(0, count));
+                if (prefixLength < prefix.Length)
+                {
+                    int copied = Math.Min(count, prefix.Length - prefixLength);
+                    Array.Copy(bytes, 0, prefix, prefixLength, copied);
+                    prefixLength += copied;
+                    if (prefixLength == prefix.Length)
+                        bomDetected = prefix is [0xef, 0xbb, 0xbf];
+                }
                 if (decodingFailure == null)
                 {
                     try
@@ -70,6 +90,8 @@ public sealed class OwnedByteStreamCapture
     private async Task<string> DecodeResultAsync()
     {
         await RawEof.ConfigureAwait(false);
+        if (bomDetected)
+            throw new InvalidDataException("Owned child output must be UTF-8 without BOM.");
         if (decodingFailure != null) ExceptionDispatchInfo.Capture(decodingFailure).Throw();
         return text.ToString();
     }

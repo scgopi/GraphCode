@@ -80,13 +80,14 @@ public sealed class OwnershipSuite : IValidationSuite
     [
         "quote-empty", "quote-trailing-slash", "quote-embedded", "quote-unicode", "quote-nul",
         "stream-raw", "stream-surrogate-boundary", "stream-no-overwrite", "stream-independent-faults", "stream-shared-deadline",
+        "stream-encoding-contract",
         "receipt-valid", "receipt-existing", "receipt-missing", "receipt-file", "receipt-absent",
         "receipt-duplicate-json", "receipt-foreign-root", "receipt-over-limit",
         "proof-success", "proof-root-survivor", "proof-job-survivor", "proof-stdout-fault", "proof-stderr-fault",
         "cleanup-success", "cleanup-root-survivor", "cleanup-job-survivor", "cleanup-stdout-fault",
         "cleanup-both-stream-faults", "cleanup-primary-error", "cleanup-only-error", "cleanup-original-deadline", "cleanup-later-actions",
         "cleanup-descendant-unknown", "signal-fragmented", "signal-crlf", "signal-eof", "signal-exact-only", "signal-overlong",
-        "raw-codec-malformed-eof", "raw-codec-retention-after-malformed",
+        "raw-codec-malformed-eof", "raw-codec-retention-after-malformed", "raw-codec-bom",
         "json-malformed", "json-duplicate", "json-nested-duplicate", "json-array", "json-case-sensitive",
         "frame-fragmented-unicode", "frame-clean-eof", "frame-short-header", "frame-short-body", "frame-zero", "frame-over-limit", "frame-invalid-utf8",
         "peer-positive-rename", "peer-resume-unchanged", "peer-foreign-owner", "peer-foreign-node",
@@ -205,6 +206,14 @@ public sealed class OwnershipSuite : IValidationSuite
         }
         if (id.StartsWith("stream-", StringComparison.Ordinal))
         {
+            if (id == "stream-encoding-contract")
+            {
+                Reject<ArgumentException>(() => OwnedByteStreamCapture.RequireUtf8NoBom(new UTF8Encoding(true, true)));
+                Reject<ArgumentException>(() => OwnedByteStreamCapture.RequireUtf8NoBom(Encoding.Unicode));
+                Require(OwnedByteStreamCapture.RequireUtf8NoBom(null).DecoderFallback is DecoderExceptionFallback,
+                    "Default owned output encoding was not strict UTF-8.");
+                return;
+            }
             if (id == "stream-independent-faults")
             {
                 var first = new IOException("stdout original");
@@ -343,14 +352,18 @@ public sealed class OwnershipSuite : IValidationSuite
         if (id.StartsWith("raw-codec-", StringComparison.Ordinal))
         {
             bool withSignal = id == "raw-codec-retention-after-malformed";
-            byte[] bytes = withSignal ? [0xc3, 0x28, 10, .. Encoding.UTF8.GetBytes(OwnershipRetention.Sentinel + "\n")] : [0xc3, 0x28];
+            byte[] bytes = id == "raw-codec-bom" ? [0xef, 0xbb, 0xbf, 0x7b, 0x7d] :
+                withSignal ? [0xc3, 0x28, 10, .. Encoding.UTF8.GetBytes(OwnershipRetention.Sentinel + "\n")] : [0xc3, 0x28];
             int signals = 0;
             string path = Path.Combine(root, id + ".log");
             using var memory = new MemoryStream(bytes);
             var capture = new OwnedByteStreamCapture(memory, path, new UTF8Encoding(false, true),
                 new RetentionSignalObserver(() => signals++));
             await capture.RawEof.ConfigureAwait(false);
-            await RejectAsync<DecoderFallbackException>(async () => { await capture.Text.ConfigureAwait(false); }).ConfigureAwait(false);
+            if (id == "raw-codec-bom")
+                await RejectAsync<InvalidDataException>(async () => { await capture.Text.ConfigureAwait(false); }).ConfigureAwait(false);
+            else
+                await RejectAsync<DecoderFallbackException>(async () => { await capture.Text.ConfigureAwait(false); }).ConfigureAwait(false);
             Require(capture.RawEof.IsCompletedSuccessfully && File.ReadAllBytes(path).SequenceEqual(bytes) &&
                 signals == (withSignal ? 1 : 0), "Strict decoding failure lost original bytes, independent raw EOF, or a later live retention marker.");
             return;
@@ -506,12 +519,7 @@ public sealed class OwnershipSuite : IValidationSuite
                 "Codec rejection did not independently prove raw EOF and safe owned cleanup.");
             string rawPath = Path.Combine(childRoot, $"owned-{owned.ProcessId}-{owned.CreationFileTime}-stdout.log");
             Require(File.ReadAllBytes(rawPath).SequenceEqual(OwnedFixture.BytesForMode(id)), "Original pipe bytes were normalized or lost.");
-            if (id == "bytes-utf8-bom")
-            {
-                Require(result != null && result.StandardOutput.StartsWith('\uFEFF'), "UTF-8 BOM was consumed by capture.");
-                Reject<InvalidDataException>(() => MultiProjectJson.Parse(result!.StandardOutput), "MULTIPROJECT_JSON");
-            }
-            else if (id is "bytes-utf16-bom" or "bytes-invalid-utf8")
+            if (id is "bytes-utf8-bom" or "bytes-utf16-bom" or "bytes-invalid-utf8")
                 Require(failure != null, "Non-UTF-8 pipe bytes were accepted by BOM autodetection or replacement.");
             else Require(result?.StandardOutput == new string('a', 4095) + "\uD83D\uDE80tail", "Supplementary scalar crossing the 4096-byte read boundary changed.");
             return;

@@ -63,6 +63,12 @@
       "exactCount": 1
     },
     {
+      "id": "ownership.managed.stream-encoding-contract",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
       "id": "ownership.managed.receipt-valid",
       "owner": "Ownership",
       "minimumCount": 1,
@@ -238,6 +244,12 @@
     },
     {
       "id": "ownership.managed.raw-codec-retention-after-malformed",
+      "owner": "Ownership",
+      "minimumCount": 1,
+      "exactCount": 1
+    },
+    {
+      "id": "ownership.managed.raw-codec-bom",
       "owner": "Ownership",
       "minimumCount": 1,
       "exactCount": 1
