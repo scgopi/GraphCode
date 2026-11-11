@@ -66,11 +66,34 @@ public struct KeyInputRecord {
     public uint Pad0, Pad1;
   }
 public sealed class PopupItemHit {
+    public PopupInputReceipt InputReceipt { get; set; }
     public int Position, ItemId, Left, Top, Right, Bottom;
     public int ScreenX, ScreenY, ClientX, ClientY, CursorBeforeX, CursorBeforeY;
     public int CursorAtX, CursorAtY;
     public bool Hilite, UsedKeyboardFallback, UsedSelectItemFallback;
     public bool HiliteAtEnterFallback, HiliteBeforeEnter;
+  }
+public sealed class PopupInputSample {
+    public string Phase { get; set; }
+    public long Timestamp { get; set; }
+    public string Utc { get; set; }
+    public long Foreground { get; set; }
+    public uint ForegroundProcessId { get; set; }
+    public bool CursorAvailable { get; set; }
+    public int CursorX { get; set; }
+    public int CursorY { get; set; }
+    public long HitWindow { get; set; }
+    public uint HitProcessId { get; set; }
+    public bool PopupVisible { get; set; }
+    public uint Expected { get; set; }
+    public uint Sent { get; set; }
+    public string ObservationError { get; set; }
+  }
+public sealed class PopupInputReceipt {
+    public string SelectionOutcome => "unobserved";
+    public long TimestampFrequency => System.Diagnostics.Stopwatch.Frequency;
+    public System.Collections.Generic.List<PopupInputSample> Samples { get; } =
+      new System.Collections.Generic.List<PopupInputSample>();
   }
 public uint LastEditClearExpected;
 public uint LastEditClearSent;
@@ -265,6 +288,37 @@ public PopupItemHit ClickPopupMenuItemStrict(IntPtr popup, IntPtr owner, int pos
     return hit;
   }
 private PopupItemHit ClickPopupMenuItemCore(IntPtr popup, IntPtr owner, int position, int commandId, uint expectedProcessId, bool allowFallback) {
+    PopupInputReceipt receipt = Environment.GetEnvironmentVariable("GRAPHCODE_UIA_GATE") == "1" &&
+      Environment.GetEnvironmentVariable("GRAPHCODE_UIA_EDGE_ACTION_TRACE") == "1"
+      ? new PopupInputReceipt() : null;
+    void ObserveInput(string phase, uint expected, uint sent) {
+      if (receipt == null) return;
+      var sample = new PopupInputSample {
+        Phase = phase, Timestamp = System.Diagnostics.Stopwatch.GetTimestamp(),
+        Utc = DateTimeOffset.UtcNow.ToString("O"), Expected = expected, Sent = sent
+      };
+      try {
+        IntPtr foreground = operations.GetForegroundWindow();
+        sample.Foreground = foreground.ToInt64();
+        sample.ForegroundProcessId = operations.WindowProcessId(foreground);
+        ScreenPoint cursor;
+        sample.CursorAvailable = operations.GetCursorPos(out cursor);
+        if (sample.CursorAvailable) {
+          sample.CursorX = cursor.X; sample.CursorY = cursor.Y;
+          IntPtr hit = operations.WindowFromPoint(cursor);
+          sample.HitWindow = hit.ToInt64();
+          sample.HitProcessId = operations.WindowProcessId(hit);
+        }
+        sample.PopupVisible = operations.IsWindowVisible(popup);
+      } catch (Exception failure) {
+        sample.ObservationError = failure.ToString();
+      }
+      receipt.Samples.Add(sample);
+      Console.WriteLine("UIA_POPUP_INPUT_RECEIPT=" + System.Text.Json.JsonSerializer.Serialize(new {
+        owner = owner.ToInt64(), popup = popup.ToInt64(), expectedProcessId, commandId,
+        selectionOutcome = receipt.SelectionOutcome, timestampFrequency = receipt.TimestampFrequency, sample
+      }));
+    }
     if (popup == IntPtr.Zero || position < 0) return null;
     IntPtr menu = operations.PopupMenuHandle(popup);
     RECT item;
@@ -373,10 +427,14 @@ private PopupItemHit ClickPopupMenuItemCore(IntPtr popup, IntPtr owner, int posi
       operations.WindowProcessId(foregroundBeforeInput), operations.GetAncestor(foregroundBeforeInput, 2),
       operations.WindowProcessId(inputPointWindow), operations.GetAncestor(inputPointWindow, 2), operations.IsWindowVisible(popup)))
       throw new InvalidOperationException("Popup input ownership changed; no mouse input was injected");
+    ObserveInput("before-send", (uint)inputs.Length, 0);
     uint sent = operations.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input)));
+    ObserveInput("after-send", (uint)inputs.Length, sent);
     if (sent != inputs.Length)
       throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} popup mouse events: Win32Error={2}", sent, inputs.Length, Marshal.GetLastWin32Error()));
     for (int attempt = 0; attempt < 20 && operations.IsWindowVisible(popup); attempt++) operations.Sleep(10);
+    if (receipt != null && !operations.IsWindowVisible(popup))
+      ObserveInput("popup-closed", (uint)inputs.Length, sent);
     bool keyboardFallback = false;
     bool hiliteAtEnterFallback = false;
     bool hiliteBeforeEnter = false;
@@ -402,7 +460,11 @@ private PopupItemHit ClickPopupMenuItemCore(IntPtr popup, IntPtr owner, int posi
       if (!keyboardFallback)
         throw new InvalidOperationException(String.Format("Popup Enter fallback was rejected: Win32Error={0}", Marshal.GetLastWin32Error()));
     }
+    if (receipt != null && receipt.Samples[receipt.Samples.Count - 1].Phase != "popup-closed" &&
+        !operations.IsWindowVisible(popup))
+      ObserveInput("popup-closed", (uint)inputs.Length, sent);
     return new PopupItemHit {
+      InputReceipt = receipt,
       Position = position, ItemId = commandId, Left = item.Left, Top = item.Top,
       Right = item.Right, Bottom = item.Bottom,
       ScreenX = screenX, ScreenY = screenY, ClientX = point.X, ClientY = point.Y,

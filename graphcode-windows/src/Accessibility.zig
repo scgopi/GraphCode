@@ -361,9 +361,9 @@ pub const Provider = struct {
 pub fn defaultContract(allocator: std.mem.Allocator) !Provider {
     var provider = Provider.init(allocator);
     errdefer provider.deinit();
-    const window = try provider.add(.{ .id = "graphcode-root", .name = "GraphCode UIA Root", .role = .window });
-    const projects = try provider.add(.{ .id = "projects", .name = "Projects", .role = .list, .parent = window, .focusable = true, .patterns = &.{.selection} });
-    _ = try provider.add(.{ .id = "loops", .name = "Loops", .role = .list, .parent = window, .focusable = true, .patterns = &.{.selection} });
+    const window = try provider.add(.{ .id = "graphcode-root", .name = "GraphCode UIA Root", .role = .window, .patterns = &.{.selection} });
+    const projects = try provider.add(.{ .id = "projects", .name = "Projects", .role = .list, .parent = window, .focusable = true });
+    _ = try provider.add(.{ .id = "loops", .name = "Loops", .role = .list, .parent = window, .focusable = true });
     _ = try provider.add(.{ .id = "worktrees", .name = "Worktrees", .role = .list, .parent = window, .focusable = true, .patterns = &.{.selection} });
     const graph = try provider.add(.{ .id = "graph", .name = "Graph", .role = .navigation, .parent = window });
     const menu = try provider.add(.{ .id = "actions", .name = "Actions", .role = .menu, .parent = window });
@@ -375,8 +375,8 @@ pub fn defaultContract(allocator: std.mem.Allocator) !Provider {
     _ = try provider.add(.{ .id = "save-worktree-policy", .name = "Save worktree policy", .role = .menu_item, .parent = menu, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "allow-reclaim", .name = "Allow reclaim", .role = .checkbox, .parent = menu, .patterns = &.{ .invoke, .toggle } });
     _ = try provider.add(.{ .id = "confirm-each-reclaim", .name = "Confirm each reclaim", .role = .checkbox, .parent = menu, .patterns = &.{ .invoke, .toggle } });
-    _ = try provider.add(.{ .id = "overview-destination", .name = "Graph", .role = .button, .parent = projects, .focusable = true, .patterns = &.{.invoke} });
-    _ = try provider.add(.{ .id = "quick-chats-destination", .name = "Quick Chats", .role = .button, .parent = projects, .focusable = true, .patterns = &.{.invoke} });
+    _ = try provider.add(.{ .id = "overview-destination", .name = "Graph", .role = .list_item, .parent = projects, .focusable = true, .patterns = &.{ .invoke, .selection_item } });
+    _ = try provider.add(.{ .id = "quick-chats-destination", .name = "Quick Chats", .role = .list_item, .parent = projects, .focusable = true, .patterns = &.{ .invoke, .selection_item } });
     _ = try provider.add(.{ .id = "canvas-primary-action", .name = "New Node or Chat", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "zoom-out", .name = "Zoom out", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "actual-size", .name = "Actual size", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
@@ -433,6 +433,9 @@ test "UIA contract exposes named roles patterns and deterministic focus order" {
     var provider = try defaultContract(std.testing.allocator);
     defer provider.deinit();
     const projects = provider.indexOfId("projects").?;
+    const root = provider.indexOfId("graphcode-root").?;
+    const overview = provider.indexOfId("overview-destination").?;
+    const chats = provider.indexOfId("quick-chats-destination").?;
     const loops = provider.indexOfId("loops").?;
     const worktrees = provider.indexOfId("worktrees").?;
     const graph = provider.indexOfId("graph").?;
@@ -441,7 +444,14 @@ test "UIA contract exposes named roles patterns and deterministic focus order" {
     const workspace_rename = provider.indexOfId("workspace-rename").?;
     const workspace_delete = provider.indexOfId("workspace-delete").?;
     try std.testing.expectEqual(Role.list, provider.elements.items[projects].role);
-    try std.testing.expect(provider.hasPattern(projects, .selection));
+    try std.testing.expect(provider.hasPattern(root, .selection));
+    try std.testing.expect(!provider.hasPattern(projects, .selection));
+    try std.testing.expect(!provider.hasPattern(loops, .selection));
+    for ([_]usize{ overview, chats }) |destination| {
+        try std.testing.expectEqual(Role.list_item, provider.elements.items[destination].role);
+        try std.testing.expect(provider.hasPattern(destination, .invoke));
+        try std.testing.expect(provider.hasPattern(destination, .selection_item));
+    }
     try std.testing.expectEqual(Role.navigation, provider.elements.items[graph].role);
     try std.testing.expectEqual(Role.menu, provider.elements.items[workspaces].role);
     try std.testing.expect(provider.hasPattern(workspaces, .selection));

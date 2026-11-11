@@ -100,6 +100,63 @@ public sealed class ManagedUiSuite : IValidationSuite
         foreach (string name in effects)
             cases.Add(new UiCase($"ui.popup.effect.{name}", () => RunPopupEffect(name),
                 "ValidationRunner.Tests.ps1:1256-1328"));
+        cases.Add(new UiCase("ui.popup.receipt.cancelled-after-queued-input", () =>
+        {
+            string? oldGate = Environment.GetEnvironmentVariable("GRAPHCODE_UIA_GATE");
+            string? oldTrace = Environment.GetEnvironmentVariable("GRAPHCODE_UIA_EDGE_ACTION_TRACE");
+            try
+            {
+                Environment.SetEnvironmentVariable("GRAPHCODE_UIA_GATE", "1");
+                Environment.SetEnvironmentVariable("GRAPHCODE_UIA_EDGE_ACTION_TRACE", "1");
+                var probe = new PopupEffectFixture();
+                probe.Reset("cancel-after-queued-input");
+                var input = new UiaInputSafety(probe);
+                var hit = input.ClickPopupMenuItem(new IntPtr(43), new IntPtr(42), 0, 5103, 4242);
+                var property = typeof(UiaInputSafety.PopupItemHit).GetProperty("InputReceipt");
+                ActivationCases.Require(property is not null,
+                    "RED: popup closure needs an input-only receipt, not inferred command selection");
+                string json = System.Text.Json.JsonSerializer.Serialize(property!.GetValue(hit));
+                using var document = System.Text.Json.JsonDocument.Parse(json);
+                var receipt = document.RootElement;
+                ActivationCases.Require(receipt.GetProperty("SelectionOutcome").GetString() == "unobserved",
+                    "Queued input and closed popup must not claim command selection");
+                var samples = receipt.GetProperty("Samples");
+                ActivationCases.Require(samples.GetArrayLength() == 3 &&
+                    samples[0].GetProperty("Phase").GetString() == "before-send" &&
+                    samples[1].GetProperty("Phase").GetString() == "after-send" &&
+                    samples[2].GetProperty("Phase").GetString() == "popup-closed" &&
+                    samples[0].GetProperty("PopupVisible").GetBoolean() &&
+                    !samples[2].GetProperty("PopupVisible").GetBoolean() &&
+                    samples[1].GetProperty("Expected").GetUInt32() == 2 &&
+                    samples[1].GetProperty("Sent").GetUInt32() == 2 &&
+                    samples[0].GetProperty("ForegroundProcessId").GetUInt32() == 4242 &&
+                    samples[1].GetProperty("ForegroundProcessId").GetUInt32() == 7777 &&
+                    samples[0].GetProperty("HitProcessId").GetUInt32() == 4242 &&
+                    samples[1].GetProperty("HitProcessId").GetUInt32() == 7777 &&
+                    samples[0].GetProperty("CursorAvailable").GetBoolean() &&
+                    samples[0].GetProperty("ObservationError").ValueKind == System.Text.Json.JsonValueKind.Null &&
+                    samples[0].GetProperty("Timestamp").GetInt64() <= samples[1].GetProperty("Timestamp").GetInt64() &&
+                    samples[1].GetProperty("Timestamp").GetInt64() <= samples[2].GetProperty("Timestamp").GetInt64() &&
+                    probe.MouseCalls == 1 && probe.KeyCalls == 0,
+                    "Popup receipt lost observation order/counts or added input");
+                // A separately observed TrackPopupMenu return of zero is cancellation,
+                // even though this input receipt contains a highlight and closed popup.
+                ActivationCases.Require(probe.ReturnedCommand == 0 && probe.ReturnedCommand != (uint)hit.ItemId &&
+                    receipt.GetProperty("SelectionOutcome").GetString() == "unobserved",
+                    "Command zero cannot be inferred as the requested command");
+                Environment.SetEnvironmentVariable("GRAPHCODE_UIA_EDGE_ACTION_TRACE", null);
+                probe.Reset("owned");
+                hit = input.ClickPopupMenuItem(new IntPtr(43), new IntPtr(42), 0, 5103, 4242);
+                ActivationCases.Require(property.GetValue(hit) is null && probe.MouseCalls == 1 &&
+                    probe.KeyCalls == 0 && probe.CursorReads == 3 && probe.ForegroundReads == 2,
+                    "Disabled diagnostics changed the original native observation/input sequence");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("GRAPHCODE_UIA_GATE", oldGate);
+                Environment.SetEnvironmentVariable("GRAPHCODE_UIA_EDGE_ACTION_TRACE", oldTrace);
+            }
+        }, "Actual shared popup helper; controlled queued-input/closure with external command-zero observation"));
 
         cases.Add(new UiCase("ui.geometry.seven-pixel-band", () =>
         {

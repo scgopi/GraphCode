@@ -4112,6 +4112,91 @@ function Get-CapAdvisoryExclusionDiagnostic {
     return [pscustomobject]$facts
 }
 
+function Get-CapDescendantRefusalDiagnostic {
+    param($Context, [Management.Automation.ErrorRecord]$Refusal)
+    $facts = [ordered]@{
+        ObservedUtc = $Context.ObservedUtc; ParentPid = $Context.ParentPid
+        ParentCreationFileTimeUtc = $Context.ParentCreationFileTimeUtc
+        CimProcessId = $Context.RawRow.ProcessId; CimParentProcessId = $Context.RawRow.ParentProcessId
+        CimSessionId = $Context.RawRow.SessionId; CimCreationDate = $Context.RawRow.CreationDate
+        CimExecutablePath = $Context.RawRow.ExecutablePath; CimCommandLine = $Context.RawRow.CommandLine
+        errorType = $Refusal.Exception.GetType().FullName; message = $Refusal.Exception.Message
+        fullyQualifiedErrorId = $Refusal.FullyQualifiedErrorId; scriptStackTrace = $Refusal.ScriptStackTrace
+    }
+    foreach ($snapshotName in @('NativeSnapshot', 'ParentNativeSnapshot')) {
+        $snapshot = $Context.$snapshotName
+        foreach ($name in @('ProcessId', 'CreationFileTimeUtc', 'ExitFileTimeUtc', 'ImagePath', 'IsExited')) {
+            $property = if ($null -ne $snapshot) { $snapshot.PSObject.Properties[$name] } else { $null }
+            $facts["${snapshotName}_$name"] = if ($null -ne $property) { $property.Value } else { $null }
+        }
+    }
+    $truncated = [Collections.Generic.List[object]]::new()
+    $omitted = [Collections.Generic.List[object]]::new()
+    foreach ($name in @($facts.Keys)) {
+        $value = $facts[$name]
+        if ($value -is [DateTime] -or $value -is [DateTimeOffset]) { $facts[$name] = $value.ToString('o') }
+        elseif ($value -is [string]) {
+            if ($value.Length -gt 2048) {
+                $facts[$name] = $value.Substring(0, 2048)
+                $truncated.Add([pscustomobject]@{ field = $name; originalCharacters = $value.Length; retainedCharacters = 2048 })
+            }
+        } elseif ($null -ne $value -and $value -isnot [int] -and $value -isnot [long] -and
+            $value -isnot [uint32] -and $value -isnot [uint64] -and $value -isnot [bool]) {
+            $omitted.Add([pscustomobject]@{ field = $name; reason = 'NON_SCALAR_VALUE_NOT_TRAVERSED'; type = $value.GetType().FullName })
+            $facts[$name] = $null
+        }
+    }
+    $facts.diagnosticCompleteness = 'BOUNDED_SCALARS_WITH_EXPLICIT_GRAPH_OMISSIONS'
+    $facts.RawRow = [pscustomobject]@{
+        ProcessId = $facts.CimProcessId; ParentProcessId = $facts.CimParentProcessId
+        SessionId = $facts.CimSessionId; CreationDate = $facts.CimCreationDate
+        ExecutablePath = $facts.CimExecutablePath; CommandLine = $facts.CimCommandLine
+    }
+    $facts.ErrorRecord = [pscustomobject]@{
+        Type = $facts.errorType; Message = $facts.message; FullyQualifiedErrorId = $facts.fullyQualifiedErrorId
+        ScriptStackTrace = $facts.scriptStackTrace
+    }
+    foreach ($snapshotName in @('NativeSnapshot', 'ParentNativeSnapshot')) {
+        $record = [ordered]@{}
+        foreach ($name in @('ProcessId', 'CreationFileTimeUtc', 'ExitFileTimeUtc', 'ImagePath', 'IsExited')) {
+            $record[$name] = $facts["${snapshotName}_$name"]
+            $facts.Remove("${snapshotName}_$name")
+        }
+        $facts[$snapshotName] = if ($null -eq $Context.$snapshotName) { $null } else { [pscustomobject]$record }
+    }
+    $facts.omittedGraphs = @('OriginalErrorRecord', 'OriginalErrorRecord.TargetObject',
+        'OriginalErrorRecord.InvocationInfo', 'OriginalErrorRecord.Exception.Data',
+        'NativeSnapshot.NonScalarMembers', 'ParentNativeSnapshot.NonScalarMembers', 'InitialNativeFailure', 'Module', 'Process')
+    $facts.omittedFields = @($omitted.ToArray())
+    $facts.truncatedFields = @($truncated.ToArray())
+    return [pscustomobject]$facts
+}
+
+function Write-CapDescendantRefusalDiagnostic {
+    param([Exception]$Failure, $Context, [Management.Automation.ErrorRecord]$Refusal)
+    try {
+        $Context.ErrorRecord = [pscustomobject]@{
+            Type = $Refusal.Exception.GetType().FullName; Message = $Refusal.Exception.Message
+            Raw = $Refusal.Exception.ToString(); FullyQualifiedErrorId = $Refusal.FullyQualifiedErrorId
+            Category = [string]$Refusal.CategoryInfo; ScriptStackTrace = $Refusal.ScriptStackTrace
+            ObservedUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        }
+        $diagnostic = Get-CapDescendantRefusalDiagnostic -Context $Context -Refusal $Refusal
+        $json = ConvertTo-Json -InputObject $diagnostic -Depth 6 -Compress
+        Write-CapTrace -Command 'CapDescendantRefusal' -Parameters @{ diagnosticJson = $json }
+    } catch {
+        $secondary = [pscustomobject]@{
+            type = $_.Exception.GetType().FullName
+            message = $_.Exception.Message.Substring(0, [Math]::Min(1024, $_.Exception.Message.Length))
+            disposition = 'PRIMARY_OWNERSHIP_REFUSAL_PRESERVED'
+        }
+        $Failure.Data['DescendantDiagnosticFailure'] = $secondary
+        try {
+            [Console]::Error.WriteLine("CAP_DESCENDANT_DIAGNOSTIC_FAILURE type=$($secondary.type) message=$($secondary.message); primary ownership refusal preserved")
+        } catch { $Failure.Data['DescendantDiagnosticReportingFailure'] = $_.Exception }
+    }
+}
+
 function Get-CapOwnedDescendants {
     [CmdletBinding()]
     param(
@@ -4345,23 +4430,13 @@ function Get-CapOwnedDescendants {
                 $retained = $true
                 $changed = $true
             } catch {
-                $context.ErrorRecord = [pscustomobject]@{
-                    Type = $_.Exception.GetType().FullName
-                    Message = $_.Exception.Message
-                    Raw = $_.Exception.ToString()
-                    FullyQualifiedErrorId = $_.FullyQualifiedErrorId
-                    Category = [string]$_.CategoryInfo
-                    ScriptStackTrace = $_.ScriptStackTrace
-                    ObservedUtc = [DateTimeOffset]::UtcNow.ToString('o')
-                }
+                $refusal = $_
                 $failure = [InvalidOperationException]::new("${failureCode}: $($_.Exception.Message)", $_.Exception)
                 $failure.Data['CapCaptureCode'] = $failureCode
                 $failure.Data['CandidateContext'] = $context
                 $failure.Data['OriginalErrorRecord'] = $_
                 $failure.Data['RawCimRow'] = $row
-                Write-CapTrace -Command 'CapDescendantRefusal' -Parameters @{
-                    diagnosticJson = ($context | ConvertTo-Json -Depth 10 -Compress)
-                }
+                Write-CapDescendantRefusalDiagnostic -Failure $failure -Context $context -Refusal $refusal
                 throw $failure
             } finally {
                 if (-not $retained -and $null -ne $process) { $process.Dispose() }

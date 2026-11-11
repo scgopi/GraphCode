@@ -1,5 +1,23 @@
 # GraphCode Windows shell
 
+For an explicitly admitted Edit Edge dispatch diagnostic, set both process-only
+`GRAPHCODE_UIA_GATE=1` and `GRAPHCODE_UIA_EDGE_ACTION_TRACE=1`. Without both exact
+values the receipt logger is inactive. It emits at most 128 `EDGE_ACTION` records
+to the existing stderr logger, covering popup return/action dispatch, App callback
+and stable-target refusal/selection, edge-edit guard results, and modal show entry.
+Identity fields contain hashes and byte counts, not project paths, titles, endpoint
+text, or draft contents. Sequence numbers are process-local.
+While the edge popup is active, additional records capture monotonic native
+ticks, its GUI thread's focus/capture/menu owner, foreground handle/process,
+and delivered cancel/activate/capture/focus messages. These are point-in-time
+observations, not proof of what caused cancellation. A zero `TrackPopupMenu`
+return remains cancellation and never causes an edit callback.
+This only observes the existing path: it adds no command handler, input, retry,
+guard bypass, dispatch fallback, or change to editing results. Missing receipts
+after the trace budget is exhausted cannot establish that an action did not run.
+Focused headless receipt tests and compile checks do not attribute the previously
+observed missing native Edit Edge modal or qualify a GUI rerun.
+
 For a separately admitted receiver diagnostic, build with
 `-Dwire-receiver-trace=true`. The default is false. This uses the existing stderr
 logger for at most 64 received mouse move/down/up, capture-change, cancel-mode,

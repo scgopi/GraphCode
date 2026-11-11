@@ -68,6 +68,19 @@ struct Row {
   bool scrolls = false;
   RECT bounds{};
 };
+static bool isNavigationRow(const Row &row) {
+  return (row.parent == 1 &&
+      (row.identity.rfind("project:", 0) == 0 ||
+       row.identity.rfind("open-project:", 0) == 0 ||
+       row.identity.rfind("quick-chat-row:", 0) == 0)) ||
+      (row.parent == 2 && row.identity.rfind("loop:", 0) == 0);
+}
+static bool isSelectionRow(const Row &row) {
+  if (row.parent == 1 || row.parent == 2) return isNavigationRow(row);
+  return !isHeader(row.identity) &&
+      row.identity.rfind("workspace-toolbar:", 0) != 0 &&
+      row.identity.rfind("quick-chat-workspace:", 0) != 0;
+}
 struct State {
   std::mutex mutex;
   HWND hwnd{};
@@ -97,6 +110,7 @@ struct State {
   // below. Until the app reports them the fixed elements use placeholder rects.
   RECT destination_bounds[2]{};
   bool has_destination_bounds[2]{};
+  bool destination_selected[2]{};
   // The sidebar's single scroll viewport, delivered through gc_uia_set_sidebar_scroll:
   // current offset, maximum offset and visible height, in the same units.
   int scroll_offset = 0;
@@ -172,8 +186,7 @@ class Node final : public IRawElementProviderSimple,
       *out = static_cast<IRawElementProviderFragmentRoot *>(this);
     else if (iid == __uuidof(IInvokeProvider) && supportsInvoke())
       *out = static_cast<IInvokeProvider *>(this);
-    else if (iid == __uuidof(ISelectionProvider) &&
-             ((id_ >= 1 && id_ <= 4) || id_ == 21))
+    else if (iid == __uuidof(ISelectionProvider) && supportsSelection())
       *out = static_cast<ISelectionProvider *>(this);
     else if (iid == __uuidof(ISelectionItemProvider) && supportsSelectionItem())
       *out = static_cast<ISelectionItemProvider *>(this);
@@ -208,10 +221,13 @@ class Node final : public IRawElementProviderSimple,
   HRESULT STDMETHODCALLTYPE GetPatternProvider(PATTERNID id, IUnknown **value) override {
     if (!value) return E_POINTER;
     *value = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
+    }
     if (id == UIA_InvokePatternId && supportsInvoke())
       *value = static_cast<IInvokeProvider *>(this);
-    else if (id == UIA_SelectionPatternId &&
-             ((id_ >= 1 && id_ <= 4) || id_ == 21))
+    else if (id == UIA_SelectionPatternId && supportsSelection())
       *value = static_cast<ISelectionProvider *>(this);
     else if (id == UIA_SelectionItemPatternId && supportsSelectionItem())
       *value = static_cast<ISelectionItemProvider *>(this);
@@ -236,7 +252,17 @@ class Node final : public IRawElementProviderSimple,
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
       if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
-      if (property == UIA_NamePropertyId) {
+      if (property == UIA_IsSelectionItemPatternAvailablePropertyId) {
+        bool_value = supportsSelectionItemLocked();
+        kind = kBool;
+      } else if (property == UIA_IsSelectionPatternAvailablePropertyId) {
+        bool_value = supportsSelection();
+        kind = kBool;
+      } else if (property == UIA_SelectionItemIsSelectedPropertyId &&
+                 supportsSelectionItemLocked()) {
+        bool_value = isSelectedLocked();
+        kind = kBool;
+      } else if (property == UIA_NamePropertyId) {
         string_value = nameLocked();
         kind = kString;
       } else if (property == UIA_AutomationIdPropertyId) {
@@ -551,6 +577,8 @@ class Node final : public IRawElementProviderSimple,
       }
       for (int64_t key : state_->row_order) {
         const Row &row = state_->rows.at(key);
+        if (row.identity == "quick-chats-header:quick-chats" &&
+            state_->has_destination_bounds[1]) continue;
         consider(key, hitTier(row.identity), row.bounds);
       }
       if (best >= 0) hit = retainElementLocked(best);
@@ -563,19 +591,18 @@ class Node final : public IRawElementProviderSimple,
   }
 
   HRESULT STDMETHODCALLTYPE Invoke() override {
-    if (!supportsInvoke()) return UIA_E_ELEMENTNOTENABLED;
     HWND hwnd = nullptr;
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
       if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
+      if (!supportsInvokeLocked()) return UIA_E_ELEMENTNOTENABLED;
       if (!worktreeFixedEnabledLocked(id_)) return UIA_E_ELEMENTNOTENABLED;
       hwnd = state_->hwnd;
     }
     if (isRowKey(id_)) {
       const WPARAM command = kDynamicInvokeTag |
           (static_cast<uint64_t>(id_) & kRowPayloadMask);
-      PostMessageW(hwnd, WM_COMMAND, command, 0);
-      return S_OK;
+      return postCommand(hwnd, command);
     }
     const UINT command = id_ == 7 ? 6 : id_ == 8 ? 7 : id_ == 9 ? 8 :
                          id_ == 10 ? 9 : id_ == 11 ? 10 : id_ == 12 ? 12 :
@@ -583,32 +610,41 @@ class Node final : public IRawElementProviderSimple,
                          id_ == 16 ? 22 : id_ == 17 ? 23 : id_ == 18 ? 24 :
                          id_ == 19 ? 25 : id_ == 20 ? 26 : id_ == 22 ? 27 :
                          id_ == 23 ? 28 : 29;
-    PostMessageW(hwnd, WM_COMMAND, command, 0);
-    return S_OK;
+    return postCommand(hwnd, command);
   }
   HRESULT STDMETHODCALLTYPE get_CanSelectMultiple(BOOL *value) override {
     if (!value) return E_POINTER;
-    *value = TRUE;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
+    *value = id_ == 0 ? FALSE : TRUE;
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE get_IsSelectionRequired(BOOL *value) override {
     if (!value) return E_POINTER;
-    *value = FALSE;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
+    *value = id_ == 0 ? TRUE : FALSE;
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE GetSelection(SAFEARRAY **value) override {
     if (!value) return E_POINTER;
+    *value = nullptr;
     std::vector<Node *> selected;
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
-      if (!isAvailableLocked() ||
-          !((id_ >= 1 && id_ <= 4) || id_ == 21)) {
-        *value = nullptr;
+      if (!isAvailableLocked() || !supportsSelection()) {
         return UIA_E_ELEMENTNOTAVAILABLE;
+      }
+      if (id_ == 0) {
+        for (int slot = 0; slot < 2; ++slot)
+          if (state_->destination_selected[slot])
+            if (Node *node = retainElementLocked(14 + slot)) selected.push_back(node);
       }
       for (int64_t id : state_->row_order) {
         const auto row = state_->rows.find(id);
-        if (row != state_->rows.end() && row->second.parent == id_ && row->second.selected) {
+        if (row != state_->rows.end() && isSelectionRow(row->second) &&
+            (isNavigationRow(row->second) ? id_ == 0 : row->second.parent == id_) &&
+            row->second.selected) {
           if (Node *node = retainElementLocked(id)) selected.push_back(node);
         }
       }
@@ -616,14 +652,19 @@ class Node final : public IRawElementProviderSimple,
     *value = SafeArrayCreateVector(VT_UNKNOWN, 0, static_cast<ULONG>(selected.size()));
     if (!*value) {
       for (Node *node : selected) node->Release();
-      return selected.empty() ? S_OK : E_OUTOFMEMORY;
+      return E_OUTOFMEMORY;
     }
+    HRESULT result = S_OK;
     for (LONG index = 0; index < static_cast<LONG>(selected.size()); ++index) {
       IUnknown *unknown = static_cast<IRawElementProviderSimple *>(selected[static_cast<size_t>(index)]);
-      SafeArrayPutElement(*value, &index, unknown);
+      if (SUCCEEDED(result)) result = SafeArrayPutElement(*value, &index, unknown);
       selected[static_cast<size_t>(index)]->Release();
     }
-    return S_OK;
+    if (FAILED(result)) {
+      SafeArrayDestroy(*value);
+      *value = nullptr;
+    }
+    return result;
   }
   HRESULT STDMETHODCALLTYPE Select() override { return setSelected(kSelect); }
   HRESULT STDMETHODCALLTYPE AddToSelection() override { return setSelected(kAdd); }
@@ -631,9 +672,10 @@ class Node final : public IRawElementProviderSimple,
   HRESULT STDMETHODCALLTYPE get_IsSelected(BOOL *value) override {
     if (!value) return E_POINTER;
     std::lock_guard<std::mutex> lock(state_->mutex);
-    if (!isAvailableLocked() || !isRowKey(id_))
+    if (!isAvailableLocked())
       return UIA_E_ELEMENTNOTAVAILABLE;
-    *value = state_->rows.at(id_).selected ? TRUE : FALSE;
+    if (!supportsSelectionItemLocked()) return UIA_E_INVALIDOPERATION;
+    *value = isSelectedLocked() ? TRUE : FALSE;
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE get_SelectionContainer(IRawElementProviderSimple **value) override {
@@ -642,9 +684,10 @@ class Node final : public IRawElementProviderSimple,
     Node *container = nullptr;
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
-      if (!isAvailableLocked() || !isRowKey(id_))
+      if (!isAvailableLocked())
         return UIA_E_ELEMENTNOTAVAILABLE;
-      container = retainElementLocked(state_->rows.at(id_).parent);
+      if (!supportsSelectionItemLocked()) return UIA_E_INVALIDOPERATION;
+      container = retainElementLocked(selectionContainerLocked());
     }
     if (!container) return UIA_E_ELEMENTNOTAVAILABLE;
     *value = static_cast<IRawElementProviderSimple *>(container);
@@ -820,7 +863,7 @@ class Node final : public IRawElementProviderSimple,
     return S_OK;
   }
 
-  void update(const char *status, const char **identities, const char **names,
+  HRESULT update(const char *status, const char **identities, const char **names,
               const int *parents, const int *selected, const int *eligible,
               const int *invokable, const int *bounds, int count, bool allow_reclaim,
               bool confirm_each_reclaim, bool worktrees_available,
@@ -841,7 +884,7 @@ class Node final : public IRawElementProviderSimple,
     bool confirm_reclaim_changed = false;
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
-      if (!state_->active) return;
+      if (!state_->active) return UIA_E_ELEMENTNOTAVAILABLE;
       old_status = state_->status;
       state_->status = wide(status);
       new_status = state_->status;
@@ -857,6 +900,10 @@ class Node final : public IRawElementProviderSimple,
 
       std::unordered_map<int64_t, Row> next_rows;
       std::vector<int64_t> next_order;
+      const bool old_destination_selected[] = {
+          state_->destination_selected[0], state_->destination_selected[1]};
+      state_->destination_selected[0] = false;
+      state_->destination_selected[1] = false;
       state_->has_destination_bounds[0] = false;
       state_->has_destination_bounds[1] = false;
       for (int index = 0; index < count; ++index) {
@@ -869,6 +916,7 @@ class Node final : public IRawElementProviderSimple,
                      bounds[index * 4 + 2], bounds[index * 4 + 3]}
               : RECT{};
           state_->has_destination_bounds[destination] = true;
+          state_->destination_selected[destination] = selected && selected[index] != 0;
           continue;
         }
         int64_t key = rowKeyForIdentityLocked(identity, next_rows);
@@ -896,9 +944,13 @@ class Node final : public IRawElementProviderSimple,
       std::vector<int64_t> added_selection;
       std::vector<int64_t> removed_selection;
       size_t next_selected_count[5]{};
+      next_selected_count[0] = (state_->destination_selected[0] ? 1 : 0) +
+          (state_->destination_selected[1] ? 1 : 0);
       for (const auto &item : next_rows) {
-        if (item.second.parent < 1 || item.second.parent > 4) continue;
-        if (item.second.selected) ++next_selected_count[item.second.parent];
+        if (item.second.parent < 1 || item.second.parent > 4 ||
+            !isSelectionRow(item.second)) continue;
+        const int parent = isNavigationRow(item.second) ? 0 : item.second.parent;
+        if (item.second.selected) ++next_selected_count[parent];
         const auto old = state_->rows.find(item.first);
         if (item.second.selected &&
             (old == state_->rows.end() || !old->second.selected)) {
@@ -906,11 +958,17 @@ class Node final : public IRawElementProviderSimple,
         }
       }
       for (const auto &item : state_->rows) {
-        if (item.second.parent < 1 || item.second.parent > 4) continue;
+        if (item.second.parent < 1 || item.second.parent > 4 ||
+            !isSelectionRow(item.second)) continue;
         const auto next = next_rows.find(item.first);
         if (item.second.selected &&
             (next == next_rows.end() || !next->second.selected)) {
-          removed_selection.push_back(item.first);
+          if (next != next_rows.end()) {
+            removed_selection.push_back(item.first);
+          } else if (Node *container = retainElementLocked(
+                         isNavigationRow(item.second) ? 0 : item.second.parent)) {
+            selection_events.emplace_back(container, UIA_Selection_InvalidatedEventId);
+          }
         }
       }
       for (const auto &item : state_->rows) {
@@ -926,7 +984,8 @@ class Node final : public IRawElementProviderSimple,
       for (int64_t id : added_selection) {
         const auto row = state_->rows.find(id);
         if (row == state_->rows.end()) continue;
-        const EVENTID event = next_selected_count[row->second.parent] == 1
+        const int parent = isNavigationRow(row->second) ? 0 : row->second.parent;
+        const EVENTID event = next_selected_count[parent] == 1
             ? UIA_SelectionItem_ElementSelectedEventId
             : UIA_SelectionItem_ElementAddedToSelectionEventId;
         if (Node *node = retainElementLocked(id)) {
@@ -937,6 +996,13 @@ class Node final : public IRawElementProviderSimple,
         if (Node *node = retainElementLocked(id)) {
           selection_events.emplace_back(node, UIA_SelectionItem_ElementRemovedFromSelectionEventId);
         }
+      }
+      for (int slot = 0; slot < 2; ++slot) {
+        if (old_destination_selected[slot] == state_->destination_selected[slot]) continue;
+        if (Node *node = retainElementLocked(14 + slot))
+          selection_events.emplace_back(node, state_->destination_selected[slot]
+              ? UIA_SelectionItem_ElementSelectedEventId
+              : UIA_SelectionItem_ElementRemovedFromSelectionEventId);
       }
       allow_reclaim_changed = old_allow_reclaim != state_->allow_reclaim;
       confirm_reclaim_changed = old_confirm_reclaim != state_->confirm_each_reclaim;
@@ -952,6 +1018,16 @@ class Node final : public IRawElementProviderSimple,
     for (const auto &event : selection_events) {
       UiaRaiseAutomationEvent(
           static_cast<IRawElementProviderSimple *>(event.first), event.second);
+      if (event.second != UIA_Selection_InvalidatedEventId) {
+        VARIANT before{}, after{};
+        before.vt = after.vt = VT_BOOL;
+        const bool now_selected = event.second != UIA_SelectionItem_ElementRemovedFromSelectionEventId;
+        before.boolVal = now_selected ? VARIANT_FALSE : VARIANT_TRUE;
+        after.boolVal = now_selected ? VARIANT_TRUE : VARIANT_FALSE;
+        UiaRaiseAutomationPropertyChangedEvent(
+            static_cast<IRawElementProviderSimple *>(event.first),
+            UIA_SelectionItemIsSelectedPropertyId, before, after);
+      }
       event.first->Release();
     }
     raiseToggleChanged(allow_reclaim_node, !allow_reclaim, allow_reclaim);
@@ -968,6 +1044,7 @@ class Node final : public IRawElementProviderSimple,
           UIA_AutomationFocusChangedEventId);
       focus_node->Release();
     }
+    return S_OK;
   }
   void setStatus(const char *status) {
     std::wstring old_status;
@@ -1047,13 +1124,19 @@ class Node final : public IRawElementProviderSimple,
   bool retired_ = false;
 
   bool supportsInvoke() const {
-    if ((id_ >= 7 && id_ <= 20) || (id_ >= 22 && id_ <= 24)) return true;
     std::lock_guard<std::mutex> lock(state_->mutex);
+    return isAvailableLocked() && supportsInvokeLocked();
+  }
+  bool supportsInvokeLocked() const {
+    if ((id_ >= 7 && id_ <= 20) || (id_ >= 22 && id_ <= 24)) return true;
     const auto row = state_->rows.find(id_);
     return row != state_->rows.end() && row->second.invokable;
   }
   bool supportsToggle() const {
     return id_ == 12 || id_ == 13;
+  }
+  bool supportsSelection() const {
+    return id_ == 0 || id_ == 3 || id_ == 4 || id_ == 21;
   }
   bool supportsScroll() const { return id_ >= 1 && id_ <= 3; }
   bool supportsScrollItem() const {
@@ -1113,9 +1196,24 @@ class Node final : public IRawElementProviderSimple,
   }
   bool supportsSelectionItem() const {
     std::lock_guard<std::mutex> lock(state_->mutex);
-    if (!isAvailableLocked() || !isRowKey(id_)) return false;
-    const Row &row = state_->rows.at(id_);
-    return !isHeader(row.identity) && row.identity.rfind("workspace-toolbar:", 0) != 0;
+    return isAvailableLocked() && supportsSelectionItemLocked();
+  }
+  bool supportsSelectionItemLocked() const {
+    if (id_ == 14 || id_ == 15) return true;
+    return isRowKey(id_) && isSelectionRow(state_->rows.at(id_));
+  }
+  bool isSelectedLocked() const {
+    return id_ == 14 || id_ == 15 ? state_->destination_selected[id_ - 14]
+                                : state_->rows.at(id_).selected;
+  }
+  int selectionContainerLocked() const {
+    return id_ == 14 || id_ == 15 || isNavigationRow(state_->rows.at(id_))
+        ? 0 : state_->rows.at(id_).parent;
+  }
+  static HRESULT postCommand(HWND hwnd, WPARAM command) {
+    if (PostMessageW(hwnd, WM_COMMAND, command, 0)) return S_OK;
+    const DWORD error = GetLastError();
+    return HRESULT_FROM_WIN32(error == ERROR_SUCCESS ? ERROR_GEN_FAILURE : error);
   }
   int64_t rowKeyForIdentityLocked(
       const std::string &identity,
@@ -1349,7 +1447,8 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("loop-disclosure:", 0) == 0;
       return row.parent == 4 || action ? UIA_ButtonControlTypeId : UIA_ListItemControlTypeId;
     }
-    if ((id_ >= 7 && id_ <= 11) || (id_ >= 14 && id_ <= 20) ||
+    if (id_ == 14 || id_ == 15) return UIA_ListItemControlTypeId;
+    if ((id_ >= 7 && id_ <= 11) || (id_ >= 16 && id_ <= 20) ||
         (id_ >= 22 && id_ <= 24)) return UIA_ButtonControlTypeId;
     if (id_ == 12 || id_ == 13) return UIA_CheckBoxControlTypeId;
     if (id_ == 5 || id_ == 21) return UIA_MenuControlTypeId;
@@ -1409,6 +1508,16 @@ class Node final : public IRawElementProviderSimple,
     toggle_node->Release();
   }
   HRESULT setSelected(SelectionOperation operation) {
+    bool navigation = false;
+    {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
+      if (!supportsSelectionItemLocked()) return UIA_E_INVALIDOPERATION;
+      navigation = selectionContainerLocked() == 0;
+      if (navigation && operation != kSelect)
+        return operation == kAdd && isSelectedLocked() ? S_OK : UIA_E_INVALIDOPERATION;
+    }
+    if (navigation) return Invoke();
     HWND hwnd = nullptr;
     bool changed = false;
     bool dynamic_invoke = false;
@@ -1504,13 +1613,23 @@ extern "C" HRESULT gc_uia_update(IRawElementProviderSimple *provider, const char
     if (!validUtf8(identities[index]) || !validUtf8(names[index]))
       return E_INVALIDARG;
   }
+  int navigation_selected = 0;
+  for (int index = 0; index < count; ++index) {
+    if (!selected[index]) continue;
+    const std::string identity = identities[index];
+    Row row;
+    row.identity = identity;
+    row.parent = parents[index];
+    if (identity == kOverviewDestinationIdentity || identity == kQuickChatsDestinationIdentity ||
+        isNavigationRow(row)) ++navigation_selected;
+  }
+  if (navigation_selected > 1) return E_INVALIDARG;
   auto *root = static_cast<Node *>(provider);
-  root->update(status, identities, names, parents, selected, eligible,
+  return root->update(status, identities, names, parents, selected, eligible,
                invokable, bounds, count,
                allow_reclaim != 0, confirm_each_reclaim != 0,
                worktrees_available != 0, worktree_dialog_open != 0,
                worktree_row_selected != 0, worktree_busy != 0);
-  return S_OK;
 }
 
 extern "C" HRESULT gc_uia_set_status(IRawElementProviderSimple *provider, const char *status) {

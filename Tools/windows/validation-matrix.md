@@ -29,6 +29,9 @@ The Windows port must have runnable commands before implementation fleets begin.
 | Release publishing: signing gates, asset labeling, workflow contract | `pwsh Tools\windows\Tests\Release.Tests.ps1` |
 | Product/investigation provider pin consistency | `pwsh Tools\windows\Tests\ProviderPins.Tests.ps1` |
 | Native accessibility provider (MSVC and Windows SDK) | `pwsh -NoProfile -File Tools\windows\Tests\AccessibilityProvider.Native.Tests.ps1` |
+| Navigation selection without desktop/UIA entrypoints (intercepted C++ branch required) | `pwsh -NoProfile -File Tools\windows\Tests\AccessibilityProvider.Native.Tests.ps1 -HeadlessSelection` (179 checks; retains compiler/test scratch; separate from the default native 280-check suite) |
+| Navigation runner compile-plan controls (no compiler/GUI execution) | `pwsh -NoProfile -File Tools\windows\Tests\AccessibilityProvider.Native.Tests.Harness.Tests.ps1 -PlanOnly` (14 source/data checks; compiled `ui.navigation-runner-contracts`) |
+| Shared navigation selection oracle (no UIA import or native calls) | `pwsh -NoProfile -File Tools\windows\Tests\NavigationSelectionOracle.Tests.ps1 -ArtifactRoot $ownedFreshRoot` (27 cases; compiled `ui.navigation-oracle-contracts`) |
 | Native accessibility harness failure attribution (mock tools, no native fixture) | `pwsh -NoProfile -File Tools\windows\Tests\AccessibilityProvider.Native.Tests.Harness.Tests.ps1` |
 | Native release feed, URL handoff, and allocation safety | `pwsh Tools\windows\Tests\WindowsShell.Tests.ps1 -ZigExecutable $env:GRAPHCODE_ZIG0152` (includes updater tests) |
 | Successful-update rollback cleanup, locked retry, and failed-recovery preservation | `pwsh Tools\windows\Tests\WindowsShell.Tests.ps1 -ZigExecutable $env:GRAPHCODE_ZIG0152` (includes `WindowsRollbackCleanup.zig`) |

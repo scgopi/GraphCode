@@ -2005,6 +2005,147 @@ function Find-FragmentById(
   return $null
 }
 
+function Test-UiaCanonicalNavigationId([string] $Id) {
+  return $Id -cin @("overview-destination", "quick-chats-destination") -or
+    $Id -cmatch '^(open-project|project-row|loop-row|quick-chat-row)-[0-9]+$'
+}
+
+function Assert-UiaNavigationSelectionSnapshot(
+  $Root,
+  [object[]] $Rows,
+  [object[]] $Selected,
+  [int] $ProcessId,
+  [string] $ExpectedId
+) {
+  if ($ProcessId -le 0 -or $Root.id -cne "graphcode-root" -or $Root.process -ne $ProcessId -or
+      [string]::IsNullOrWhiteSpace($Root.runtime) -or $Root.multiple -isnot [bool] -or $Root.multiple -or
+      -not (Test-UiaCanonicalNavigationId $ExpectedId)) {
+    throw "Navigation selection: invalid owned single-selection root or expected destination"
+  }
+  $ids = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  $runtimes = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  $null = $runtimes.Add($Root.runtime)
+  foreach ($row in $Rows) {
+    if (-not (Test-UiaCanonicalNavigationId $row.id) -or -not $ids.Add($row.id) -or
+        [string]::IsNullOrWhiteSpace($row.runtime) -or -not $runtimes.Add($row.runtime) -or
+        $row.process -ne $ProcessId -or $row.selected -isnot [bool] -or
+        $row.containerId -cne $Root.id -or $row.containerRuntime -cne $Root.runtime -or
+        $row.containerProcess -ne $ProcessId) {
+      throw "Navigation selection: duplicate, foreign, aliased or wrongly contained navigation row"
+    }
+  }
+  if (-not $ids.Contains("overview-destination") -or -not $ids.Contains("quick-chats-destination")) {
+    throw "Navigation selection: Graph or Quick Chats omitted SelectionItem"
+  }
+  $selectedRows = @($Rows | Where-Object selected)
+  if ($selectedRows.Count -ne 1 -or $selectedRows[0].id -cne $ExpectedId -or
+      $Selected.Count -ne 1 -or $Selected[0].id -cne $ExpectedId -or
+      $Selected[0].runtime -cne $selectedRows[0].runtime -or $Selected[0].process -ne $ProcessId) {
+    throw "Navigation selection: IsSelected and root GetSelection do not identify exactly the expected destination"
+  }
+}
+
+function Assert-UiaSingleNavigationSelection($root, $walker, [string] $expectedId, [int] $processId) {
+  $selection = $root.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
+  $selected = @()
+  for ($attempt = 0; $attempt -lt 60; $attempt++) {
+    $selected = @($selection.Current.GetSelection())
+    if ($selected.Count -eq 1 -and $selected[0].Current.AutomationId -ceq $expectedId) { break }
+    Start-Sleep -Milliseconds 50
+  }
+  $projects = Find-FragmentById $root "projects" $walker
+  $loops = Find-FragmentById $root "loops" $walker
+  Require ($null -ne $projects -and $null -ne $loops) "Navigation selection lost a sidebar fragment"
+  $elements = @(
+    @(Get-SidebarNavigationChildren $root $projects $walker) +
+    @(Get-DirectChildren $loops $walker) |
+      Where-Object { Test-UiaCanonicalNavigationId $_.Current.AutomationId }
+  )
+  $rows = @($elements | ForEach-Object {
+    $item = $_.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+    $container = $item.Current.SelectionContainer
+    [pscustomobject]@{
+      id = [string]$_.Current.AutomationId; runtime = $_.GetRuntimeId() -join ","; process = $_.Current.ProcessId
+      selected = $item.Current.IsSelected; containerId = [string]$container.Current.AutomationId
+      containerRuntime = $container.GetRuntimeId() -join ","; containerProcess = $container.Current.ProcessId
+    }
+  })
+  $selectedSnapshot = @($selected | ForEach-Object {
+    [pscustomobject]@{ id = [string]$_.Current.AutomationId; runtime = $_.GetRuntimeId() -join ","; process = $_.Current.ProcessId }
+  })
+  $rootSnapshot = [pscustomobject]@{
+    id = [string]$root.Current.AutomationId; runtime = $root.GetRuntimeId() -join ","
+    process = $root.Current.ProcessId; multiple = $selection.Current.CanSelectMultiple
+  }
+  Assert-UiaNavigationSelectionSnapshot $rootSnapshot $rows $selectedSnapshot $processId $expectedId
+  Write-Host ("UIA_NAVIGATION_SELECTION_EVIDENCE=" + ([ordered]@{
+    expected = $expectedId; container = $rootSnapshot; rows = $rows; selected = $selectedSnapshot
+  } | ConvertTo-Json -Compress -Depth 6))
+}
+
+function Assert-UiaNavigationSelectionEventReceipt($Receipt, [string] $ExpectedId, [string] $ExpectedRuntime, [int] $ProcessId) {
+  if (-not (Test-UiaCanonicalNavigationId $ExpectedId) -or $ProcessId -le 0 -or
+      [string]::IsNullOrWhiteSpace($ExpectedRuntime) -or $Receipt.count -ne 1 -or
+      $Receipt.id -cne $ExpectedId -or $Receipt.runtime -cne $ExpectedRuntime -or
+      $Receipt.process -ne $ProcessId) {
+    throw "Navigation event: expected exactly one owned canonical ElementSelected sender with the subscribed runtime identity"
+  }
+}
+
+function Assert-UiaNavigationSelectionEvents($root, $walker, [string[]] $Ids, [int] $ProcessId) {
+  Require ($Ids.Count -eq 5 -and @($Ids | Sort-Object -Unique).Count -eq 5) `
+    "Navigation events require five distinct canonical destinations"
+  foreach ($id in $Ids) {
+    Require (Test-UiaCanonicalNavigationId $id) "Navigation event target is an action alias"
+    $target = Find-FragmentById $root $id $walker
+    Require ($null -ne $target -and $target.Current.ProcessId -eq $ProcessId) `
+      "Navigation event target is missing or foreign"
+    $runtime = Get-RuntimeIdentity $target
+    $item = $target.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+    Require (-not $item.Current.IsSelected) "Navigation event must measure a transition, not idempotent Select"
+    $event = [System.Windows.Automation.SelectionItemPattern]::ElementSelectedEvent
+    $handler = [GraphCodeUiaGateState]::SelectedHandler
+    [GraphCodeUiaGateState]::SelectedEvents = 0
+    [GraphCodeUiaGateState]::SelectionSourceAutomationId = $null
+    [GraphCodeUiaGateState]::SelectionSourceRuntimeId = $null
+    [GraphCodeUiaGateState]::SelectionSourceProcessId = 0
+    $subscribed = $false
+    $primary = $null
+    try {
+      [System.Windows.Automation.Automation]::AddAutomationEventHandler(
+        $event, $target, [System.Windows.Automation.TreeScope]::Element, $handler)
+      $subscribed = $true
+      $clock = [Diagnostics.Stopwatch]::StartNew()
+      $item.Select()
+      while ($clock.ElapsedMilliseconds -lt 1000) { Start-Sleep -Milliseconds 25 }
+      $receipt = [pscustomobject]@{
+        count = [GraphCodeUiaGateState]::SelectedEvents
+        id = [GraphCodeUiaGateState]::SelectionSourceAutomationId
+        runtime = [GraphCodeUiaGateState]::SelectionSourceRuntimeId
+        process = [GraphCodeUiaGateState]::SelectionSourceProcessId
+      }
+      Write-Host ("UIA_NAVIGATION_SELECTION_EVENT_EVIDENCE=" + ([ordered]@{
+        expected = $id; expectedRuntime = $runtime; process = $ProcessId
+        event = "ElementSelected"; budgetMilliseconds = 1000; receipt = $receipt
+      } | ConvertTo-Json -Compress -Depth 4))
+      Assert-UiaNavigationSelectionEventReceipt $receipt $id $runtime $ProcessId
+      Assert-UiaSingleNavigationSelection $root $walker $id $ProcessId
+    } catch {
+      $primary = $_
+      throw
+    } finally {
+      if ($subscribed) {
+        try {
+          [System.Windows.Automation.Automation]::RemoveAutomationEventHandler($event, $target, $handler)
+        } catch {
+          if ($primary) { $primary.Exception.Data["NavigationEventUnsubscribeFailure"] = $_.Exception }
+          else { throw }
+        }
+      }
+    }
+  }
+}
+
 function Get-SidebarNavigationChildren(
   [System.Windows.Automation.AutomationElement] $root,
   [System.Windows.Automation.AutomationElement] $projects,
@@ -3800,7 +3941,8 @@ function Test-MultiProjectOwnerSelection([string] $surface, $owner, $selectedOwn
   $selected = $false
   if ($null -ne $selectedOwner) { $selected = $selectedOwner.path -ceq $owner.path }
   $expectedProjectSelected = $surface -ceq "project" -and $selected
-  return $projectSelected -eq $expectedProjectSelected -and $loopSelected -eq $selected
+  $expectedLoopSelected = $surface -ceq "workspace" -and $selected
+  return $projectSelected -eq $expectedProjectSelected -and $loopSelected -eq $expectedLoopSelected
 }
 
 function Test-MultiProjectObservedRoster([string] $surface, $projection, $expectedOwners, $selectedOwner, [int] $processId) {
@@ -6547,7 +6689,7 @@ try {
   Require ($openProjectRows.Count -eq 2) `
     "sidebar scroll restoration did not preserve both open owner rows"
   Write-Host "UIA_SIDEBAR_SCROLL_RESTORED=overview-destination"
-  $null = $projects.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
+  $null = $root.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
   $null = $openProjectRows[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
   $projectRowInvoke = $openProjectRows[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
   $projectRowIds = @($openProjectRows | ForEach-Object { $_.Current.AutomationId })
@@ -6771,7 +6913,7 @@ try {
       "GraphCodeNativeForm") "$($nativeForm.Title) did not close after cancellation"
   }
   $loopIds = @($loopRows | ForEach-Object { $_.Current.AutomationId })
-  $null = $loops.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
+  $null = $root.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
   foreach ($row in $loopRows) {
     $null = $row.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
     $null = $row.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
@@ -7556,12 +7698,14 @@ try {
     $surfaceActionPatterns[$id] = $element.GetCurrentPattern(
       [System.Windows.Automation.InvokePattern]::Pattern)
   }
-  $surfaceActionPatterns["overview-destination"].Invoke()
+  $graphNavigation = Find-FragmentById $root "overview-destination" $rawWalker
+  $graphNavigation.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
   $overviewProbe = Wait-ForGraphChildren $root $rawWalker `
     { $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop ' } `
     { param($items) $items.Count -eq 2 }
   $graph = $overviewProbe.Graph
   $overviewCards = @($overviewProbe.Items)
+  Assert-UiaSingleNavigationSelection $root $rawWalker "overview-destination" $process.Id
   Require (($overviewCards.Count -eq 2) -and
            ((@($overviewCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) "Overview did not expose synchronized cards"
 
@@ -7845,13 +7989,15 @@ try {
   Require ($restoredLegacyChips.Count -eq 0) `
     "restored uninspected overview lane exposed a worktree chip"
 
-  $surfaceActionPatterns["quick-chats-destination"].Invoke()
+  $quickChatNavigation = Find-FragmentById $root "quick-chats-destination" $rawWalker
+  $quickChatNavigation.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
   $quickChatProbe = Wait-ForGraphChildren $root $rawWalker `
     { $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA chat ' } `
     { param($items) $items.Count -eq 2 }
   $graph = $quickChatProbe.Graph
   Require ($null -ne $graph) "missing graph fragment after switching to the Quick Chats destination"
   $quickChatCards = @($quickChatProbe.Items)
+  Assert-UiaSingleNavigationSelection $root $rawWalker "quick-chats-destination" $process.Id
   Require (($quickChatCards.Count -eq 2) -and
            ((@($quickChatCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA chat A|UIA chat B")) "Quick Chats did not expose synchronized cards: $(@($quickChatCards | ForEach-Object { $_.Current.Name }) -join '|')"
   $surfaceActionPatterns["canvas-primary-action"].Invoke()
@@ -7933,6 +8079,7 @@ try {
   Require (($quickChatWorkspace.Current.BoundingRectangle.Width -gt 0) -and
            ($quickChatWorkspace.Current.BoundingRectangle.Height -gt 0)) `
     "Quick Chat terminal workspace has empty bounds"
+  Assert-UiaSingleNavigationSelection $root $rawWalker $firstQuickRowId $process.Id
   $surfaceActionPatterns["zoom-in"].Invoke()
   $surfaceActionPatterns["actual-size"].Invoke()
   $surfaceActionPatterns["zoom-out"].Invoke()
@@ -7955,8 +8102,13 @@ try {
     "sidebar rows were unavailable before dynamic invocation"
   $dynamicInvokedProjectRow = [string]$activeProjectRow.Current.AutomationId
   $dynamicInvokedLoopRow = [string]$activeLoopRow.Current.AutomationId
-  $activeProjectRow.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-  $activeLoopRow.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $activeProjectRow.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
+  Assert-UiaSingleNavigationSelection $root $rawWalker $dynamicInvokedProjectRow $process.Id
+  $activeLoopRow.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
+  Assert-UiaSingleNavigationSelection $root $rawWalker $dynamicInvokedLoopRow $process.Id
+  Assert-UiaNavigationSelectionEvents $root $rawWalker @("overview-destination", "quick-chats-destination", $dynamicInvokedProjectRow, $dynamicInvokedLoopRow, $firstQuickRowId) $process.Id
+  $activeLoopRow = Find-FragmentById $root $dynamicInvokedLoopRow $rawWalker
+  $activeLoopRow.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
   Start-Sleep -Milliseconds 250
   $process.Refresh()
   $dynamicInvocationHasExited = $process.HasExited

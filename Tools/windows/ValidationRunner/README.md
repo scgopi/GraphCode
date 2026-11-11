@@ -155,6 +155,39 @@ fresh fixture directory on success or failure. It sends no input, changes no
 focus and calls no UIA API. This fixture establishes the helper's cross-process
 behavior, not the complete Jump destination workflow.
 
+The navigation oracle adapter also runs 12 headless event-receipt controls.
+The live gate separately subscribes to real `ElementSelected` handlers while
+selecting Graph, Quick Chats, a project, a loop and a chat, in that order.
+Each non-idempotent transition has one original one-second observation window
+and requires exactly one sender with the subscribed automation/runtime identity
+and owned process, followed by the shared single-selection/container readback.
+`UIA_NAVIGATION_SELECTION_EVENT_EVIDENCE` records each receipt; all five must
+pass in the current-source native gate. The loop is restored after the sequence.
+Worktrees events and the headless controls do not establish this live evidence.
+This sequence covers navigation `Select`/`ElementSelected`, not additional
+navigation event types or a broader accessibility claim.
+The multi-project owner predicate uses the same canonical rule: project surfaces
+select only the owning project row; workspace surfaces select only its loop row.
+Overview, Quick Chats and other owners select neither of those rows. The
+`ownership.mixed-ui-policy` suite checks all 32 surface/owner/selection combinations
+without changing the independent roster, card, metadata, bounds or foreign-owner
+requirements.
+
+With both process flags `GRAPHCODE_UIA_GATE=1` and
+`GRAPHCODE_UIA_EDGE_ACTION_TRACE=1`, popup input emits
+`UIA_POPUP_INPUT_RECEIPT` immediately before/after `SendInput` and when closure
+is observed by the existing polling path. Each receipt records monotonic ticks
+and their frequency, UTC, foreground handle/PID, cursor hit handle/PID, popup
+visibility and expected/sent input counts. Observation errors are explicit.
+These are read-only samples, not foreground leases or proof of command delivery:
+`selectionOutcome` stays `unobserved`. The product's actual `TrackPopupMenu`
+return and callback receipts establish selection or cancellation.
+The `ui.managed` headless cancellation control models accepted input followed by
+popup closure, foreign foreground/hit windows and an external command-zero
+return. It also checks that disabling tracing preserves the original operation
+counts. Tracing adds no input, activation, retries or sleeps, and is off unless
+both flags match exactly.
+
 UIA, packaging contracts, shell ownership, and managed/native tests consume those
 same implementations. The loader verifies the exact file/type, worktree,
 current source and compiler-reference fingerprints, and loaded module identity.
@@ -167,6 +200,17 @@ artifacts; root console summaries do not forward arbitrary child text.
 The capture suite alone admits its exact path-bound, deliberately injected
 negative-control diagnostics, while still requiring all 182 cases and the
 14 named groups.
+Descendant-refusal diagnostics project only bounded scalar facts, preserving
+the raw context and original error in memory. Projection, JSON serialization
+or trace-write faults attach an explicit bounded secondary diagnostic and must
+not replace the ownership refusal. Focused
+`UiCaptureDriver.Tests.ps1 -AdvisoryDiagnosticContractOnly` covers all three fault
+stages and excludes retained-object graph traversal; `-AppChildContractOnly`
+checks the real held-generation refusal with prepared harmless fixtures.
+`-DescendantMetadataContractOnly` preserves the scalar trace schema, and
+`-PreflightReportContractOnly` verifies that successful report data is accepted
+while a failed case is still rejected. These are no-desktop checks, not a full
+capture-suite or native UI acceptance result.
 
 Each host-supervised child starts suspended in a held, non-breakaway job before it can execute.
 Original monotonic deadlines, independent stream EOF, primary errors, live

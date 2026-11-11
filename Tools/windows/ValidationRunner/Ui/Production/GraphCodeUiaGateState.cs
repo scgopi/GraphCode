@@ -74,6 +74,7 @@ public static class GraphCodeUiaGateState {
   public static string FocusSourceAutomationId;
   public static string SelectionSourceAutomationId;
   public static string SelectionSourceRuntimeId;
+  public static int SelectionSourceProcessId;
   public static string TogglePropertySourceAutomationId;
   public static readonly AutomationEventHandler LiveHandler = HandleLive;
   public static readonly AutomationPropertyChangedEventHandler NamePropertyHandler = HandleNameProperty;
@@ -107,6 +108,7 @@ public static class GraphCodeUiaGateState {
     if (element != null) {
       SelectionSourceAutomationId = element.Current.AutomationId;
       SelectionSourceRuntimeId = String.Join(",", element.GetRuntimeId());
+      SelectionSourceProcessId = element.Current.ProcessId;
     }
     SelectedEvents++;
   }

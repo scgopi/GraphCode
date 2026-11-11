@@ -2,6 +2,7 @@ const std = @import("std");
 const Forms = @import("Forms.zig");
 const GraphModel = @import("GraphModel.zig");
 const DaemonClient = @import("DaemonClient.zig").DaemonClient;
+const Diagnostics = @import("Diagnostics.zig");
 
 pub const Modal = struct {
     context: ?*anyopaque = null,
@@ -63,25 +64,61 @@ fn checkCurrentEdge(allocator: std.mem.Allocator, model: *const GraphModel.Model
 }
 
 pub fn edit(allocator: std.mem.Allocator, model: *GraphModel.Model, client: *DaemonClient, index: usize, modal: Modal) !Result {
+    var receipt = Diagnostics.EdgeActionTrace.Event{
+        .stage = .guard_entry,
+        .project = Diagnostics.EdgeActionTrace.Identity.from(model.selected_project_path orelse ""),
+        .index = index,
+        .guard = "scope",
+    };
+    var modal_entered = false;
+    Diagnostics.traceEdgeAction(receipt);
+    errdefer |err| {
+        receipt.stage = .guard_refused;
+        receipt.reason = @errorName(err);
+        receipt.outcome = if (modal_entered) "after_modal" else "before_modal";
+        Diagnostics.traceEdgeAction(receipt);
+    }
     const scope = try Scope.capture(allocator, model, client);
     defer scope.deinit(allocator);
+    receipt.guard = "graph";
     const graph = model.graph orelse return error.MissingGraph;
+    receipt.guard = "index";
     if (index >= graph.edges.items.len) return error.MissingEdge;
+    receipt.guard = "clone";
     const edge = try GraphModel.cloneEdge(allocator, graph.edges.items[index]);
     defer GraphModel.freeEdge(allocator, edge);
+    receipt.edge = Diagnostics.EdgeActionTrace.Identity.from(edge.id);
+    receipt.guard = "identity";
     if (edge.id.len == 0) return error.MissingEdgeIdentity;
+    receipt.guard = "editable";
     if (!edge.editable_configuration) return error.UnsupportedEdgeConfiguration;
+    receipt.guard = "current";
     try checkCurrentEdge(allocator, model, edge);
     const expected = Forms.EdgeConfiguration.fromEdge(edge);
     const initial = expected.draft(edge.from, edge.to);
+    receipt.guard = "validate";
     try Forms.validateEdgeEdit(initial, initial);
-    var draft = try modal.show(modal.context, allocator, initial) orelse return .cancelled;
+    receipt.stage = .guards_passed;
+    Diagnostics.traceEdgeAction(receipt);
+    receipt.stage = .modal_show;
+    receipt.guard = "show";
+    Diagnostics.traceEdgeAction(receipt);
+    modal_entered = true;
+    const shown = try modal.show(modal.context, allocator, initial);
+    receipt.stage = .modal_return;
+    receipt.outcome = if (shown == null) "cancelled" else "submitted";
+    Diagnostics.traceEdgeAction(receipt);
+    var draft = shown orelse return .cancelled;
     defer draft.deinit(allocator);
+    receipt.guard = "scope_recheck";
     try scope.check(model, client);
+    receipt.guard = "current_recheck";
     try checkCurrentEdge(allocator, model, edge);
+    receipt.guard = "validate_recheck";
     try Forms.validateEdgeEdit(initial, draft);
     const replacement = expected.applying(draft);
     if (Forms.EdgeConfiguration.eql(expected, replacement)) return .unchanged;
+    receipt.guard = "queue";
     try client.sendUpdateEdge(scope.project, edge.id, edge.from, edge.to, expected, replacement, scope.composite);
     return .queued;
 }
@@ -92,6 +129,76 @@ const fixture =
 
 fn loadFixture(model: *GraphModel.Model) !void {
     _ = try model.updateFromFrame(fixture);
+}
+
+test "edge editing diagnostic reports guard refusal without opening the modal" {
+    const Probe = struct {
+        var events: [8]Diagnostics.EdgeActionTrace.Event = undefined;
+        var count: usize = 0;
+        var modal_calls: usize = 0;
+
+        fn observe(event: Diagnostics.EdgeActionTrace.Event) void {
+            if (count < events.len) events[count] = event;
+            count += 1;
+        }
+
+        fn show(_: ?*anyopaque, _: std.mem.Allocator, _: Forms.EdgeDraft) !?Forms.EdgeDraft {
+            modal_calls += 1;
+            return null;
+        }
+    };
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    try loadFixture(&model);
+    var client = try DaemonClient.initForTesting(std.testing.allocator);
+    defer client.deinit();
+    Diagnostics.edge_action_test_observer = Probe.observe;
+    defer Diagnostics.edge_action_test_observer = null;
+    Probe.count = 0;
+    Probe.modal_calls = 0;
+    try std.testing.expectError(error.MissingEdge, edit(std.testing.allocator, &model, &client, 99, .{ .show = Probe.show }));
+    try std.testing.expectEqual(@as(usize, 0), Probe.modal_calls);
+    try std.testing.expectEqual(@as(usize, 0), client.outbound_count);
+    try std.testing.expectEqual(@as(usize, 2), Probe.count);
+    try std.testing.expectEqual(Diagnostics.EdgeActionTrace.Stage.guard_entry, Probe.events[0].stage);
+    try std.testing.expectEqual(Diagnostics.EdgeActionTrace.Stage.guard_refused, Probe.events[1].stage);
+    try std.testing.expectEqualStrings("index", Probe.events[1].guard);
+    try std.testing.expectEqualStrings("MissingEdge", Probe.events[1].reason);
+    try std.testing.expectEqualStrings("before_modal", Probe.events[1].outcome);
+}
+
+test "edge editing diagnostic records guards and show entry without changing cancellation" {
+    const Probe = struct {
+        var stages: [8]Diagnostics.EdgeActionTrace.Stage = undefined;
+        var count: usize = 0;
+        var modal_calls: usize = 0;
+
+        fn observe(event: Diagnostics.EdgeActionTrace.Event) void {
+            if (count < stages.len) stages[count] = event.stage;
+            count += 1;
+        }
+
+        fn show(_: ?*anyopaque, _: std.mem.Allocator, _: Forms.EdgeDraft) !?Forms.EdgeDraft {
+            try std.testing.expectEqual(@as(usize, 3), count);
+            try std.testing.expectEqual(Diagnostics.EdgeActionTrace.Stage.modal_show, stages[2]);
+            modal_calls += 1;
+            return null;
+        }
+    };
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    try loadFixture(&model);
+    var client = try DaemonClient.initForTesting(std.testing.allocator);
+    defer client.deinit();
+    Diagnostics.edge_action_test_observer = Probe.observe;
+    defer Diagnostics.edge_action_test_observer = null;
+    Probe.count = 0;
+    Probe.modal_calls = 0;
+    try std.testing.expectEqual(Result.cancelled, try edit(std.testing.allocator, &model, &client, 0, .{ .show = Probe.show }));
+    try std.testing.expectEqual(@as(usize, 1), Probe.modal_calls);
+    try std.testing.expectEqual(@as(usize, 0), client.outbound_count);
+    try std.testing.expectEqual(@as(usize, 4), Probe.count);
+    try std.testing.expectEqualSlices(Diagnostics.EdgeActionTrace.Stage, &.{ .guard_entry, .guards_passed, .modal_show, .modal_return }, Probe.stages[0..Probe.count]);
 }
 
 fn acceptKind(_: ?*anyopaque, allocator: std.mem.Allocator, initial: Forms.EdgeDraft) !?Forms.EdgeDraft {
