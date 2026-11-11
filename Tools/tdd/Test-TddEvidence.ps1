@@ -74,7 +74,7 @@ $identityPresent = $false
 foreach ($label in $identityLabels) {
   $value = Get-EvidenceField -Text $body -Label $label
   $identity[$label] = $value
-  if ($null -ne $value) {
+  if ($null -ne $value -and -not [string]::IsNullOrWhiteSpace($value)) {
     $identityPresent = $true
   }
 }

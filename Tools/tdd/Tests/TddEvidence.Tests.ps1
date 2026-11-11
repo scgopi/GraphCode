@@ -24,6 +24,26 @@ REGRESSION: pwsh Tests/All.Tests.ps1 -> pass
     throw "Valid TDD evidence was rejected"
   }
 
+  $blankIdentityValid = Join-Path $temporaryDirectory "blank-identity-valid.md"
+  @"
+## Test plan
+
+RED: pwsh Tests/Feature.Tests.ps1 -> missing behavior assertion failed
+GREEN: pwsh Tests/Feature.Tests.ps1 -> pass
+REGRESSION: pwsh Tests/All.Tests.ps1 -> pass
+
+## Candidate and evidence identity
+
+- **Tier(s):**
+- **Branch:**
+- **HEAD / tree:**
+- **Candidate hashes:**
+"@ | Set-Content -LiteralPath $blankIdentityValid
+  & $validator -BodyPath $blankIdentityValid
+  if ($LASTEXITCODE -ne 0) {
+    throw "Blank identity labels activated validation for a legacy PR body"
+  }
+
   $enhancedValid = Join-Path $temporaryDirectory "enhanced-valid.md"
   @"
 ## Summary
