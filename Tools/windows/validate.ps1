@@ -1150,6 +1150,22 @@ function Invoke-Task([string] $name) {
       }
     }
     "privacy" {
+      $pwsh = (Get-Process -Id $PID).Path
+      $parityFixture = Join-Path $repoRoot `
+        "Tools\windows\Tests\fixtures\UiParityBacklog\open-parity-issues.json"
+      & $pwsh -NoProfile -File `
+        (Join-Path $repoRoot "Tools\windows\Test-UiParityBacklog.ps1") `
+        -LedgerPath (Join-Path $repoRoot "investigation\ui-parity-matrix.md") `
+        -IssuesPath $parityFixture
+      if ($LASTEXITCODE -ne 0) {
+        throw "Fixture-backed parity backlog audit failed with exit code $LASTEXITCODE"
+      }
+      & $pwsh -NoProfile -File `
+        (Join-Path $repoRoot "Tools\windows\Tests\UiParityBacklog.Tests.ps1")
+      if ($LASTEXITCODE -ne 0) {
+        throw "Parity backlog audit tests failed with exit code $LASTEXITCODE"
+      }
+
       $files = Get-ChildItem (Join-Path $repoRoot "investigation") -Recurse -File |
         Where-Object {
           $_.FullName -notmatch "[\\/]\.build[\\/]" -and
