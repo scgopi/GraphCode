@@ -39,6 +39,58 @@ Statuses:
   approved. Optional additions use enhancement tracking; an unwanted extra's
   removal is not a request to add an enhancement.
 
+## Partial-row issue map
+
+The canonical row may link its issue inline, or use this compact mapping table.
+Run `pwsh -NoProfile -File Tools\windows\Test-UiParityBacklog.ps1` after editing
+the ledger or issue metadata. The audit reads the open `parity` snapshot and
+requires each `Partial` row to map to an open issue, each issue to have exactly
+one `P1 layout`/`P2 feature`/`P3 polish` label, an owner, and structured
+evidence metadata.
+
+<!-- parity-backlog-map:start -->
+| Partial row | Open parity issue |
+| --- | --- |
+| Jump palette | [#998](https://github.com/scgopi/GraphCode/issues/998) |
+| Update command | [#969](https://github.com/scgopi/GraphCode/issues/969) |
+| Tray lifecycle | [#970](https://github.com/scgopi/GraphCode/issues/970) |
+| Connection failure presentation | [#971](https://github.com/scgopi/GraphCode/issues/971) |
+| No-project Welcome detail | [#972](https://github.com/scgopi/GraphCode/issues/972) |
+| Empty global graph | [#973](https://github.com/scgopi/GraphCode/issues/973) |
+| Empty project canvas | [#974](https://github.com/scgopi/GraphCode/issues/974) |
+| Project context menu | [#975](https://github.com/scgopi/GraphCode/issues/975) |
+| Recent projects | [#976](https://github.com/scgopi/GraphCode/issues/976) |
+| Add Folder menu | [#977](https://github.com/scgopi/GraphCode/issues/977) |
+| Sidebar update banner | [#978](https://github.com/scgopi/GraphCode/issues/978) |
+| Sidebar error footer | [#979](https://github.com/scgopi/GraphCode/issues/979) |
+| Activity strip | [#980](https://github.com/scgopi/GraphCode/issues/980) |
+| Composite breadcrumb | [#981](https://github.com/scgopi/GraphCode/issues/981) |
+| Canvas attention rail | [#999](https://github.com/scgopi/GraphCode/issues/999) |
+| Node positioning | [#982](https://github.com/scgopi/GraphCode/issues/982) |
+| Connector handles | [#983](https://github.com/scgopi/GraphCode/issues/983) |
+| Worktree reclaim offer | [#985](https://github.com/scgopi/GraphCode/issues/985) |
+| Composite card actions | [#986](https://github.com/scgopi/GraphCode/issues/986) |
+| Loop card live detail | [#984](https://github.com/scgopi/GraphCode/issues/984) |
+| Quick Chats canvas | [#774](https://github.com/scgopi/GraphCode/issues/774) |
+| Quick Chat cards | [#987](https://github.com/scgopi/GraphCode/issues/987) |
+| Rename chat | [#988](https://github.com/scgopi/GraphCode/issues/988) |
+| Delete chat | [#989](https://github.com/scgopi/GraphCode/issues/989) |
+| Folder toolbar identity | [#1000](https://github.com/scgopi/GraphCode/issues/1000) |
+| Open Folder | [#990](https://github.com/scgopi/GraphCode/issues/990) |
+| Clone Repository sheet | [#991](https://github.com/scgopi/GraphCode/issues/991) |
+| Add Remote Repository sheet | [#992](https://github.com/scgopi/GraphCode/issues/992) |
+| Remote Connection info | [#993](https://github.com/scgopi/GraphCode/issues/993) |
+| Project Settings sheet | [#994](https://github.com/scgopi/GraphCode/issues/994) |
+| Available update alert | [#1001](https://github.com/scgopi/GraphCode/issues/1001) |
+| Chat rename/delete | [#995](https://github.com/scgopi/GraphCode/issues/995) |
+| Project delete loops | [#996](https://github.com/scgopi/GraphCode/issues/996) |
+| Project remove/trash | [#997](https://github.com/scgopi/GraphCode/issues/997) |
+<!-- parity-backlog-map:end -->
+
+[#801](https://github.com/scgopi/GraphCode/issues/801) is closed and linked to
+merged [#968](https://github.com/scgopi/GraphCode/pull/968); row coverage must
+use the still-open parity issue for the remaining whole-row criteria.
+
 ## 2026-11-09 Jump acceptance preparation
 
 The Jump palette row remains **Partial** for [#799](https://github.com/scgopi/GraphCode/issues/799).
