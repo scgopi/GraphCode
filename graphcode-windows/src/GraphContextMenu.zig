@@ -601,7 +601,8 @@ const std = @import("std");
 test "card transfer menu has executable stable actions on canvas and sidebar root rows" {
     for ([_]NodeMenuOrigin{ .canvas, .sidebar }) |origin| {
         const plan = nodeMenuPlan(.{
-            .project_path = "C:\\A", .id = "node",
+            .project_path = "C:\\A",
+            .id = "node",
             .retype = .{ .origin = origin },
             .transfer = .ready,
         });
@@ -647,8 +648,7 @@ test "card transfer menu capacity covers every flag combination without losing r
     var maximum: usize = 0;
     for (0..512) |bits| {
         const plan = nodeMenuPlan(.{
-            .project_path = "C:\\A",
-            .id = "node",
+            .project_path = "C:\\A", .id = "node",
             .composite = bits & 1 != 0,
             .can_arm = bits & 2 != 0,
             .unwired = bits & 4 != 0,
