@@ -95,10 +95,19 @@ function Test-AbruptStage([string] $Stage, [switch] $RepeatedPath, [switch] $Tim
     $toolBody = "@echo off`r`nexit 255`r`n"
     if ($TimeoutMode) {
       $extra = if ($MetadataFailure) { 'mkdir native\supervision.json' + "`r`n" } else { "" }
-      $toolBody = "@echo off`r`n$extra`"$(Join-Path $PSHOME 'pwsh.exe')`" -NoProfile -Command `"[Console]::WriteLine('timeout-ready'); [Console]::Error.WriteLine('timeout-stderr'); Start-Sleep -Seconds 30`"`r`n"
+      $toolBody = "@echo off`r`n${extra}echo timeout-ready`r`necho timeout-stderr 1>&2`r`n`"$(Join-Path $PSHOME 'pwsh.exe')`" -NoProfile -Command `"Start-Sleep -Seconds 30`"`r`n"
     }
     if ($FakeSummary) { $toolBody = "@echo off`r`necho Native accessibility provider: 280 checks, 0 failures`r`nexit /b 0`r`n" }
     [IO.File]::WriteAllText((Join-Path $fixture $tool), $toolBody, [Text.Encoding]::ASCII)
+    if ($TimeoutMode) {
+      $recipe = [IO.File]::ReadAllText((Join-Path $fixture $tool))
+      $stdoutMarker = $recipe.IndexOf("echo timeout-ready`r`n", [StringComparison]::Ordinal)
+      $stderrMarker = $recipe.IndexOf("echo timeout-stderr 1>&2`r`n", [StringComparison]::Ordinal)
+      $sleeper = $recipe.IndexOf('"' + (Join-Path $PSHOME 'pwsh.exe') + '"', [StringComparison]::Ordinal)
+      if ($stdoutMarker -lt 0 -or $stderrMarker -le $stdoutMarker -or $sleeper -le $stderrMarker) {
+        throw "Timeout fixture must emit both exact partial-stream markers before nested sleeper startup"
+      }
+    }
   }
   $wrapper = Join-Path $fixture "invoke.ps1"
   [IO.File]::WriteAllText($wrapper, @'
