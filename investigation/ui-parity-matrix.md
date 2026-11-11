@@ -42,8 +42,11 @@ Statuses:
 ## Partial-row issue map
 
 The canonical row may link its issue inline, or use this compact mapping table.
-Run `pwsh -NoProfile -File Tools\windows\Test-UiParityBacklog.ps1` after editing
-the ledger or issue metadata. The audit reads the open `parity` snapshot and
+CI runs the `privacy` validation task against the checked-in
+`Tools\windows\Tests\fixtures\UiParityBacklog\open-parity-issues.json` snapshot.
+Maintainers can run
+`pwsh -NoProfile -File Tools\windows\Test-UiParityBacklog.ps1` without an
+`-IssuesPath` to verify the current live GitHub state instead. The audit
 requires each `Partial` row to map to an open issue, each issue to have exactly
 one `P1 layout`/`P2 feature`/`P3 polish` label, an owner, and structured
 evidence metadata. It also requires exactly 89 unique canonical `Partial`

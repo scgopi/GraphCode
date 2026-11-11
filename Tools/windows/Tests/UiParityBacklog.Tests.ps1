@@ -3,6 +3,8 @@ $ErrorActionPreference = "Stop"
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 $auditor = Join-Path $repositoryRoot "Tools\windows\Test-UiParityBacklog.ps1"
 $ledgerPath = Join-Path $repositoryRoot "investigation\ui-parity-matrix.md"
+$fixtureSnapshotPath = Join-Path $repositoryRoot "Tools\windows\Tests\fixtures\UiParityBacklog\open-parity-issues.json"
+$validatePath = Join-Path $repositoryRoot "Tools\windows\validate.ps1"
 $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ("graphcode-parity-audit-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $fixtureRoot | Out-Null
 
@@ -25,17 +27,23 @@ function Invoke-AuditFailure {
 
 try {
   Push-Location $repositoryRoot
-  $script:snapshotPath = Join-Path $fixtureRoot "open-issues.json"
-  $snapshot = & gh issue list `
-    --repo scgopi/GraphCode `
-    --state open `
-    --label parity `
-    --limit 200 `
-    --json number,state,title,labels,assignees,body
+  & pwsh -NoProfile -File $auditor -LedgerPath $ledgerPath -IssuesPath $fixtureSnapshotPath
   if ($LASTEXITCODE -ne 0) {
-    throw "Could not capture open parity issues."
+    throw "Checked-in parity backlog fixture did not pass."
   }
-  $snapshot -join "`n" | Set-Content -LiteralPath $script:snapshotPath -Encoding utf8NoBOM
+  $script:snapshotPath = $fixtureSnapshotPath
+
+  $validateSource = Get-Content -LiteralPath $validatePath -Raw
+  $privacyClause = [regex]::Match(
+    $validateSource,
+    '(?s)\n    "privacy" \{(.*?)\n    \}'
+  )
+  if (-not $privacyClause.Success -or
+      $privacyClause.Groups[1].Value -notmatch 'Test-UiParityBacklog\.ps1' -or
+      $privacyClause.Groups[1].Value -notmatch 'open-parity-issues\.json' -or
+      $privacyClause.Groups[1].Value -notmatch 'UiParityBacklog\.Tests\.ps1') {
+    throw "RED: privacy validation does not run the fixture-backed parity audit and negative tests."
+  }
 
   $ledger = Get-Content -LiteralPath $ledgerPath
   $partialIndexes = @(
@@ -64,22 +72,21 @@ try {
   Invoke-AuditFailure $removedLedgerPath "Canonical Partial row '$removedRowName' is missing"
 
   $missingStatePath = Join-Path $fixtureRoot "missing-state.json"
-  $missingState = @($snapshot | ConvertFrom-Json)
+  $missingState = @(Get-Content -LiteralPath $fixtureSnapshotPath -Raw | ConvertFrom-Json)
   $missingState[0].PSObject.Properties.Remove("state")
   $missingState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $missingStatePath -Encoding utf8NoBOM
-  $script:previousSnapshotPath = $script:snapshotPath
   $script:snapshotPath = $missingStatePath
   Invoke-AuditFailure $ledgerPath "snapshot entry has no state; expected OPEN"
 
   $closedStatePath = Join-Path $fixtureRoot "closed-state.json"
-  $closedState = @(Get-Content -LiteralPath $script:previousSnapshotPath -Raw | ConvertFrom-Json)
+  $closedState = @(Get-Content -LiteralPath $fixtureSnapshotPath -Raw | ConvertFrom-Json)
   $closedState[0].state = "CLOSED"
   $closedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $closedStatePath -Encoding utf8NoBOM
   $script:snapshotPath = $closedStatePath
   Invoke-AuditFailure $ledgerPath "snapshot entry has state 'CLOSED'; expected OPEN"
 
   $unmappedPath = Join-Path $fixtureRoot "unmapped-open-issue.json"
-  $unmapped = @(Get-Content -LiteralPath $script:previousSnapshotPath -Raw | ConvertFrom-Json)
+  $unmapped = @(Get-Content -LiteralPath $fixtureSnapshotPath -Raw | ConvertFrom-Json)
   $unmapped += [pscustomobject]@{
     number = 999999
     state = "OPEN"

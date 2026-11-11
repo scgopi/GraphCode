@@ -9,10 +9,10 @@ marked mapping table. Every open parity issue must map back to a row unless it
 has an explicit metadata/infrastructure exemption, and must have one P1/P2/P3
 priority, at least one assignee, and evidence metadata in its body.
 
-Use IssuesPath with a JSON array containing number, state, title, labels,
-assignees, and body fields to audit a captured snapshot. Snapshot entries must
-be OPEN; missing or closed states fail closed. Without IssuesPath, the script
-reads the current open issue state through the GitHub CLI.
+Use IssuesPath with a JSON array containing number, state, labels, assignees,
+and body fields to audit a captured snapshot. Snapshot entries must be OPEN;
+missing or closed states fail closed. Without IssuesPath, the script reads the
+current open issue state through the GitHub CLI.
 #>
 [CmdletBinding()]
 param(
