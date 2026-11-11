@@ -94,6 +94,56 @@ Overstated evidence has repeatedly caused rework. Be exact about what you ran.
   count before drawing any conclusion from it. This applies to CI status
   queries and log greps as much as to `--test-filter`.
 
+### Evidence tiers and candidate freeze
+
+Use the same tier labels in plans, PRs, handoffs and result summaries:
+
+- **Tier A: focused local evidence.** Admitted focused unit, contract, static or
+  build commands used to iterate. Keep positive execution counts and distinguish
+  compilation from behavior. Tier A never replaces a required merge gate.
+- **Tier B: required CI merge gate.** The required exact-head pull-request
+  checks are authoritative for broad regression and merge admission. Full local
+  qualification, manual workflow dispatch, and path skips do not replace the
+  exact-head required contexts.
+- **Tier C: live/native devbox evidence.** Separately authorized UI, UIA,
+  keyboard/pointer, visual, sandbox, device, or other live behavior. State the
+  admitted command, desktop/device, permissions and precise scope. Tier C does
+  not replace Tier B.
+
+Before Tier B or Tier C interpretation, freeze the candidate tuple: branch,
+`HEAD`, tree hash plus clean/dirty state, and hashes of any PR body, binary,
+provider pin, fixture or artifact on which the claim depends. A source, pin,
+fixture or authoritative-body change invalidates that tuple; rerun the affected
+evidence on a newly recorded tuple. Prefer immutable logs and never relabel a
+historical result as current.
+
+On a failure, classify it before the next command or correction: `product`,
+`test/harness`, `environment`, `permissions/time/desktop`, `infrastructure/CI`,
+`scope/policy`, or `unknown`. Preserve the original output and stop the affected
+lane on that classification. Resume only after the stop has been reported and
+the exact corrective command is admitted. `unknown` cleanup, authority,
+permission, identity drift, expired time/desktop lease, or a policy decision
+blocks further execution until resolved.
+
+Every transferred or stopped session supplies this compact handoff:
+
+```text
+Branch:
+HEAD / tree:
+Candidate hashes:
+Next exact command:
+Positive count:
+Permissions / time / desktop:
+Blocker category:
+Evidence paths:
+Stopping condition:
+Publication authority:
+```
+
+The next command must be copyable as written. Record the expected positive
+count, the exact stop or resume condition, and who may publish, amend, merge or
+otherwise promote the result.
+
 ### The parity ledger
 
 [investigation/ui-parity-matrix.md](investigation/ui-parity-matrix.md) is the

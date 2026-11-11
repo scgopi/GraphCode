@@ -59,6 +59,43 @@ REGRESSION: <command(s)> -> pass
   if ($LASTEXITCODE -eq 0) {
     throw "Unedited pull request template was accepted as TDD evidence"
   }
+
+  $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
+  $templateText = Get-Content -LiteralPath $template -Raw
+  $agentsText = Get-Content -LiteralPath (Join-Path $repositoryRoot "AGENTS.md") -Raw
+  $matrixText = Get-Content -LiteralPath (Join-Path $repositoryRoot "Tools\windows\validation-matrix.md") -Raw
+  $kickoffText = Get-Content -LiteralPath (Join-Path $repositoryRoot "investigation\windows-parity-lane-kickoff.md") -Raw
+
+  foreach ($tier in @(
+    "Tier A: focused local evidence",
+    "Tier B: required CI merge gate",
+    "Tier C: live/native devbox evidence"
+  )) {
+    if ($agentsText -notmatch [regex]::Escape($tier) -or
+      $matrixText -notmatch [regex]::Escape($tier) -or
+      $kickoffText -notmatch [regex]::Escape($tier)) {
+      throw "Evidence tier definition is missing: $tier"
+    }
+  }
+
+  foreach ($field in @(
+    "Branch:",
+    "HEAD / tree:",
+    "Candidate hashes:",
+    "Next exact command:",
+    "Positive count:",
+    "Permissions / time / desktop:",
+    "Blocker category:",
+    "Evidence paths:",
+    "Stopping condition:",
+    "Publication authority:"
+  )) {
+    if ($templateText -notmatch [regex]::Escape($field) -or
+      $agentsText -notmatch [regex]::Escape($field) -or
+      $kickoffText -notmatch [regex]::Escape($field)) {
+      throw "Structured handoff field is missing: $field"
+    }
+  }
 } finally {
   Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force
 }

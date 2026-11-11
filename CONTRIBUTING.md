@@ -28,10 +28,22 @@ what you write.
 ## Before opening a pull request
 
 - Run `make test`.
+- Classify each result as focused local evidence, required exact-head CI, or
+  separately admitted live/native evidence. Local qualification never replaces
+  the required CI merge gate; see the evidence rules in
+  [AGENTS.md](AGENTS.md#evidence-tiers-and-candidate-freeze).
+- Before merge-gate or native execution, freeze the candidate identity (branch,
+  `HEAD`, tree hash and relevant artifact hashes). If it changes, rerun the
+  affected evidence rather than relabeling the old result.
 - Match the surrounding code — its naming, its structure, and its comment density.
   Comments should explain a constraint or a non-obvious *why*, not restate the code.
 - Keep one change per pull request, and say in the description what problem it solves
   rather than what files it touches.
+
+Preserve RED/GREEN/REGRESSION output as distinct evidence. If execution stops,
+use the structured handoff in the pull request template or the session handoff
+artifact; do not omit the exact candidate, next command, blocker and authority
+boundary.
 
 ## Third-party code
 

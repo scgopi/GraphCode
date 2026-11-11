@@ -2,6 +2,26 @@
 
 The Windows port must have runnable commands before implementation fleets begin.
 
+## Evidence tiers and candidate identity
+
+| Tier | Authority and use |
+|---|---|
+| **Tier A: focused local evidence** | Admitted focused tests, static contracts and builds used for iteration. Require a positive executed count; compilation is not behavioral proof. |
+| **Tier B: required CI merge gate** | The exact-head required pull-request contexts own broad regression and merge admission. Full local runs cannot replace these checks. |
+| **Tier C: live/native devbox evidence** | Separately admitted desktop, Sandbox, UIA, input, visual, device or hardware execution. It closes only the behavior exercised and does not replace Tier B. |
+
+Freeze a candidate before Tier B or Tier C evidence is interpreted: record
+branch, `HEAD`, tree hash and clean/dirty state, plus hashes for the PR body and
+any binary, provider pin, fixture or retained artifact used by the claim. Changes
+to the tuple invalidate the affected result; rerun it on the new tuple.
+
+After a failure, stop the affected lane and classify it as product, test/harness,
+environment, permissions/time/desktop, infrastructure/CI, scope/policy, or
+unknown before another command or correction. Unknown cleanup or authority,
+identity drift, and expired grants block further execution. A handoff must state
+the candidate identity, next exact command, positive count, execution boundary,
+evidence paths, blocker, stopping condition and publication authority.
+
 ## GraphCode
 
 | Surface | Command |

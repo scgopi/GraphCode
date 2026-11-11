@@ -40,6 +40,36 @@ RED: <focused command> -> <failure proving the behavior was missing>
 GREEN: <same focused command> -> pass
 REGRESSION: <adjacent/full command> -> pass
 
+## Candidate and evidence identity
+
+<!--
+Freeze this tuple before claiming required-CI or live/native evidence. If the
+candidate changes, replace the tuple and rerun affected evidence. Tier A is
+focused local evidence, Tier B is the required CI merge gate, and Tier C is
+separately admitted live/native devbox evidence. Tier A or C never replaces B.
+-->
+
+- **Tier(s):**
+- **Branch:**
+- **HEAD / tree:**
+- **Candidate hashes:**
+
+## Stopping handoff
+
+<!--
+Complete this section when execution stops, transfers, or has a remaining
+permission/desktop/time/policy blocker. State actual execution counts and the
+authority boundary; do not imply publication or merge permission.
+-->
+
+- **Next exact command:**
+- **Positive count:**
+- **Permissions / time / desktop:**
+- **Blocker category:**
+- **Evidence paths:**
+- **Stopping condition:**
+- **Publication authority:**
+
 ## Checklist
 
 - [ ] I have read the [Contributing Guidelines](../CONTRIBUTING.md)
@@ -47,3 +77,5 @@ REGRESSION: <adjacent/full command> -> pass
 - [ ] Tests pass locally (`make test`)
 - [ ] Code follows the existing style (`make check`)
 - [ ] I added the test/contract before the implementation and observed the intended RED failure
+- [ ] The evidence tier is explicit and the frozen candidate tuple matches the cited evidence
+- [ ] Any failure was classified and preserved before correction or retry
