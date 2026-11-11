@@ -10766,6 +10766,7 @@ fn onWindowMessage(
     result: *c.LRESULT,
 ) callconv(.c) bool {
     const app: *App = @ptrCast(@alignCast(context.?));
+    GraphContextMenu.traceEdgePopupMessage(message, wparam, lparam);
     const trace_event = if (build_options.wire_receiver_trace and Diagnostics.WireReceiverTrace.relevant(message))
         app.wire_receiver_trace.begin()
     else

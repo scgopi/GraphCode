@@ -313,6 +313,41 @@ pub fn retypeTarget(action: Action) ?SketchPromotion.Target {
     };
 }
 
+threadlocal var edge_popup_receipt: ?Diagnostics.EdgeActionTrace.Event = null;
+
+fn popupContext(receipt: Diagnostics.EdgeActionTrace.Event) Diagnostics.EdgeActionTrace.Event {
+    var observed = receipt;
+    observed.tick_ms = c.GetTickCount64();
+    observed.thread_id = c.GetCurrentThreadId();
+    var gui = std.mem.zeroes(c.GUITHREADINFO);
+    gui.cbSize = @sizeOf(c.GUITHREADINFO);
+    observed.gui_available = c.GetGUIThreadInfo(observed.thread_id, &gui) != 0;
+    if (observed.gui_available) {
+        observed.gui_flags = gui.flags;
+        observed.focus = @intFromPtr(gui.hwndFocus);
+        observed.capture = @intFromPtr(gui.hwndCapture);
+        observed.menu_owner = @intFromPtr(gui.hwndMenuOwner);
+    }
+    const foreground = c.GetForegroundWindow();
+    observed.foreground = @intFromPtr(foreground);
+    if (foreground != null) _ = c.GetWindowThreadProcessId(foreground, &observed.foreground_pid);
+    return observed;
+}
+
+pub fn traceEdgePopupMessage(message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) void {
+    var receipt = edge_popup_receipt orelse return;
+    switch (message) {
+        c.WM_CANCELMODE, c.WM_ACTIVATE, c.WM_ACTIVATEAPP, c.WM_CAPTURECHANGED, c.WM_KILLFOCUS, c.WM_SETFOCUS => {},
+        else => return,
+    }
+    receipt.stage = .popup_message;
+    receipt.message = message;
+    receipt.wparam = wparam;
+    receipt.lparam = lparam;
+    receipt.outcome = "observed";
+    Diagnostics.traceEdgeAction(popupContext(receipt));
+}
+
 pub fn show(
     parent: c.HWND,
     target: Target,
@@ -332,15 +367,38 @@ pub fn show(
         return;
     };
     defer _ = c.DestroyMenu(menu);
-    const command = c.TrackPopupMenu(
-        menu,
-        c.TPM_RETURNCMD | c.TPM_NONOTIFY | c.TPM_RIGHTBUTTON,
-        x,
-        y,
-        0,
-        parent,
-        null,
-    );
+    const command = track: {
+        const tracing = target == .edge and Diagnostics.edgeActionTraceEnabled();
+        const previous = edge_popup_receipt;
+        if (tracing) {
+            edge_popup_receipt = .{
+                .stage = .popup_entry,
+                .project = Diagnostics.EdgeActionTrace.Identity.from(target.edge.project_path),
+                .edge = Diagnostics.EdgeActionTrace.Identity.from(target.edge.id),
+                .hwnd = @intFromPtr(parent),
+            };
+            Diagnostics.traceEdgeAction(popupContext(edge_popup_receipt.?));
+        }
+        defer edge_popup_receipt = previous;
+        const returned = c.TrackPopupMenu(
+            menu,
+            c.TPM_RETURNCMD | c.TPM_NONOTIFY | c.TPM_RIGHTBUTTON,
+            x,
+            y,
+            0,
+            parent,
+            null,
+        );
+        if (tracing) {
+            var receipt = edge_popup_receipt.?;
+            receipt.stage = .popup_return;
+            receipt.command = returned;
+            receipt.action = @tagName(actionForCommand(returned));
+            receipt.outcome = if (returned == 0) "cancelled" else "command_returned";
+            Diagnostics.traceEdgeAction(popupContext(receipt));
+        }
+        break :track returned;
+    };
     dispatchReturnedCommand(parent, target, command, context, callback);
 }
 

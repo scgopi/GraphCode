@@ -7,6 +7,11 @@ to the existing stderr logger, covering popup return/action dispatch, App callba
 and stable-target refusal/selection, edge-edit guard results, and modal show entry.
 Identity fields contain hashes and byte counts, not project paths, titles, endpoint
 text, or draft contents. Sequence numbers are process-local.
+While the edge popup is active, additional records capture monotonic native
+ticks, its GUI thread's focus/capture/menu owner, foreground handle/process,
+and delivered cancel/activate/capture/focus messages. These are point-in-time
+observations, not proof of what caused cancellation. A zero `TrackPopupMenu`
+return remains cancellation and never causes an edit callback.
 This only observes the existing path: it adds no command handler, input, retry,
 guard bypass, dispatch fallback, or change to editing results. Missing receipts
 after the trace budget is exhausted cannot establish that an action did not run.

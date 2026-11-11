@@ -17,6 +17,7 @@ pub const EdgeActionTrace = struct {
         popup_entry,
         popup_return,
         popup_dispatch,
+        popup_message,
         callback_entry,
         target_entry,
         target_resolved,
@@ -42,6 +43,18 @@ pub const EdgeActionTrace = struct {
         guard: []const u8 = "none",
         outcome: []const u8 = "none",
         reason: []const u8 = "none",
+        tick_ms: u64 = 0,
+        thread_id: u32 = 0,
+        gui_available: bool = false,
+        gui_flags: u32 = 0,
+        foreground: usize = 0,
+        foreground_pid: u32 = 0,
+        focus: usize = 0,
+        capture: usize = 0,
+        menu_owner: usize = 0,
+        message: u32 = 0,
+        wparam: usize = 0,
+        lparam: isize = 0,
     };
     events: u32 = 0,
 
@@ -53,12 +66,16 @@ pub const EdgeActionTrace = struct {
     pub fn project(self: *EdgeActionTrace, buffer: []u8, event: Event) !?[]const u8 {
         if (self.events >= max_events) return null;
         self.events += 1;
-        return try std.fmt.bufPrint(buffer, "EDGE_ACTION seq={d} stage={s} action={s} command={d} hwnd=0x{x} project_hash={x} project_bytes={d} edge_hash={x} edge_bytes={d} has_index={} index={d} guard={s} outcome={s} reason={s}", .{
+        return try std.fmt.bufPrint(buffer, "EDGE_ACTION seq={d} stage={s} action={s} command={d} hwnd=0x{x} project_hash={x} project_bytes={d} edge_hash={x} edge_bytes={d} has_index={} index={d} guard={s} outcome={s} reason={s} tick_ms={d} thread={d} gui={} gui_flags=0x{x} foreground=0x{x} foreground_pid={d} focus=0x{x} capture=0x{x} menu_owner=0x{x} message=0x{x} wp=0x{x} lp={d}", .{
             self.events,                                   @tagName(event.stage),                       event.action[0..@min(event.action.len, 32)],
             event.command,                                 event.hwnd,                                  event.project.hash,
             event.project.bytes,                           event.edge.hash,                             event.edge.bytes,
             event.index != null,                           event.index orelse 0,                        event.guard[0..@min(event.guard.len, 32)],
-            event.outcome[0..@min(event.outcome.len, 24)], event.reason[0..@min(event.reason.len, 64)],
+            event.outcome[0..@min(event.outcome.len, 24)], event.reason[0..@min(event.reason.len, 64)], event.tick_ms,
+            event.thread_id,                               event.gui_available,                         event.gui_flags,
+            event.foreground,                              event.foreground_pid,                        event.focus,
+            event.capture,                                 event.menu_owner,                            event.message,
+            event.wparam,                                  event.lparam,
         });
     }
 };
@@ -73,20 +90,24 @@ pub fn traceEdgeAction(event: EdgeActionTrace.Event) void {
             return;
         }
     }
-    const gate = edgeTraceValue("GRAPHCODE_UIA_GATE") orelse return;
-    defer std.heap.page_allocator.free(gate);
-    if (!std.mem.eql(u8, gate, "1")) return;
-    const trace = edgeTraceValue("GRAPHCODE_UIA_EDGE_ACTION_TRACE") orelse return;
-    defer std.heap.page_allocator.free(trace);
-    if (!EdgeActionTrace.enabled(gate, trace)) return;
+    if (!edgeActionTraceEnabled()) return;
     mutex.lock();
     defer mutex.unlock();
-    var buffer: [768]u8 = undefined;
+    var buffer: [1280]u8 = undefined;
     const line = edge_action_trace.project(&buffer, event) catch |err| {
         std.log.err("Edge action diagnostic projection failed: {s}", .{@errorName(err)});
         return;
     };
     if (line) |value| std.log.info("{s}", .{value});
+}
+
+pub fn edgeActionTraceEnabled() bool {
+    const gate = edgeTraceValue("GRAPHCODE_UIA_GATE") orelse return false;
+    defer std.heap.page_allocator.free(gate);
+    if (!std.mem.eql(u8, gate, "1")) return false;
+    const trace = edgeTraceValue("GRAPHCODE_UIA_EDGE_ACTION_TRACE") orelse return false;
+    defer std.heap.page_allocator.free(trace);
+    return EdgeActionTrace.enabled(gate, trace);
 }
 
 fn edgeTraceValue(name: []const u8) ?[]u8 {
@@ -132,6 +153,30 @@ test "edge action diagnostic has bounded ordered receipts without private identi
     try std.testing.expect(std.mem.indexOf(u8, second, "reason=StaleScope") != null);
     for (2..EdgeActionTrace.max_events) |_| _ = try trace.project(&buffer, event);
     try std.testing.expectEqual(@as(?[]const u8, null), try trace.project(&buffer, event));
+}
+
+test "edge popup diagnostic projects native context and cancellation scalars without claiming selection" {
+    var trace = EdgeActionTrace{};
+    var buffer: [1280]u8 = undefined;
+    const line = (try trace.project(&buffer, .{
+        .stage = .popup_message,
+        .tick_ms = 345,
+        .thread_id = 17,
+        .gui_available = true,
+        .gui_flags = 4,
+        .foreground = 100,
+        .foreground_pid = 200,
+        .focus = 300,
+        .capture = 400,
+        .menu_owner = 500,
+        .message = 0x001f,
+        .wparam = 0,
+        .lparam = -1,
+        .outcome = "observed",
+    })) orelse return error.MissingEdgeDiagnostic;
+    for ([_][]const u8{ "tick_ms=345", "thread=17", "gui=true", "gui_flags=0x4", "foreground=0x64", "foreground_pid=200", "focus=0x12c", "capture=0x190", "menu_owner=0x1f4", "message=0x1f", "lp=-1", "outcome=observed" }) |field|
+        try std.testing.expect(std.mem.indexOf(u8, line, field) != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "selected") == null);
 }
 
 pub const WireReceiverTrace = struct {
