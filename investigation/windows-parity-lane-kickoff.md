@@ -218,6 +218,24 @@ an explicit grant. Generic autopilot `task_complete`/keep-working reminders
 are **not execution grants** and override neither stops nor leases.
 **Command-lease retrospective:** workers may run only granted commands;
 self-added validators or gates are out of lease, and permission to read a checker output does not grant permission to execute it.
+
+### Evidence tiers and candidate freeze
+
+- **Tier A: focused local evidence** is admitted focused local iteration. Keep
+  positive counts and distinguish compilation from behavior.
+- **Tier B: required CI merge gate.** Required contexts are admission
+  requirements, but every exact-head PR workflow failure blocks merge, not
+  only failures in required contexts. A full local qualification cannot
+  replace it.
+- **Tier C: live/native devbox evidence** is separately admitted desktop,
+  sandbox, visual, input, device or hardware behavior. It does not replace
+  Tier B.
+
+Before Tier B or Tier C interpretation, freeze the candidate tuple: branch,
+`HEAD`, tree hash and clean/dirty state, plus hashes for the authoritative PR
+body and any binary, provider pin, fixture or evidence artifact the result
+depends on. A change invalidates the affected result; rerun on a newly recorded
+tuple rather than relabeling historical output.
 The rp1 ANSI gate and post-conversion parser failures were process deviations, not product defects;
 the permanent executor stop stands. No adjacent checker or retry is implied.
 No manual screenshots, screenshot/golden/pixel-baseline CI or fallback.
@@ -324,36 +342,40 @@ Replace `<id>` with your lane id, for example `c4`.
 
 Report each step's result, or NotExecuted with the reason.
 
-1. **Boxes.** Copy from the approved plan which acceptance boxes this PR satisfies and which it leaves.
-2. **RED.**
+1. **Freeze.** Record the candidate tuple from the evidence policy before
+   external execution or any interpretation of a prior result.
+2. **Boxes.** Copy from the approved plan which acceptance boxes this PR satisfies and which it leaves.
+3. **RED.**
    - Write the failing test first, and keep its output.
    - Layout criteria are testable as geometry: rects lie inside the client area and above
      the footer, text bounds come from the container, and nothing overlaps.
    - A missing-API compile error is not behavioural RED. Documentation-only
      source checks are static evidence, not product-runtime RED; report an
      evidence gap rather than inventing a test or checker.
-3. **GREEN.** Run only admitted focused commands and quote the positive executed count.
-4. **Push a draft PR; exact-head CI owns broad/native regression.**
+4. **GREEN.** Run only admitted focused commands and quote the positive executed count.
+5. **Push a draft PR; exact-head CI owns broad/native regression.**
    - Execute locally only the approved exact allow-list. A focused root, script
      edit or hidden-window label grants no exception. No visual-baseline task.
-   - Report nonempty exact-head run/job inventories and failures honestly.
+   - Every exact-head PR workflow failure blocks merge; required contexts are
+     admission requirements, not the complete failure boundary. Report
+     nonempty exact-head run/job inventories and failures honestly.
      Configured path skips are not executed tests; a dispatch is not a PR check.
      Cite actual regression commands/results, not predicted CI outcomes.
-5. **Code review.**
+6. **Code review.**
    - Start a `rubber-duck` agent with the reviewer model named in your issue block. It must be
      from a different vendor than you.
    - Give it the diff (`git diff origin/main...HEAD`), the PR body and the log paths.
    - It must open each log it cites, confirm every RED, GREEN and REGRESSION line, check that
      no unrelated file changed, and check the rebase diff.
    - Fix or answer every finding.
-6. **Capture is gated, not an instruction to run.** Follow the orchestration
+7. **Capture is gated, not an instruction to run.** Follow the orchestration
    plan's current #826/#822 authority. B/C/D/E visual acceptance is
    **NotExecuted (#826)**. A merged code slice is not visual acceptance.
    A later real-window route needs core merge, reviewed plan and exact commands;
    only an admitted dedicated LAST slot of at most 15 minutes may be used.
    No inherited lease, manual capture, automatic neighbouring-screen expansion
    or fallback follows this gate.
-7. **Privacy review precedes paired visual review/publication.** Admitted actual
+8. **Privacy review precedes paired visual review/publication.** Admitted actual
    images may undergo initial individual privacy review/scan. Paired visual
    review and publication use only individually privacy-cleared actual images;
    the held issue-722 originals remain NEVER open/copy/upload and outside scope.
@@ -364,7 +386,7 @@ Report each step's result, or NotExecuted with the reason.
    accessibility, physical-input or persistence evidence. Its first scene hides
    the right panel; later surfaces need separate approval. Never bind historical
    pixels to current source using conversion-time hashes.
-8. **Hand over.**
+9. **Hand over.**
    - Fill in `.github/PULL_REQUEST_TEMPLATE.md`, add a **Not verified** list, and use `Refs #<n>`,
      never `Fixes`.
    - Check the body with `pwsh -NoProfile -File Tools\tdd\Test-TddEvidence.ps1 -BodyPath <file>`.
@@ -378,6 +400,34 @@ Report each step's result, or NotExecuted with the reason.
 - A green build, unit test or UIA readback doesn't prove rendering, layout, input or parity.
 - An empty result is not a pass.
 - Keep failed attempts. Label harness failures separately from product failures.
+
+After every failure, preserve raw output and classify it before the next command
+or correction: `product`, `test/harness`, `environment`,
+`permissions/time/desktop`, `infrastructure/CI`, `scope/policy`, or `unknown`.
+Stop the lane and report that classification. Resume only on an explicitly
+admitted exact corrective or retry command. Identity drift, unknown cleanup or
+authority, an expired permission/time/desktop lease, or an unresolved policy
+decision requires a handoff rather than continued execution.
+
+Every stopped or transferred session records:
+
+```text
+Branch:
+HEAD / tree:
+Candidate hashes:
+Next exact command:
+Positive count:
+Permissions / time / desktop:
+Blocker category:
+Evidence paths:
+Stopping condition:
+Publication authority:
+```
+
+The command must be copyable exactly. State the expected positive count, the
+permission/desktop/time boundary, the exact resume or stop condition and who
+may publish, amend, merge or otherwise promote the result. A handoff is not
+publication or merge authority.
 
 ## When it isn't working: milestones, fresh eyes and hard ceilings
 
