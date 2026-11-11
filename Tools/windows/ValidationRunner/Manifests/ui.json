@@ -1,6 +1,7 @@
 {
   "units": [
     { "id": "ui.navigation.headless-runner-plan", "owner": "Ui", "minimumCount": 14, "exactCount": 14, "requiredGroups": [] },
+    { "id": "ui.popup.receipt.cancelled-after-queued-input", "owner": "Ui", "minimumCount": 1, "exactCount": 1, "requiredGroups": [] },
     { "id": "ui.navigation.selection-event-controls", "owner": "Ui", "minimumCount": 12, "exactCount": 12,
       "requiredGroups": ["graph", "quick-chats", "project", "loop", "chat"] },
     { "id": "ui.jump.workspace-destination-controls", "owner": "Ui", "minimumCount": 16, "exactCount": 16, "requiredGroups": [] },

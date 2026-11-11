@@ -173,6 +173,21 @@ Overview, Quick Chats and other owners select neither of those rows. The
 without changing the independent roster, card, metadata, bounds or foreign-owner
 requirements.
 
+With both process flags `GRAPHCODE_UIA_GATE=1` and
+`GRAPHCODE_UIA_EDGE_ACTION_TRACE=1`, popup input emits
+`UIA_POPUP_INPUT_RECEIPT` immediately before/after `SendInput` and when closure
+is observed by the existing polling path. Each receipt records monotonic ticks
+and their frequency, UTC, foreground handle/PID, cursor hit handle/PID, popup
+visibility and expected/sent input counts. Observation errors are explicit.
+These are read-only samples, not foreground leases or proof of command delivery:
+`selectionOutcome` stays `unobserved`. The product's actual `TrackPopupMenu`
+return and callback receipts establish selection or cancellation.
+The `ui.managed` headless cancellation control models accepted input followed by
+popup closure, foreign foreground/hit windows and an external command-zero
+return. It also checks that disabling tracing preserves the original operation
+counts. Tracing adds no input, activation, retries or sleeps, and is off unless
+both flags match exactly.
+
 UIA, packaging contracts, shell ownership, and managed/native tests consume those
 same implementations. The loader verifies the exact file/type, worktree,
 current source and compiler-reference fingerprints, and loaded module identity.

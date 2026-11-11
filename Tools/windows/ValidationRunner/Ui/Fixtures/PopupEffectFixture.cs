@@ -9,9 +9,11 @@ public sealed class PopupEffectFixture : IUiaInputOperations {
   public int MouseCalls, KeyCalls, CursorMoves, SelectItemCalls, MovePosts, MoveSends;
   public bool Visible;
   public int CursorX, CursorY, CursorReads, ForegroundReads;
+  public uint? ReturnedCommand;
   public void Reset(string scenario) {
     Scenario = scenario; MouseCalls = KeyCalls = CursorMoves = SelectItemCalls = MovePosts = MoveSends = 0;
     Visible = scenario != "hidden-popup"; CursorX = CursorY = CursorReads = ForegroundReads = 0;
+    ReturnedCommand = null;
   }
 
 
@@ -43,7 +45,9 @@ public sealed class PopupEffectFixture : IUiaInputOperations {
   }
   public void Sleep(uint milliseconds) { }
   public uint SendInput(uint count, Input[] inputs, int size) {
-    MouseCalls++; Visible = Scenario == "foreign-before-enter" || Scenario == "owned-enter"; return count;
+    MouseCalls++; Visible = Scenario == "foreign-before-enter" || Scenario == "owned-enter";
+    if (Scenario == "cancel-after-queued-input") ReturnedCommand = 0;
+    return count;
   }
   public bool IsWindowVisible(IntPtr popup) { return Visible; }
   public bool PostMessage(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam) {
@@ -55,10 +59,14 @@ public sealed class PopupEffectFixture : IUiaInputOperations {
     if (Scenario == "unhilited-metadata-fault" && ForegroundReads == 2)
       throw new InvalidOperationException("Owned metadata fixture fault");
     return Scenario == "foreign-foreground" ||
+      (Scenario == "cancel-after-queued-input" && MouseCalls > 0) ||
       (Scenario == "foreign-after-hover" && ForegroundReads == 2) ||
       (Scenario == "foreign-before-enter" && ForegroundReads == 3) ? (IntPtr)99 : (IntPtr)42;
   }
-  public IntPtr WindowFromPoint(ScreenPoint point) { return Scenario == "underlying-shell-hit" ? (IntPtr)42 : (IntPtr)44; }
+  public IntPtr WindowFromPoint(ScreenPoint point) {
+    if (Scenario == "cancel-after-queued-input" && MouseCalls > 0) return (IntPtr)99;
+    return Scenario == "underlying-shell-hit" ? (IntPtr)42 : (IntPtr)44;
+  }
   public bool IsRetainedProcessAlive(uint processId) { return processId == 4242 && Scenario != "foreign-owner-all"; }
   public uint WindowProcessId(IntPtr window) {
     return Scenario == "foreign-owner-all" || window == (IntPtr)99 ||
