@@ -21,6 +21,9 @@ public static class GraphCodeUiaGateState {
   }
 
   private sealed class NativeInputOperations : IUiaInputOperations {
+    public IntPtr WindowOwner(IntPtr window) { return GraphCodeUiaGateState.WindowOwner(window); }
+    public string WindowClass(IntPtr window) { return GraphCodeUiaGateState.WindowClass(window); }
+    public string WindowTitle(IntPtr window) { return GraphCodeUiaGateState.WindowTitle(window); }
     public bool IsRetainedProcessAlive(uint processId) { return GraphCodeUiaGateState.IsRetainedProcessAlive(processId); }
     public uint WindowProcessId(IntPtr window) { return GraphCodeUiaGateState.WindowProcessId(window); }
     public bool WindowIsVisible(IntPtr window) { return GraphCodeUiaGateState.WindowIsVisible(window); }
@@ -744,6 +747,9 @@ public static class GraphCodeUiaGateState {
   ) { return UiaInputSafety.IsOwnedPopupInput(owner, popup, expectedProcessId, popupProcessId, foregroundProcessId, foregroundRoot, pointProcessId, pointRoot, popupVisible); }
 
   public static PopupItemHit ClickPopupMenuItem(IntPtr popup, IntPtr owner, int position, int commandId, uint expectedProcessId) { return InputSafety.ClickPopupMenuItem(popup, owner, position, commandId, expectedProcessId); }
+  public static PopupItemHit ClickPopupMenuItemForModal(IntPtr popup, IntPtr owner, int position, int commandId, uint expectedProcessId, string expectedModalTitle) {
+    return InputSafety.ClickPopupMenuItemForModal(popup, owner, position, commandId, expectedProcessId, expectedModalTitle);
+  }
   public static PopupItemHit ClickPopupMenuItemStrict(IntPtr popup, IntPtr owner, int position, int commandId, uint expectedProcessId) { return InputSafety.ClickPopupMenuItemStrict(popup, owner, position, commandId, expectedProcessId); }
   private static void RequireOwnedPopupForeground(IntPtr popup, IntPtr owner, uint expectedProcessId) { InputSafety.RequireOwnedPopupForeground(popup, owner, expectedProcessId); }
   // Sidebar.updateBannerRect/updateBannerAt are pixel-only hit-test geometry with

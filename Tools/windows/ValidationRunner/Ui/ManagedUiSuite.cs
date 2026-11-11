@@ -100,6 +100,50 @@ public sealed class ManagedUiSuite : IValidationSuite
         foreach (string name in effects)
             cases.Add(new UiCase($"ui.popup.effect.{name}", () => RunPopupEffect(name),
                 "ValidationRunner.Tests.ps1:1256-1328"));
+        cases.Add(new UiCase("ui.popup.effect.expected-modal-transition", () =>
+        {
+            var probe = new PopupEffectFixture();
+            var input = new UiaInputSafety(probe);
+            var method = typeof(UiaInputSafety).GetMethod("ClickPopupMenuItemForModal",
+                new[] { typeof(IntPtr), typeof(IntPtr), typeof(int), typeof(int), typeof(uint), typeof(string) });
+            ActivationCases.Require(method is not null, "RED: missing exact expected-modal popup transition route");
+            int subcases = 0;
+            foreach (string scenario in new[] { "modal", "modal-late", "modal-foreign", "modal-wrong-title",
+                "modal-wrong-owner", "modal-wrong-class", "modal-disabled", "modal-hidden", "modal-stale-owner",
+                "modal-wrong-pid", "modal-popup-open", "modal-no-transition", "modal-no-expectation" })
+            {
+                probe.Reset(scenario);
+                object? hit = null;
+                Exception? failure = null;
+                try
+                {
+                    if (scenario == "modal-no-expectation")
+                        hit = input.ClickPopupMenuItem(new IntPtr(43), new IntPtr(42), 0, 5103, 4242);
+                    else
+                        hit = method!.Invoke(input, new object[] { new IntPtr(43), new IntPtr(42), 0, 5103, 4242u, "Promote sketch to Goal" });
+                }
+                catch (Exception error) { failure = error.GetBaseException(); }
+                bool accepted = scenario is "modal" or "modal-late";
+                ActivationCases.Require((hit is not null) == accepted && (failure is null) == accepted &&
+                    probe.MouseCalls == 1 && probe.KeyCalls == 0 && probe.SelectItemCalls == 0,
+                    $"Expected modal transition ownership/input contract differs: {scenario}");
+                if (hit is not null)
+                {
+                    var completion = hit.GetType().GetProperty("Completion")!.GetValue(hit);
+                    var modal = hit.GetType().GetProperty("ModalWindow")!.GetValue(hit);
+                    ActivationCases.Require(completion!.ToString() == "ExpectedOwnedModal" &&
+                        (IntPtr)modal! == new IntPtr(45), "Expected modal needs a typed identity receipt");
+                }
+                subcases++;
+            }
+            probe.Reset("owned");
+            Exception? emptyExpectation = null;
+            try { method!.Invoke(input, new object[] { new IntPtr(43), new IntPtr(42), 0, 5103, 4242u, "" }); }
+            catch (Exception error) { emptyExpectation = error.GetBaseException(); }
+            ActivationCases.Require(emptyExpectation is ArgumentException && probe.MouseCalls == 0 &&
+                probe.KeyCalls == 0 && probe.SelectItemCalls == 0, "Empty modal expectation must refuse before input");
+            ActivationCases.Require(subcases == 13, "Expected thirteen controlled transitions plus empty-expectation refusal");
+        }, "Actual popup core; exact expected owned modal after pointer input, no native calls"));
         cases.Add(new UiCase("ui.popup.receipt.cancelled-after-queued-input", () =>
         {
             string? oldGate = Environment.GetEnvironmentVariable("GRAPHCODE_UIA_GATE");

@@ -12658,11 +12658,24 @@ try {
       cardBounds = $cardRect; canvasBounds = $canvasRect; pans = $pans.ToArray()
     }
   }
-  function Sketch-ClickMenu($menu, [int] $id) {
+  function Sketch-ClickMenu($menu, [int] $id, [string] $ExpectedModalTitle = "") {
     $item = @($menu.items | Where-Object { $_.Id -eq $id -and $_.Enabled })
     Require ($item.Count -eq 1) "sketch/custody popup missing enabled ${id}: $(Format-PopupMenuItems $menu.items)"
-    $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($menu.popup, $renameShellWindow,
-      [int]$item[0].Position, $id, [uint32]$renameProcess.Id)
+    if ($ExpectedModalTitle) {
+      Require ($id -in @(5116, 5117, 5118)) "Only sketch promotion commands declare an expected modal"
+      $click = [GraphCodeUiaGateState]::ClickPopupMenuItemForModal($menu.popup, $renameShellWindow,
+        [int]$item[0].Position, $id, [uint32]$renameProcess.Id, $ExpectedModalTitle)
+      Require ($click.Completion.ToString() -ceq "ExpectedOwnedModal" -and $click.ModalWindow -ne [IntPtr]::Zero) `
+        "Sketch promotion did not return an exact owned modal completion receipt"
+      Write-Host ("UIA_SKETCH_MODAL_COMPLETION_EVIDENCE=" + ([ordered]@{
+        command = $id; completion = $click.Completion.ToString(); modal = $click.ModalWindow.ToInt64()
+        owner = $renameShellWindow.ToInt64(); process = $renameProcess.Id; title = $ExpectedModalTitle
+        keyboardFallback = $click.UsedKeyboardFallback; selectItemFallback = $click.UsedSelectItemFallback
+      } | ConvertTo-Json -Compress))
+    } else {
+      $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($menu.popup, $renameShellWindow,
+        [int]$item[0].Position, $id, [uint32]$renameProcess.Id)
+    }
     if ($null -ne $click) {
       Write-Host "UIA_SKETCH_MENU_CLICK command=$id hilite=$($click.Hilite) selectItemFallback=$($click.UsedSelectItemFallback) enterFallback=$($click.UsedKeyboardFallback) hiliteAtEnterFallback=$($click.HiliteAtEnterFallback) hiliteBeforeEnter=$($click.HiliteBeforeEnter)"
     }
@@ -12750,7 +12763,7 @@ try {
     Require ($subPopup -ne [IntPtr]::Zero) `
       "sketch '$title' real Promote to submenu popup did not open by hover or keyboard"
     $subMenu = @{ popup = $subPopup; items = $subItems }
-    $menuClick = Sketch-ClickMenu $subMenu $case.Command
+    $menuClick = Sketch-ClickMenu $subMenu $case.Command "Promote $title to $($case.Target)"
     $menuClick.submenuRevealed = $submenuRevealed
     $menuClick.submenuKeyboardReveal = $submenuKeyboardReveal
     $modal = Assert-SketchModal "Promote $title to $($case.Target)"

@@ -188,6 +188,16 @@ return. It also checks that disabling tracing preserves the original operation
 counts. Tracing adds no input, activation, retries or sleeps, and is off unless
 both flags match exactly.
 
+Known sketch-promotion actions use `ClickPopupMenuItemForModal` with the exact
+expected title. After the same two mouse events, this pointer-only route uses
+the existing 20-by-10ms observation budget to require a closed popup and the
+foreground, enabled, visible `GraphCodeSheetHost` with that exact title, direct
+owner and original held process. It returns `ExpectedOwnedModal` plus the HWND,
+not inferred menu selection. No Enter or selection fallback is sent on this
+route; missing, foreign, stale or mismatched modal identity refuses. Ordinary
+popup ownership is unchanged, with a fresh guard before any post-click
+selection fallback. The gate still runs its independent modal assertions.
+
 UIA, packaging contracts, shell ownership, and managed/native tests consume those
 same implementations. The loader verifies the exact file/type, worktree,
 current source and compiler-reference fingerprints, and loaded module identity.

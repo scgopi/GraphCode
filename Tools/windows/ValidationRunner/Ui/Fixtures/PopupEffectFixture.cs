@@ -45,7 +45,8 @@ public sealed class PopupEffectFixture : IUiaInputOperations {
   }
   public void Sleep(uint milliseconds) { }
   public uint SendInput(uint count, Input[] inputs, int size) {
-    MouseCalls++; Visible = Scenario == "foreign-before-enter" || Scenario == "owned-enter";
+    MouseCalls++; Visible = Scenario == "foreign-before-enter" || Scenario == "owned-enter" ||
+      Scenario.StartsWith("modal", StringComparison.Ordinal);
     if (Scenario == "cancel-after-queued-input") ReturnedCommand = 0;
     return count;
   }
@@ -56,6 +57,12 @@ public sealed class PopupEffectFixture : IUiaInputOperations {
   }
   public IntPtr GetForegroundWindow() {
     ForegroundReads++;
+    if (Scenario.StartsWith("modal", StringComparison.Ordinal) && MouseCalls > 0) {
+      if (Scenario == "modal-no-transition") return (IntPtr)42;
+      if (Scenario == "modal-late" && ForegroundReads == 3) return (IntPtr)42;
+      if (Scenario != "modal-popup-open") Visible = false;
+      return Scenario == "modal-foreign" ? (IntPtr)99 : (IntPtr)45;
+    }
     if (Scenario == "unhilited-metadata-fault" && ForegroundReads == 2)
       throw new InvalidOperationException("Owned metadata fixture fault");
     return Scenario == "foreign-foreground" ||
@@ -67,14 +74,21 @@ public sealed class PopupEffectFixture : IUiaInputOperations {
     if (Scenario == "cancel-after-queued-input" && MouseCalls > 0) return (IntPtr)99;
     return Scenario == "underlying-shell-hit" ? (IntPtr)42 : (IntPtr)44;
   }
-  public bool IsRetainedProcessAlive(uint processId) { return processId == 4242 && Scenario != "foreign-owner-all"; }
+  public bool IsRetainedProcessAlive(uint processId) {
+    return processId == 4242 && Scenario != "foreign-owner-all" &&
+      !(Scenario == "modal-stale-owner" && MouseCalls > 0);
+  }
   public uint WindowProcessId(IntPtr window) {
     return Scenario == "foreign-owner-all" || window == (IntPtr)99 ||
+      (window == (IntPtr)45 && Scenario == "modal-wrong-pid") ||
       (window == (IntPtr)44 && Scenario == "foreign-hit") ? 7777u : 4242u;
   }
   public IntPtr GetAncestor(IntPtr window, uint flags) { return window == (IntPtr)44 ? (IntPtr)43 : window; }
-  public bool WindowIsVisible(IntPtr window) => IsWindowVisible(window);
-  public bool WindowIsEnabled(IntPtr window) => throw new InvalidOperationException("Not a popup operation");
+  public bool WindowIsVisible(IntPtr window) => window == (IntPtr)45 ? Scenario != "modal-hidden" : IsWindowVisible(window);
+  public bool WindowIsEnabled(IntPtr window) => window == (IntPtr)45 && Scenario != "modal-disabled";
+  public IntPtr WindowOwner(IntPtr window) => Scenario == "modal-wrong-owner" ? (IntPtr)99 : (IntPtr)42;
+  public string WindowClass(IntPtr window) => Scenario == "modal-wrong-class" ? "Other" : "GraphCodeSheetHost";
+  public string WindowTitle(IntPtr window) => Scenario == "modal-wrong-title" ? "Other" : "Promote sketch to Goal";
   public IntPtr FocusedControlInDialog(IntPtr window) => throw new InvalidOperationException("Not a popup operation");
   public IntPtr FindPopupForMenu(uint processId, IntPtr menu) => throw new InvalidOperationException("Not a popup operation");
   public bool ResolvesToControl(IntPtr target, IntPtr owner, ScreenPoint point) => throw new InvalidOperationException("Not a popup operation");
