@@ -3,6 +3,7 @@ const Wire = @import("Wire.zig");
 const SketchPromotion = @import("SketchPromotion.zig");
 const NativeDialogs = @import("WindowsNativeDialogs.zig");
 const Diagnostics = @import("Diagnostics.zig");
+const GraphModel = @import("GraphModel.zig");
 
 pub const NodeMenuOrigin = enum { canvas, sidebar };
 pub const TransferMenuState = enum { hidden, ready, local_only, busy, context_changed };
@@ -47,7 +48,115 @@ pub const BackgroundTarget = struct {
 pub const EdgeTarget = struct {
     project_path: []const u8,
     id: []const u8,
+    summary: []const u8,
 };
+
+pub const EdgeSnapshot = struct {
+    allocator: std.mem.Allocator,
+    target: EdgeTarget,
+
+    pub fn capture(allocator: std.mem.Allocator, project_path: []const u8, edge: GraphModel.Edge) !EdgeSnapshot {
+        const path = try allocator.dupe(u8, project_path);
+        errdefer allocator.free(path);
+        const id = try allocator.dupe(u8, edge.id);
+        errdefer allocator.free(id);
+        return .{
+            .allocator = allocator,
+            .target = .{ .project_path = path, .id = id, .summary = try edgeSummary(allocator, edge) },
+        };
+    }
+
+    pub fn deinit(self: *EdgeSnapshot) void {
+        self.allocator.free(self.target.summary);
+        self.allocator.free(self.target.id);
+        self.allocator.free(self.target.project_path);
+    }
+};
+
+fn edgeSummary(allocator: std.mem.Allocator, edge: GraphModel.Edge) ![]u8 {
+    const kind = if (edge.kind.len == 0 or std.mem.eql(u8, edge.kind, "handoff"))
+        "Handoff"
+    else if (std.mem.eql(u8, edge.kind, "message"))
+        "Message"
+    else if (std.mem.eql(u8, edge.kind, "spawn"))
+        "Spawn"
+    else
+        return error.InvalidEdgeKind;
+    const condition = if (std.mem.eql(u8, edge.condition, "always"))
+        "Always"
+    else if (std.mem.eql(u8, edge.condition, "onSuccess"))
+        "On success"
+    else if (std.mem.eql(u8, edge.condition, "onFailure"))
+        "On failure"
+    else
+        return error.InvalidEdgeCondition;
+    var output = std.array_list.Managed(u8).init(allocator);
+    defer output.deinit();
+    const writer = output.writer();
+    try writer.print("{s} · {s}", .{ kind, condition });
+    switch (edge.payload_transform) {
+        .none => {},
+        .template => |text| if (text.len != 0) {
+            try writer.print(" · {s}", .{text});
+        },
+        .script => |command| if (command.len != 0) {
+            try writer.print(" · $ {s}", .{command});
+        },
+    }
+    if (edge.cycle_guard) |guard| {
+        try writer.print(" · loop {d}/", .{edge.fire_count});
+        try writeCycleGuard(writer, guard);
+    }
+    if (!std.unicode.utf8ValidateSlice(output.items)) return error.InvalidUtf8;
+    if (std.mem.indexOfScalar(u8, output.items, 0) != null) return error.EmbeddedNull;
+    return output.toOwnedSlice();
+}
+
+pub fn writeCycleGuard(writer: anytype, guard: GraphModel.CycleGuard) !void {
+    var has_part = false;
+    if (guard.max_iterations) |maximum| {
+        try writer.print("≤{d}×", .{maximum});
+        has_part = true;
+    }
+    if (guard.until) |raw| {
+        const until = try effectiveEdgeUntil(raw);
+        if (until.len != 0) {
+            if (has_part) try writer.writeAll(" or ");
+            try writer.print("until `{s}`", .{until});
+            has_part = true;
+        }
+    }
+    if (guard.stop_after_passes_without_improvement) |passes| {
+        if (passes > 0) {
+            if (has_part) try writer.writeAll(" or ");
+            try writer.print("{d} flat passes", .{passes});
+            has_part = true;
+        }
+    }
+    if (!has_part) try writer.writeAll("unbounded");
+}
+
+fn effectiveEdgeUntil(text: []const u8) error{InvalidUtf8}![]const u8 {
+    const view = std.unicode.Utf8View.init(text) catch return error.InvalidUtf8;
+    var iterator = view.iterator();
+    var start = text.len;
+    var end: usize = 0;
+    var offset: usize = 0;
+    while (iterator.nextCodepointSlice()) |bytes| {
+        const codepoint = std.unicode.utf8Decode(bytes) catch return error.InvalidUtf8;
+        // Foundation .whitespaces: Unicode space separators plus horizontal tab, not newlines.
+        const whitespace = switch (codepoint) {
+            0x09, 0x20, 0xa0, 0x1680, 0x2000...0x200a, 0x202f, 0x205f, 0x3000 => true,
+            else => false,
+        };
+        if (!whitespace) {
+            start = @min(start, offset);
+            end = offset + bytes.len;
+        }
+        offset += bytes.len;
+    }
+    return text[@min(start, end)..end];
+}
 
 pub const QuickChatTarget = struct {
     id: []const u8,
@@ -363,7 +472,10 @@ pub fn show(
         .hwnd = @intFromPtr(parent),
     });
     const menu = buildMenu(target) orelse {
-        if (target == .edge) Diagnostics.traceEdgeAction(.{ .stage = .target_refused, .reason = "MenuCreationFailed" });
+        if (target == .edge) {
+            std.log.warn("Canvas edge menu creation failed", .{});
+            Diagnostics.traceEdgeAction(.{ .stage = .target_refused, .reason = "MenuCreationFailed" });
+        }
         return;
     };
     defer _ = c.DestroyMenu(menu);
@@ -445,7 +557,7 @@ test "edge action diagnostic observes popup return without changing dispatch" {
     };
     Diagnostics.edge_action_test_observer = Probe.observe;
     defer Diagnostics.edge_action_test_observer = null;
-    const target = Target{ .edge = .{ .project_path = "A", .id = "edge-a" } };
+    const target = Target{ .edge = .{ .project_path = "A", .id = "edge-a", .summary = "Handoff · Always" } };
     for ([_]c.BOOL{ 0, ids.edit_edge, ids.delete_edge, -1 }) |command| {
         Probe.count = 0;
         Probe.callbacks = 0;
@@ -534,9 +646,18 @@ fn buildMenu(target: Target) c.HMENU {
                 },
             };
         },
-        .edge => {
-            append(menu, ids.edit_edge, "Edit Edge...");
+        .edge => |edge| {
+            const heading = std.mem.replaceOwned(u8, std.heap.c_allocator, edge.summary, "&", "&&") catch {
+                _ = c.DestroyMenu(menu);
+                return null;
+            };
+            defer std.heap.c_allocator.free(heading);
+            if (heading.len == 0 or !appendDisabledHeading(menu, heading)) {
+                _ = c.DestroyMenu(menu);
+                return null;
+            }
             append(menu, ids.delete_edge, "Delete Edge");
+            append(menu, ids.edit_edge, "Edit Edge...");
         },
         .quick_chat => {
             append(menu, ids.open_quick_chat, "Open Chat");
@@ -706,7 +827,8 @@ test "card transfer menu capacity covers every flag combination without losing r
     var maximum: usize = 0;
     for (0..512) |bits| {
         const plan = nodeMenuPlan(.{
-            .project_path = "C:\\A", .id = "node",
+            .project_path = "C:\\A",
+            .id = "node",
             .composite = bits & 1 != 0,
             .can_arm = bits & 2 != 0,
             .unwired = bits & 4 != 0,
@@ -1337,8 +1459,9 @@ test "semantic fallback six E menus expose exact native item info on hidden HWND
         .{ .id = 5103, .text = std.unicode.utf8ToUtf16LeStringLiteral("Delete Loop...\tDelete") },
     };
     const edge_expected = [_]ExpectedMenuItem{
-        .{ .id = 5110, .text = std.unicode.utf8ToUtf16LeStringLiteral("Edit Edge...") },
+        .{ .id = 0, .text = std.unicode.utf8ToUtf16LeStringLiteral("Handoff · Always"), .enabled = false },
         .{ .id = 5111, .text = std.unicode.utf8ToUtf16LeStringLiteral("Delete Edge") },
+        .{ .id = 5110, .text = std.unicode.utf8ToUtf16LeStringLiteral("Edit Edge...") },
     };
 
     var observations: usize = 0;
@@ -1378,10 +1501,11 @@ test "semantic fallback six E menus expose exact native item info on hidden HWND
     try expectBuiltMenuOnHiddenWindow(hwnd, .{ .edge = .{
         .project_path = "C:\\fixture",
         .id = "edge-a",
+        .summary = "Handoff · Always",
     } }, &edge_expected, &observations);
-    try std.testing.expectEqual(@as(usize, 39), observations);
+    try std.testing.expectEqual(@as(usize, 40), observations);
     std.debug.print(
-        "semantic fallback positive targets=6 observations={d} (background=3 resolved=7 sketch-unwired=12 promote-child=4 post-Goal=11 edge=2)\n",
+        "semantic fallback positive targets=6 observations={d} (background=3 resolved=7 sketch-unwired=12 promote-child=4 post-Goal=11 edge=3)\n",
         .{observations},
     );
 
@@ -1392,8 +1516,9 @@ test "semantic fallback six E menus expose exact native item info on hidden HWND
         .{ .id = 5150, .caption = "Unexpected" },
     }, &background_expected);
     try expectDisposableMenuRejected(hwnd, &.{
-        .{ .id = 5111, .caption = "Delete Edge" },
+        .{ .id = 0, .caption = "Handoff · Always", .enabled = false },
         .{ .id = 5110, .caption = "Edit Edge..." },
+        .{ .id = 5111, .caption = "Delete Edge" },
     }, &edge_expected);
     try expectDisposableMenuRejected(hwnd, &.{
         .{ .id = 0, .caption = "Keep the session, add a shape", .enabled = true },
@@ -1423,7 +1548,7 @@ test "semantic fallback six E menus expose exact native item info on hidden HWND
     try expectBuiltMenuRejected(hwnd, .{ .node = sketch_node }, 5112, &sketch_expected);
 
     {
-        const edge_popup = buildMenu(.{ .edge = .{ .project_path = "C:\\fixture", .id = "edge-extra-header" } }) orelse return error.MenuCreationFailed;
+        const edge_popup = buildMenu(.{ .edge = .{ .project_path = "C:\\fixture", .id = "edge-extra-header", .summary = "Handoff · Always" } }) orelse return error.MenuCreationFailed;
         const edge_attached = try attachTestPopup(hwnd, edge_popup);
         defer std.debug.assert(detachTestPopup(hwnd, edge_attached));
         const edge_header = toWide("Edge") orelse return error.CaptionConversionFailed;
@@ -1647,13 +1772,118 @@ test "native node menu variants expose only eligible actions" {
     try std.testing.expectEqual(std.math.maxInt(c.UINT), c.GetMenuState(unwired, ids.arm_composite, c.MF_BYCOMMAND));
 }
 
-test "edge menu preserves edit and delete command ordering" {
-    const menu = buildMenu(.{ .edge = .{ .project_path = "C:\\fixture", .id = "edge-a" } }) orelse return error.MenuCreationFailed;
+test "edge menu parity 765 has a disabled summary before delete and Windows edit" {
+    const menu = buildMenu(.{ .edge = .{ .project_path = "C:\\fixture", .id = "edge-a", .summary = "Handoff · Always" } }) orelse return error.MenuCreationFailed;
     defer _ = c.DestroyMenu(menu);
     try expectNativeMenu(menu, &.{
-        .{ .id = ids.edit_edge, .text = std.unicode.utf8ToUtf16LeStringLiteral("Edit Edge...") },
+        .{ .id = 0, .text = std.unicode.utf8ToUtf16LeStringLiteral("Handoff · Always"), .enabled = false },
         .{ .id = ids.delete_edge, .text = std.unicode.utf8ToUtf16LeStringLiteral("Delete Edge") },
+        .{ .id = ids.edit_edge, .text = std.unicode.utf8ToUtf16LeStringLiteral("Edit Edge...") },
     });
+}
+
+test "edge menu parity 765 summary matches Mac kinds conditions transforms and guards" {
+    const cases = [_]struct { edge: GraphModel.Edge, expected: []const u8 }{
+        .{ .edge = .{ .from = &.{}, .to = &.{} }, .expected = "Handoff · Always" },
+        .{ .edge = .{ .from = &.{}, .to = &.{}, .kind = @constCast("message"), .condition = @constCast("onSuccess"), .fire_count = 2 }, .expected = "Message · On success" },
+        .{ .edge = .{ .from = &.{}, .to = &.{}, .kind = @constCast("spawn"), .condition = @constCast("onFailure"), .payload_transform = .{ .script = "echo done" } }, .expected = "Spawn · On failure · $ echo done" },
+        .{ .edge = .{ .from = &.{}, .to = &.{}, .payload_transform = .{ .template = "Carry \"雪\" & context" } }, .expected = "Handoff · Always · Carry \"雪\" & context" },
+        .{ .edge = .{ .from = &.{}, .to = &.{}, .payload_transform = .{ .template = "" }, .cycle_guard = .{} }, .expected = "Handoff · Always · loop 0/unbounded" },
+        .{ .edge = .{ .from = &.{}, .to = &.{}, .payload_transform = .{ .script = "" }, .cycle_guard = .{ .max_iterations = 3, .until = @constCast("\u{2003}done\u{a0}"), .stop_after_passes_without_improvement = 2 }, .fire_count = 2 }, .expected = "Handoff · Always · loop 2/≤3× or until `done` or 2 flat passes" },
+        .{ .edge = .{ .from = &.{}, .to = &.{}, .cycle_guard = .{ .max_iterations = -3, .until = @constCast(" \t "), .stop_after_passes_without_improvement = -1 }, .fire_count = -2 }, .expected = "Handoff · Always · loop -2/≤-3×" },
+    };
+    for (cases) |case| {
+        const summary = try edgeSummary(std.testing.allocator, case.edge);
+        defer std.testing.allocator.free(summary);
+        try std.testing.expectEqualStrings(case.expected, summary);
+    }
+}
+
+test "edge menu parity 765 snapshot owns long Unicode summary and stable target" {
+    const allocator = std.testing.allocator;
+    const payload = "雪 & context " ** 80;
+    var snapshot = capture: {
+        const project = try allocator.dupe(u8, "C:\\project 雪");
+        defer allocator.free(project);
+        const id = try allocator.dupe(u8, "edge-original");
+        defer allocator.free(id);
+        const text = try allocator.dupe(u8, payload);
+        defer allocator.free(text);
+        break :capture try EdgeSnapshot.capture(allocator, project, .{
+            .id = id,
+            .from = &.{},
+            .to = &.{},
+            .payload_transform = .{ .template = text },
+        });
+    };
+    defer snapshot.deinit();
+    try std.testing.expectEqualStrings("C:\\project 雪", snapshot.target.project_path);
+    try std.testing.expectEqualStrings("edge-original", snapshot.target.id);
+    try std.testing.expectEqualStrings("Handoff · Always · " ++ payload, snapshot.target.summary);
+    const menu = buildMenu(.{ .edge = snapshot.target }) orelse return error.MenuCreationFailed;
+    defer _ = c.DestroyMenu(menu);
+    const escaped = try std.mem.replaceOwned(u8, allocator, snapshot.target.summary, "&", "&&");
+    defer allocator.free(escaped);
+    const wide = try std.unicode.utf8ToUtf16LeAlloc(allocator, escaped);
+    defer allocator.free(wide);
+    try std.testing.expectEqual(wide.len, @as(usize, @intCast(c.GetMenuStringW(menu, 0, null, 0, c.MF_BYPOSITION))));
+    const storage = try allocator.alloc(u16, wide.len + 1);
+    defer allocator.free(storage);
+    const copied = c.GetMenuStringW(menu, 0, storage.ptr, @intCast(storage.len), c.MF_BYPOSITION);
+    try std.testing.expectEqual(wide.len, @as(usize, @intCast(copied)));
+    try std.testing.expectEqualSlices(u16, wide, storage[0..wide.len]);
+    const state = c.GetMenuState(menu, 0, c.MF_BYPOSITION);
+    try std.testing.expect(state & c.MF_GRAYED != 0);
+    try std.testing.expect(state & c.MF_SEPARATOR == 0);
+}
+
+test "edge menu parity 765 snapshot allocation failures unwind without partial targets" {
+    const Exercise = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var snapshot = try EdgeSnapshot.capture(allocator, "C:\\original", .{
+                .id = @constCast("edge-a"),
+                .from = &.{},
+                .to = &.{},
+                .payload_transform = .{ .script = "echo 雪" },
+                .cycle_guard = .{ .max_iterations = 4, .until = @constCast(" done "), .stop_after_passes_without_improvement = 2 },
+                .fire_count = 1,
+            });
+            defer snapshot.deinit();
+            try std.testing.expectEqualStrings("C:\\original", snapshot.target.project_path);
+            try std.testing.expectEqualStrings("edge-a", snapshot.target.id);
+            try std.testing.expectEqualStrings("Handoff · Always · $ echo 雪 · loop 1/≤4× or until `done` or 2 flat passes", snapshot.target.summary);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Exercise.run, .{});
+}
+
+test "edge menu parity 765 rejects malformed summary instead of displaying a fallback" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidEdgeKind, EdgeSnapshot.capture(allocator, "A", .{
+        .from = &.{},
+        .to = &.{},
+        .kind = @constCast("unknown"),
+    }));
+    try std.testing.expectError(error.InvalidEdgeCondition, EdgeSnapshot.capture(allocator, "A", .{
+        .from = &.{},
+        .to = &.{},
+        .condition = @constCast("unknown"),
+    }));
+    try std.testing.expectError(error.InvalidUtf8, EdgeSnapshot.capture(allocator, "A", .{
+        .from = &.{},
+        .to = &.{},
+        .cycle_guard = .{ .until = @constCast("\xff") },
+    }));
+    try std.testing.expectError(error.InvalidUtf8, EdgeSnapshot.capture(allocator, "A", .{
+        .from = &.{},
+        .to = &.{},
+        .payload_transform = .{ .template = "\xff" },
+    }));
+    try std.testing.expectError(error.EmbeddedNull, EdgeSnapshot.capture(allocator, "A", .{
+        .from = &.{},
+        .to = &.{},
+        .payload_transform = .{ .script = "hidden\x00suffix" },
+    }));
 }
 
 test "context actions remain stable when graph IDs are reordered" {
@@ -1695,7 +1925,7 @@ test "edge editing requires a stable edge identifier" {
 
 test "context targets carry stable copied identity rather than collection indices" {
     const node = NodeTarget{ .project_path = "C:\\work\\graph", .id = "node-a" };
-    const edge = EdgeTarget{ .project_path = "C:\\work\\graph", .id = "edge-a" };
+    const edge = EdgeTarget{ .project_path = "C:\\work\\graph", .id = "edge-a", .summary = "Handoff · Always" };
     try std.testing.expectEqualStrings("node-a", node.id);
     try std.testing.expectEqualStrings("edge-a", edge.id);
     try std.testing.expectEqualStrings("C:\\work\\graph", edge.project_path);
