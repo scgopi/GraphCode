@@ -1600,7 +1600,7 @@ const UiaDynamicTarget = union(enum) {
     workspace_toggle_panel,
     workspace_tab: usize,
     workspace_tab_close: usize,
-    workspace_switch: usize,
+    workspace_footer,
     workspace_restart_session: []const u8,
     header_attention,
     canvas_attention,
@@ -7988,8 +7988,78 @@ pub const App = struct {
         return self.update_state.state == .available and self.update_version.len != 0;
     }
 
+    fn sidebarWorkspaceFooter(self: *const App) ?WorkspaceLifecycle.Workspace {
+        if (!self.workspace_controls.rail_visible or !self.workspace_identity_valid) return null;
+        const list = self.workspace_list orelse return null;
+        var current: ?WorkspaceLifecycle.Workspace = null;
+        for (list.items) |workspace| {
+            if (std.mem.eql(u8, workspace.identity, self.workspace_identity)) {
+                current = workspace;
+                break;
+            }
+        }
+        const workspace = current orelse return null;
+        if (workspace.is_default and list.items.len == 1) return null;
+        return workspace;
+    }
+
+    fn showSidebarWorkspaceFooterMenu(self: *App, logical_anchor: c.RECT) bool {
+        if (self.sidebarWorkspaceFooter() == null) return false;
+        const list = self.workspace_list orelse return false;
+        const items = self.allocator.alloc(MainWindow.WorkspaceItem, list.items.len) catch {
+            self.setStatus("Workspace switcher could not be prepared");
+            return false;
+        };
+        defer self.allocator.free(items);
+        const paths = self.allocator.alloc([]u8, list.items.len) catch {
+            self.setStatus("Workspace switcher could not be prepared");
+            return false;
+        };
+        for (list.items, items, paths, 0..) |workspace, *item, *path, index| {
+            path.* = self.allocator.dupe(u8, workspace.path) catch {
+                for (paths[0..index]) |owned| self.allocator.free(owned);
+                self.allocator.free(paths);
+                self.setStatus("Workspace switcher could not be prepared");
+                return false;
+            };
+            item.* = .{
+                .name = workspace.name,
+                .is_current = std.mem.eql(u8, workspace.identity, self.workspace_identity),
+            };
+        }
+        defer {
+            for (paths) |path| self.allocator.free(path);
+            self.allocator.free(paths);
+        }
+        var anchor = c.POINT{
+            .x = physicalCoordinate(@divTrunc(logical_anchor.left + logical_anchor.right, 2), self.dpi),
+            .y = physicalCoordinate(logical_anchor.top, self.dpi),
+        };
+        if (c.ClientToScreen(self.window.hwnd, &anchor) == 0) {
+            self.setStatus("Unable to position workspace switcher");
+            return false;
+        }
+        const command = MainWindow.showWorkspaceFooterMenu(self.window.hwnd, items, anchor) orelse return true;
+        if (command >= MainWindow.workspace_command_base and command <= MainWindow.workspace_command_limit) {
+            const index = command - MainWindow.workspace_command_base;
+            if (index < paths.len) self.launchWorkspace(paths[index]);
+            return true;
+        }
+        return switch (MainWindow.commandFromId(command) orelse return false) {
+            .workspace_new => blk: {
+                self.createWorkspace();
+                break :blk true;
+            },
+            .workspace_manage => blk: {
+                self.manageWorkspaces();
+                break :blk true;
+            },
+            else => false,
+        };
+    }
+
     /// Bottom edge of the scrollable sidebar content: the sidebar viewport minus the footer
-    /// (status line, update banner, error footer) that is drawn over its lower edge.
+    /// (status line, workspace row, update banner, error footer) drawn over its lower edge.
     fn sidebarContentBottom(self: *App, client_bottom: i32) i32 {
         const viewport_bottom = GraphCanvas.sidebarBottom(client_bottom, self.workspace_controls, self.surface);
         const footer = Sidebar.effectiveFooter(viewport_bottom, self.updateBannerShown(), self.ingress_error.len != 0);
@@ -9737,28 +9807,25 @@ pub const App = struct {
                 .bottom = bounds.bottom,
             }) catch return;
         }
-        if (self.workspace_list) |list| {
-            for (list.items, 0..) |workspace, index| {
-                const identity = std.fmt.allocPrint(self.allocator, "workspace-switch:{s}", .{workspace.path}) catch return;
-                owned_identities.append(identity) catch {
-                    self.allocator.free(identity);
-                    return;
-                };
-                const row_top: i32 = 34 + @as(i32, @intCast(index * 30));
-                const bounds = (AccessibilityBounds{ .logical = .{ .left = 250, .top = row_top, .right = 500, .bottom = row_top + 28 } }).physicalRect(self.dpi);
-                elements.append(.{
-                    .identity = identity,
-                    .name = workspace.name,
-                    .parent = 21,
-                    .selected = self.workspace_identity_valid and std.mem.eql(u8, workspace.identity, self.workspace_identity),
-                    .eligible = self.workspace_identity_valid,
-                    .invokable = self.workspace_identity_valid,
-                    .left = bounds.left,
-                    .top = bounds.top,
-                    .right = bounds.right,
-                    .bottom = bounds.bottom,
-                }) catch return;
-            }
+        if (self.sidebarWorkspaceFooter()) |workspace| {
+            const identity = std.fmt.allocPrint(self.allocator, "workspace-footer:{s}", .{workspace.path}) catch return;
+            owned_identities.append(identity) catch {
+                self.allocator.free(identity);
+                return;
+            };
+            const bounds = (AccessibilityBounds{ .logical = Sidebar.workspaceFooterRect(footer_viewport_bottom) }).physicalRect(self.dpi);
+            elements.append(.{
+                .identity = identity,
+                .name = workspace.name,
+                .parent = 1,
+                .selected = false,
+                .eligible = true,
+                .invokable = true,
+                .left = bounds.left,
+                .top = bounds.top,
+                .right = bounds.right,
+                .bottom = bounds.bottom,
+            }) catch return;
         }
         if (rail_presentation.mode == .overlay) {
             const overlay_left = physicalCoordinate(rail_presentation.rail_right, self.dpi);
@@ -10080,14 +10147,12 @@ pub const App = struct {
                 target = .{ .activity = index };
             }
         }
-        if (self.workspace_list) |list| {
-            for (list.items, 0..) |workspace, workspace_index| {
-                const workspace_identity = std.fmt.allocPrint(self.allocator, "workspace-switch:{s}", .{workspace.path}) catch return false;
-                defer self.allocator.free(workspace_identity);
-                if (Accessibility.worktreeIdentityPayload(workspace_identity) == payload) {
-                    if (target != null) return false;
-                    target = .{ .workspace_switch = workspace_index };
-                }
+        if (self.sidebarWorkspaceFooter()) |workspace| {
+            const workspace_identity = std.fmt.allocPrint(self.allocator, "workspace-footer:{s}", .{workspace.path}) catch return false;
+            defer self.allocator.free(workspace_identity);
+            if (Accessibility.worktreeIdentityPayload(workspace_identity) == payload) {
+                if (target != null) return false;
+                target = .workspace_footer;
             }
         }
         const resolved = target orelse return false;
@@ -10204,11 +10269,16 @@ pub const App = struct {
             },
             .workspace_tab => |index| if (self.workspace) |workspace| workspace.selectTab(index) catch return false,
             .workspace_tab_close => |index| if (self.workspace) |workspace| workspace.closeTab(index) catch return false,
-            .workspace_switch => |index| {
-                const list = self.workspace_list orelse return false;
-                if (index >= list.items.len) return false;
-                self.launchWorkspace(list.items[index].path);
+            .workspace_footer => {
+                if (!self.workspace_controls.rail_visible) return false;
+                const client = logicalClientRect(self.window.hwnd, self.dpi);
+                if (!self.showSidebarWorkspaceFooterMenu(
+                    Sidebar.workspaceFooterRect(
+                        GraphCanvas.sidebarBottom(client.bottom, self.workspace_controls, self.surface),
+                    ),
+                )) return false;
             },
+
             .header_attention => return self.invokeHeader(.review_attention),
             .canvas_attention => {
                 if (!GraphCanvas.attentionRailShown(&self.model, self.surface)) return false;
@@ -11091,6 +11161,14 @@ fn onWindowMessage(
             const offered_version = if (app.update_state.state == .available) app.update_version else "";
             GraphCanvas.paint(hdc, logical_right, logical_bottom, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), offered_version, app.ingress_error, app.connectionFailureVisible(), app.worktree_state, app.declared_entry_ids.items, app.kept_worktree_paths.items, app.allocator, &app.canvas, &app.sidebar_state, app.sidebar_hover_y, app.workspace_controls, app.surface, app.selection_active, app.workspaceQuickChatID());
             app.update_lock.unlock();
+            if (app.workspace_controls.rail_visible) if (app.sidebarWorkspaceFooter()) |workspace| {
+                Sidebar.drawWorkspaceFooter(
+                    hdc,
+                    GraphCanvas.sidebarBottom(logical_bottom, app.workspace_controls, app.surface),
+                    workspace.name,
+                    app.allocator,
+                );
+            };
             if (app.workspace_controls.panel_visible or app.surface == .workspace) {
                 if (app.surface == .workspace) {
                     if (app.workspaceQuickChatID()) |chat_id| {
@@ -11477,6 +11555,22 @@ fn onWindowMessage(
             if (app.header_focus != null) app.leaveHeader(false);
             const rail_presentation = WorkspaceControls.railPresentation(client.right, app.workspace_controls);
             const overlay_rail_hit = overlayRailOwnsPointer(x, y, rail_presentation);
+            if (app.workspace_controls.rail_visible and
+                app.sidebarWorkspaceFooter() != null and
+                Sidebar.workspaceFooterAt(
+                    x,
+                    y,
+                    GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface),
+                ))
+            {
+                _ = app.showSidebarWorkspaceFooterMenu(
+                    Sidebar.workspaceFooterRect(
+                        GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface),
+                    ),
+                );
+                result.* = 0;
+                return true;
+            }
             const canvas_bounds = GraphCanvas.renderBounds(client.right, client.bottom, app.workspace_controls);
             const rail_bounds = GraphCanvas.attentionRailLayout(.{ .left = canvas_bounds.left, .top = canvas_bounds.top, .right = canvas_bounds.right, .bottom = canvas_bounds.bottom });
             if (!overlay_rail_hit and GraphCanvas.attentionRailShown(&app.model, app.surface) and
@@ -14427,6 +14521,35 @@ fn deinitFooterLayoutApp(app: *App) void {
     if (app.update_release_url.len != 0) app.allocator.free(app.update_release_url);
     if (app.ingress_error.len != 0) app.allocator.free(app.ingress_error);
     deinitOverviewTestApp(app);
+}
+
+test "sidebar workspace footer follows macOS current and known workspace visibility" {
+    var default = [_]WorkspaceLifecycle.Workspace{
+        .{ .name = "Default", .path = "default", .identity = "default", .is_default = true },
+    };
+    var multiple = [_]WorkspaceLifecycle.Workspace{
+        .{ .name = "Default", .path = "default", .identity = "default", .is_default = true },
+        .{ .name = "Fixture", .path = "fixture", .identity = "fixture", .is_default = false },
+    };
+    var app: App = undefined;
+    app.workspace_controls = .{ .rail_visible = true };
+    app.workspace_identity_valid = true;
+    app.workspace_identity = @constCast("default");
+    app.workspace_list = .{ .items = &default };
+    try std.testing.expect(app.sidebarWorkspaceFooter() == null);
+
+    default[0].is_default = false;
+    try std.testing.expectEqualStrings("Default", app.sidebarWorkspaceFooter().?.name);
+
+    app.workspace_list = .{ .items = &multiple };
+    try std.testing.expectEqualStrings("Default", app.sidebarWorkspaceFooter().?.name);
+    app.workspace_identity = @constCast("fixture");
+    try std.testing.expectEqualStrings("Fixture", app.sidebarWorkspaceFooter().?.name);
+    app.workspace_identity_valid = false;
+    try std.testing.expect(app.sidebarWorkspaceFooter() == null);
+    app.workspace_identity_valid = true;
+    app.workspace_controls.rail_visible = false;
+    try std.testing.expect(app.sidebarWorkspaceFooter() == null);
 }
 
 /// A project with loops, eight Worktrees rows, two Needs-you entries, an Activity card, and
@@ -23616,6 +23739,9 @@ fn expectDpiAccessibilityWithMetrics(surface: GraphCanvas.Surface, canvas: ?[3][
         .{ .name = "Fixture", .path = "B", .identity = "b", .is_default = false },
     };
     app.workspace_list = .{ .items = &workspaces };
+    app.workspace_identity = try allocator.dupe(u8, "b");
+    defer allocator.free(app.workspace_identity);
+    app.workspace_identity_valid = true;
     var workspace: TerminalWorkspace.Workspace = .{
         .parent = null,
         .allocator = allocator,
@@ -23662,7 +23788,6 @@ test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
     const common = [_]DpiExpectedElement{
         // 42px content inset + Graph/Quick Chats/chat slots + 18px caption gap.
         .{ .identity = "sidebar-section:local", .bounds = .{ .{ 12, 156, 208, 180 }, .{ 18, 234, 312, 270 }, .{ 24, 312, 416, 360 } } },
-        .{ .identity = "workspace-switch:B", .bounds = .{ .{ 250, 34, 500, 62 }, .{ 375, 51, 750, 93 }, .{ 500, 68, 1000, 124 } } },
     };
     // The footer is anchored to the sidebar's visible bottom, which the workspace panel
     // shortens on every surface except the workspace itself.
@@ -23674,9 +23799,18 @@ test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
         .identity = "sidebar-error-footer:ingress",
         .bounds = .{ .{ 8, 816, 212, 858 }, .{ 12, 1224, 318, 1287 }, .{ 16, 1632, 424, 1716 } },
     };
+    const workspace_footer_above_panel = DpiExpectedElement{
+        .identity = "workspace-footer:B",
+        .bounds = .{ .{ 0, 614, 220, 650 }, .{ 0, 921, 330, 975 }, .{ 0, 1228, 440, 1300 } },
+    };
+    const workspace_footer_full_height = DpiExpectedElement{
+        .identity = "workspace-footer:B",
+        .bounds = .{ .{ 0, 864, 220, 900 }, .{ 0, 1296, 330, 1350 }, .{ 0, 1728, 440, 1800 } },
+    };
     for ([_]GraphCanvas.Surface{ .project, .overview, .quick_chats, .workspace }) |surface| {
         const footer = if (surface == .workspace) footer_full_height else footer_above_panel;
-        try expectDpiAccessibility(surface, null, &(common ++ [_]DpiExpectedElement{footer}));
+        const workspace_footer = if (surface == .workspace) workspace_footer_full_height else workspace_footer_above_panel;
+        try expectDpiAccessibility(surface, null, &(common ++ [_]DpiExpectedElement{ footer, workspace_footer }));
         if (surface != .workspace) try expectDpiAccessibility(surface, null, &(graph_header ++ [_]DpiExpectedElement{
             .{ .identity = "header-toggle-panel:control" },
             .{ .identity = "workspace-toolbar:A" },

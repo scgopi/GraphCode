@@ -3798,10 +3798,15 @@ try {
       'wire-node-1000000000000000001',
       'mark-entry-1000000000000000002',
       'overview-wire-node-1000000000000000003',
-      'overview-mark-entry-1000000000000000004')) {
+      'overview-mark-entry-1000000000000000004',
+      'workspace-footer-1000000000000000005')) {
     if (-not (Test-MultiProjectSourceSupportedChromeId $identity 'owned')) {
       throw "RED: multi-project observer rejects stable recovery control $identity"
     }
+  }
+  if ($uiaLiveGateSource -notmatch "workspace-footer-" -or
+      $uiaLiveGateSource -notmatch "Sidebar workspace footer was exposed more than once") {
+    throw "RED: UIA live gate does not admit the owned sidebar workspace footer and reject duplicates"
   }
   if (Test-MultiProjectSourceSupportedChromeId 'future-unknown-control-1000000000000000005' 'owned') {
     throw "RED: multi-project observer weakens its census by accepting an unknown element"
