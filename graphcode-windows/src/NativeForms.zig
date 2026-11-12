@@ -2948,6 +2948,11 @@ fn attachmentsVisible(state: *const DialogState) bool {
     return state.kind == .node and !NewLoopSheet.isComposite(state.values[1]);
 }
 
+fn attachmentSectionHeight(state: *const DialogState) i32 {
+    if (!attachmentsVisible(state) or state.attachment_count == 0) return 0;
+    return scaled(state, attachment_section_height);
+}
+
 /// Which node field a `[image #N]` placeholder is inserted into/removed from — the
 /// one free-text field actually shown for the loop type currently selected. Composite
 /// ("proactive") loops have no such field, matching macOS hiding attachments entirely
@@ -3015,7 +3020,7 @@ fn createButtonLabelled(hwnd: c.HWND, state: *const DialogState, text: []const u
 }
 
 fn layoutAttachmentsSection(hwnd: c.HWND, state: *DialogState, top: i32) void {
-    const shown = attachmentsVisible(state);
+    const shown = attachmentSectionHeight(state) != 0;
     const margin = scaled(state, form_margin);
     const width = formContentWidth(hwnd, state);
     const button_width = scaled(state, 132);
@@ -3024,7 +3029,11 @@ fn layoutAttachmentsSection(hwnd: c.HWND, state: *DialogState, top: i32) void {
     const viewport = formViewportHeight(hwnd, state);
     layoutContentControl(state.attachment_label, margin, top, width, scaled(state, form_label_height), shown, viewport);
     layoutContentControl(state.attachment_listbox, margin, top + scaled(state, 26), list_width, scaled(state, 106), shown, viewport);
-    layoutContentControl(state.attachment_attach_button, margin + list_width + gap, top + scaled(state, 26), button_width, scaled(state, 32), shown, viewport);
+    if (shown) {
+        layoutContentControl(state.attachment_attach_button, margin + list_width + gap, top + scaled(state, 26), button_width, scaled(state, 32), true, viewport);
+    } else if (!attachmentsVisible(state)) {
+        layoutContentControl(state.attachment_attach_button, 0, 0, 0, 0, false, viewport);
+    }
     layoutContentControl(state.attachment_remove_button, margin + list_width + gap, top + scaled(state, 66), button_width, scaled(state, 32), shown, viewport);
     layoutContentControl(state.attachment_help, margin, top + scaled(state, 140), width, scaled(state, form_help_height), shown, viewport);
 }
@@ -3169,7 +3178,10 @@ fn attachFiles(hwnd: c.HWND, state: *DialogState) void {
         added = true;
         insertAttachmentToken(state, state.attachment_count);
     }
-    if (added) refreshAttachmentListbox(state);
+    if (added) {
+        refreshAttachmentListbox(state);
+        refreshSheetLayout(state);
+    }
 }
 
 fn appendAttachment(state: *DialogState, source_path: []const u8) DraftAttachments.IngestError!void {
@@ -3201,6 +3213,7 @@ fn removeSelectedAttachment(state: *DialogState) void {
     removeAttachmentToken(state, index + 1);
     removeAttachmentAt(state, index);
     refreshAttachmentListbox(state);
+    refreshSheetLayout(state);
 }
 
 fn removeAttachmentAt(state: *DialogState, index: usize) void {
@@ -3502,7 +3515,7 @@ fn layoutForm(hwnd: c.HWND, state: *DialogState) void {
     }
     if (state.kind == .node) {
         layoutAttachmentsSection(hwnd, state, y);
-        if (attachmentsVisible(state)) y += scaled(state, attachment_section_height);
+        y += attachmentSectionHeight(state);
     }
     if (showsRecap(state.kind)) {
         layoutContentControl(state.recap, margin, y, width, scaled(state, 40), true, formViewportHeight(hwnd, state));
@@ -3590,7 +3603,7 @@ fn layoutNodeForm(state: *DialogState) void {
     }
 
     layoutAttachmentsSection(hwnd, state, y);
-    if (attachmentsVisible(state)) y += scaled(state, attachment_section_height);
+    y += attachmentSectionHeight(state);
 
     layoutContentControl(state.runs_as_caption, margin, y, width, scaled(state, 20), true, clientHeight(hwnd));
     y += scaled(state, 28);
@@ -3615,11 +3628,33 @@ fn layoutNodeForm(state: *DialogState) void {
 
 fn layoutNodeRow(state: *DialogState, index: usize, x: i32, y: i32, width: i32) void {
     const help = nodeFieldHelp(index);
-    const input_width = if (index == 7) @max(scaled(state, 120), width - scaled(state, 86)) else width;
+    const compact_attachment_action = if (briefFieldIndex(state)) |brief|
+        brief == index and state.attachment_count == 0
+    else
+        false;
+    const attachment_button_width = scaled(state, 132);
+    const action_gap = scaled(state, 12);
+    const input_width = if (index == 7)
+        @max(scaled(state, 120), width - scaled(state, 86))
+    else if (compact_attachment_action)
+        @max(scaled(state, 120), width - attachment_button_width - action_gap)
+    else
+        width;
     layoutContentControl(state.labels[index], x, y, width, scaled(state, form_label_height), true, clientHeight(state.content_root));
     _ = c.ShowWindow(state.edits[index], c.SW_SHOW);
     layoutFieldControl(state.edits[index], state, fieldBounds(state, x, y + scaled(state, 26), input_width), inputControlHeight(state, state.input_kinds[index]));
     layoutContentControl(state.helps[index], x, y + scaled(state, 62), width, scaled(state, form_help_height), help.len != 0, clientHeight(state.content_root));
+    if (compact_attachment_action) {
+        layoutContentControl(
+            state.attachment_attach_button,
+            x + input_width + action_gap,
+            y + scaled(state, 26),
+            attachment_button_width,
+            scaled(state, 32),
+            true,
+            clientHeight(state.content_root),
+        );
+    }
     if (index == 7) {
         layoutContentControl(state.done_check_test, x + width - scaled(state, 76), y + scaled(state, 26), scaled(state, 76), scaled(state, 32), true, clientHeight(state.content_root));
         layoutContentControl(state.done_check_outcome, x + width - scaled(state, 230), y + scaled(state, 62), scaled(state, 150), scaled(state, 20), true, clientHeight(state.content_root));
@@ -3662,7 +3697,7 @@ fn contentHeight(state: *const DialogState) i32 {
     for (0..state.field_count) |index| {
         if (state.visible[index]) y += rowHeight(state, index);
     }
-    if (state.kind == .node and attachmentsVisible(state)) y += scaled(state, attachment_section_height);
+    if (state.kind == .node) y += attachmentSectionHeight(state);
     if (showsRecap(state.kind)) y += scaled(state, 40);
     return y + scaled(state, 16);
 }
@@ -3685,7 +3720,7 @@ fn nodeContentHeight(state: *const DialogState) i32 {
     } else {
         height += 84 * 4;
     }
-    if (attachmentsVisible(state)) height += attachment_section_height;
+    if (attachmentSectionHeight(state) != 0) height += attachment_section_height;
     return height + 28 + 72 + 58 + 16;
 }
 
@@ -3711,6 +3746,10 @@ fn revealField(state: *DialogState, index: usize) void {
 }
 
 fn revealAttachments(state: *DialogState) void {
+    if (state.attachment_count == 0) {
+        if (briefFieldIndex(state)) |index| revealField(state, index);
+        return;
+    }
     var top = scaled(state, form_fields_top);
     for (0..state.field_count) |index| if (state.visible[index]) {
         top += rowHeight(state, index);
@@ -6147,6 +6186,13 @@ fn initHiddenForm(owner: c.HWND, state: *DialogState, host: *SheetFramework.Host
     try host.relayout();
 }
 
+fn controlBoundsIn(control: c.HWND, parent: c.HWND) !c.RECT {
+    var rect: c.RECT = undefined;
+    if (c.GetWindowRect(control, &rect) == 0) return error.TestControlBoundsUnavailable;
+    _ = c.MapWindowPoints(null, parent, @ptrCast(&rect), 2);
+    return rect;
+}
+
 test "dialog framework: short promotion sizes from content" {
     var state = DialogState{
         .allocator = std.testing.allocator,
@@ -6840,6 +6886,66 @@ test "new loop: all five layouts keep the SheetFramework footer fixed at every D
     }
 }
 
+test "new loop: empty Main fits the canonical 96 DPI owner without scrolling" {
+    var state = DialogState{
+        .allocator = std.testing.allocator,
+        .kind = .node,
+        .parent = null,
+        .dpi = 96,
+    };
+    state.values[1] = @constCast("sketch");
+    configureFields(&state);
+    var input = formLayoutInput(&state);
+    input.owner = .{ .x = 8, .y = 51, .width = 1028, .height = 729 };
+    const form = SheetFramework.layout(input);
+
+    try std.testing.expect(!form.scroll.visible);
+    try std.testing.expect(form.scroll.extent <= form.scroll.page);
+    try std.testing.expectEqual(@as(i32, 620), form.scroll.extent);
+    try std.testing.expectEqual(@as(i32, 620), form.scroll.page);
+}
+
+test "new loop: empty attachment action stays beside the brief and expands on demand" {
+    const owner = try hiddenNativeControlHost();
+    defer _ = c.DestroyWindow(owner);
+    var state = DialogState{
+        .allocator = std.testing.allocator,
+        .kind = .node,
+        .parent = owner,
+        .dpi = 96,
+    };
+    defer freeValues(&state);
+    try initializeNodeDraft(&state, .{
+        .title = "",
+        .loop_type = "sketch",
+        .first_instruction = "",
+    });
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try initHiddenForm(owner, &state, &host);
+
+    try std.testing.expect(c.GetWindowLongPtrW(state.attachment_attach_button, c.GWL_STYLE) & c.WS_VISIBLE != 0);
+    try std.testing.expect(c.GetWindowLongPtrW(state.attachment_remove_button, c.GWL_STYLE) & c.WS_VISIBLE == 0);
+    try std.testing.expect(c.GetWindowLongPtrW(state.attachment_listbox, c.GWL_STYLE) & c.WS_VISIBLE == 0);
+    const edit_bounds = try controlBoundsIn(state.edits[4], state.content_root);
+    const attach_bounds = try controlBoundsIn(state.attachment_attach_button, state.content_root);
+    try std.testing.expect(edit_bounds.right <= attach_bounds.left);
+    try std.testing.expect(attachmentSectionHeight(&state) == 0);
+
+    selectTile(&state, choiceIndex(.loop_type, "goalBased"));
+    refreshSheetLayout(&state);
+    try std.testing.expect(c.GetWindowLongPtrW(state.attachment_attach_button, c.GWL_STYLE) & c.WS_VISIBLE != 0);
+    try std.testing.expect(c.IsChild(state.content_root, state.attachment_attach_button) != 0);
+
+    state.attachment_count = 1;
+    refreshSheetLayout(&state);
+    try std.testing.expect(attachmentSectionHeight(&state) == scaled(&state, attachment_section_height));
+    try std.testing.expect(c.GetWindowLongPtrW(state.attachment_attach_button, c.GWL_STYLE) & c.WS_VISIBLE != 0);
+    try std.testing.expect(c.GetWindowLongPtrW(state.attachment_remove_button, c.GWL_STYLE) & c.WS_VISIBLE != 0);
+    try std.testing.expect(c.GetWindowLongPtrW(state.attachment_listbox, c.GWL_STYLE) & c.WS_VISIBLE != 0);
+    state.attachment_count = 0;
+}
+
 test "new loop: type switch resets scroll and exposes stable Goal fields from the top" {
     const owner = try hiddenNativeControlHost();
     defer _ = c.DestroyWindow(owner);
@@ -6850,8 +6956,12 @@ test "new loop: type switch resets scroll and exposes stable Goal fields from th
         .loop_type = "sketch",
         .first_instruction = "Capture the current change",
     });
+    state.attachment_count = 1;
     var host: SheetFramework.Host = .{};
-    defer host.deinit();
+    defer {
+        state.attachment_count = 0;
+        host.deinit();
+    }
     try initHiddenForm(owner, &state, &host);
     try std.testing.expect(host.current_layout.scroll.max_offset > 0);
     try host.setScrollOffset(host.current_layout.scroll.max_offset);
@@ -7073,6 +7183,7 @@ test "tile rows reserve full teaching-tile height while other rows stay compact"
     state.visible[1] = true;
     state.visible[2] = true;
     state.values[1] = @constCast("sketch");
+    state.attachment_count = 1;
     try std.testing.expectEqual(@as(i32, form_row_height), rowHeight(&state, 0));
     try std.testing.expectEqual(@as(i32, tile_row_height), rowHeight(&state, 1));
     try std.testing.expectEqual(@as(i32, form_row_height), rowHeight(&state, 2));

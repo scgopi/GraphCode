@@ -1,4 +1,95 @@
+param(
+  [switch]$DialogSheet768Only
+)
+
 $ErrorActionPreference = "Stop"
+
+function Test-DialogSheet768SourceContract([string] $source) {
+  if ($source -notmatch 'function Write-UiaDialogSheet768Observation\(' -or
+      $source -notmatch 'function Test-UiaDialogSheet768Geometry\(' -or
+      $source -notmatch 'UIA_DIALOG_SHEET_768_EVIDENCE=' -or
+      @([regex]::Matches(
+        $source,
+        'Write-UiaDialogSheet768Observation '
+      )).Count -lt 3) {
+    throw "RED: UIA live gate lacks the three-surface owned geometry and PrintWindow conformance probe for #768"
+  }
+  foreach ($required in @(
+      '"rename-loop" "initial" $false',
+      '"delete-loop" "confirmation" $false',
+      '"new-loop" "main-no-overflow" $false',
+      '"new-loop" "goal-overflow" $true'
+    )) {
+    if (-not $source.Contains($required)) {
+      throw "RED: UIA live gate omitted #768 scene contract $required"
+    }
+  }
+  if (@([regex]::Matches(
+      $source, '\[GraphCodeUiaGateState\]::IsDirectChild\('
+    )).Count -lt 2 -or
+      @([regex]::Matches($source, 'Save-UiaShellWindowCapture ')).Count -lt 2) {
+    throw "RED: UIA #768 probe lacks exact native hierarchy or both PrintWindow captures"
+  }
+  $tokens = $null
+  $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseInput(
+    $source, [ref]$tokens, [ref]$errors)
+  if ($errors.Count -ne 0) { throw "RED: UIA live gate #768 geometry source does not parse" }
+  $geometry = $ast.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+      $node.Name -ceq "Test-UiaDialogSheet768Geometry"
+  }, $true)
+  if ($null -eq $geometry) { throw "RED: UIA #768 geometry decision is missing" }
+  . ([scriptblock]::Create($geometry.Extent.Text))
+  $valid = [pscustomobject]@{
+    expectedActionIds = @(2, 1)
+    expectedDpi = 96
+    expectedOverflow = $true
+    dpi = 96
+    ownerBounds = @(0, 0, 800, 600)
+    hostBounds = @(100, 50, 700, 550)
+    hostClient = @(0, 0, 600, 500)
+    viewportBounds = @(100, 50, 700, 486)
+    contentBounds = @(100, 20, 690, 920)
+    actions = @(
+      [pscustomobject]@{ id = 2; offscreen = $false; bounds = @(120, 500, 220, 534) },
+      [pscustomobject]@{ id = 1; offscreen = $false; bounds = @(560, 500, 680, 534) }
+    )
+  }
+  $decision = Test-UiaDialogSheet768Geometry $valid
+  if (-not $decision.accepted -or -not $decision.overflow) {
+    throw "RED: UIA #768 geometry accepted-control fixture was rejected"
+  }
+  $mutations = @(
+    @{ name = "dpi"; expected = "dpi-mismatch"; apply = { param($value) $value.dpi = 144 } },
+    @{ name = "owner"; expected = "host-outside-owner"; apply = { param($value) $value.hostBounds = @(201, 50, 801, 550) } },
+    @{ name = "content"; expected = "content-displaced"; apply = { param($value) $value.contentBounds = @(1000, 20, 1010, 920) } },
+    @{ name = "frame"; expected = "host-client-frame-mismatch"; apply = { param($value) $value.hostClient = @(0, 0, 580, 500) } },
+    @{ name = "actions"; expected = "footer-action-order-mismatch"; apply = { param($value) $value.actions[0].id = 7 } },
+    @{ name = "offscreen"; expected = "footer-offscreen"; apply = { param($value) $value.actions[1].offscreen = $true } },
+    @{ name = "footer"; expected = "footer-overlaps-viewport"; apply = { param($value) $value.actions[0].bounds = @(120, 480, 220, 514) } },
+    @{ name = "overflow"; expected = "unexpected-overflow"; apply = { param($value) $value.expectedOverflow = $false } }
+  )
+  foreach ($mutation in $mutations) {
+    $candidate = [Management.Automation.PSSerializer]::Deserialize(
+      [Management.Automation.PSSerializer]::Serialize($valid))
+    & $mutation.apply $candidate
+    $result = Test-UiaDialogSheet768Geometry $candidate
+    if ($result.accepted -or $result.reason -cne $mutation.expected) {
+      throw "RED: UIA #768 geometry $($mutation.name) mutation was not refused as $($mutation.expected)"
+    }
+  }
+}
+
+if ($DialogSheet768Only) {
+  $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
+  Test-DialogSheet768SourceContract (
+    Get-Content -LiteralPath (Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1") -Raw
+  )
+  Write-Host "ValidationRunner.Tests.ps1 DialogSheet768: PASS; executed=9"
+  exit 0
+}
 
 function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gateSource, [string] $stubPath, [string] $pwsh) {
   foreach ($source in @($stubSource, $gateSource)) {
@@ -3684,6 +3775,7 @@ try {
   if ($uiaErrors.Count -ne 0) {
     throw "RED: UIA live gate source does not parse"
   }
+  Test-DialogSheet768SourceContract $uiaLiveGateSource
   if ($uiaLiveGateSource -notmatch '\[switch\]\$CycleHierarchyOnly' -or
       $uiaLiveGateSource -notmatch 'PostFixtureMutation\(\$shellWindow, 23\)' -or
       $uiaLiveGateSource -notmatch 'UIA_CYCLE_HIERARCHY_EVIDENCE=' -or
