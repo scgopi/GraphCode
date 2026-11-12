@@ -4170,6 +4170,7 @@ function Test-MultiProjectSourceSupportedChromeId([string] $identity, [string] $
     "overview-destination", "quick-chats-destination")
   $chromePrefixes = @("sidebar-section-", "project-row-", "project-new-loop-", "project-disclosure-",
     "quick-chats-header-", "quick-chat-new-", "quick-chats-disclosure-", "quick-chat-row-", "sidebar-update-banner-",
+    "workspace-footer-",
     "header-attention-", "header-worktree-", "header-jump-", "header-toggle-panel-", "canvas-attention-review-",
     "wire-node-", "mark-entry-", "overview-wire-node-", "overview-mark-entry-",
     "workspace-show-graph-", "workspace-stop-", "workspace-toggle-panel-", "workspace-detail-sparkline-",
@@ -6412,11 +6413,7 @@ try {
       "$($expected.Name) was not exposed under the Workspace lifecycle menu"
     $null = $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
   }
-  $workspaceSwitches = @(Get-DirectChildren $workspaces $rawWalker |
-    Where-Object { $_.Current.AutomationId -match '^workspace-switch-' })
-  Require ($workspaceSwitches.Count -ge 1) "Workspace lifecycle menu did not expose the current workspace"
-  $expectedWorkspaceIds = @($workspaceLifecycle.Id) +
-    @($workspaceSwitches | ForEach-Object { $_.Current.AutomationId })
+  $expectedWorkspaceIds = @($workspaceLifecycle.Id)
   $null = @(Assert-FragmentLinks $workspaces $rawWalker $expectedWorkspaceIds "RawView Workspaces")
   $null = @(Assert-FragmentLinks $workspaces $controlWalker $expectedWorkspaceIds "ControlView Workspaces")
 
@@ -6424,6 +6421,19 @@ try {
   $loops = Find-FragmentById $root "loops" $rawWalker
   $graph = Find-FragmentById $root "graph" $rawWalker
   Require (($null -ne $projects) -and ($null -ne $loops) -and ($null -ne $graph)) "missing Projects, Loops, or Graph fragments"
+  $workspaceFooters = @(Get-DirectChildren $projects $rawWalker |
+    Where-Object { $_.Current.AutomationId -match '^workspace-footer-' })
+  Require ($workspaceFooters.Count -le 1) "Sidebar workspace footer was exposed more than once"
+  if ($workspaceFooters.Count -eq 1) {
+    $workspaceFooter = $workspaceFooters[0]
+    Require (-not [string]::IsNullOrWhiteSpace($workspaceFooter.Current.Name)) `
+      "Sidebar workspace footer omitted the current workspace name"
+    $workspaceFooterBounds = $workspaceFooter.Current.BoundingRectangle
+    Require (($workspaceFooterBounds.Width -gt 0) -and ($workspaceFooterBounds.Height -gt 0) -and
+      ($workspaceFooterBounds.Right -le $projects.Current.BoundingRectangle.Right)) `
+      "Sidebar workspace footer was not contained by the sidebar rail"
+    $null = $workspaceFooter.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+  }
   $connectionAlert = $root.FindFirst(
     [System.Windows.Automation.TreeScope]::Descendants,
     (New-Object System.Windows.Automation.PropertyCondition(

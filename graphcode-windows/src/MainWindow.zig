@@ -754,6 +754,39 @@ fn workspaceCycleAvailable(workspaces: []const WorkspaceItem) bool {
     return workspaces.len > 1 or (workspaces.len == 1 and !workspaces[0].is_current);
 }
 
+pub fn createWorkspaceFooterMenu(workspaces: []const WorkspaceItem) ?c.HMENU {
+    const menu = c.CreatePopupMenu() orelse return null;
+    for (workspaces[0..@min(workspaces.len, workspace_command_limit - workspace_command_base + 1)], 0..) |item, index| {
+        const command = workspace_command_base + index;
+        append(menu, item.name, command);
+        const flags: c.UINT = if (item.is_current) c.MF_BYCOMMAND | c.MF_CHECKED else c.MF_BYCOMMAND | c.MF_UNCHECKED;
+        _ = c.CheckMenuItem(menu, @intCast(command), flags);
+    }
+    separator(menu);
+    append(menu, "New Workspace...", @intFromEnum(Command.workspace_new));
+    appendEnabled(menu, "Manage Workspaces...", @intFromEnum(Command.workspace_manage), workspaces.len > 1);
+    return menu;
+}
+
+pub fn showWorkspaceFooterMenu(
+    hwnd: c.HWND,
+    workspaces: []const WorkspaceItem,
+    anchor: c.POINT,
+) ?usize {
+    const menu = createWorkspaceFooterMenu(workspaces) orelse return null;
+    defer _ = c.DestroyMenu(menu);
+    const selected = c.TrackPopupMenu(
+        menu,
+        c.TPM_RETURNCMD | c.TPM_NONOTIFY | c.TPM_RIGHTBUTTON | c.TPM_BOTTOMALIGN,
+        anchor.x,
+        anchor.y,
+        0,
+        hwnd,
+        null,
+    );
+    return if (selected > 0) @intCast(selected) else null;
+}
+
 test "workspace cycle capability counts an outside current without window queries" {
     const current = WorkspaceItem{ .name = "Default", .is_current = true };
     const other = WorkspaceItem{ .name = "Default", .is_current = false };
@@ -3082,6 +3115,33 @@ test "workspace menu checks the exact command and retains target labels and enab
     try expectDisabledWorkspaceCommand(menu, .workspace_rename);
     try std.testing.expect(c.DeleteMenu(menu, @intFromEnum(Command.workspace_rename), c.MF_BYCOMMAND) != 0);
     try std.testing.expectError(error.TestUnexpectedResult, expectDisabledWorkspaceCommand(menu, .workspace_rename));
+}
+
+test "workspace footer popup retains target labels and owned actions" {
+    const items = [_]WorkspaceItem{
+        .{ .name = "Default", .is_current = false },
+        .{ .name = "Fixture Workspace", .is_current = true },
+    };
+    const menu = createWorkspaceFooterMenu(&items) orelse return error.CreateWorkspaceFooterMenuFailed;
+    defer _ = c.DestroyMenu(menu);
+    try std.testing.expectEqual(@as(i32, 5), c.GetMenuItemCount(menu));
+    for (items, 0..) |item, index| {
+        const command: c.UINT = @intCast(workspace_command_base + index);
+        const state = c.GetMenuState(menu, command, c.MF_BYCOMMAND);
+        try std.testing.expect(state != std.math.maxInt(c.UINT));
+        try std.testing.expectEqual(item.is_current, state & c.MF_CHECKED != 0);
+        var label: [128]u16 = undefined;
+        const length = c.GetMenuStringW(menu, command, &label, label.len, c.MF_BYCOMMAND);
+        const actual = try std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, label[0..@intCast(length)]);
+        defer std.testing.allocator.free(actual);
+        try std.testing.expectEqualStrings(item.name, actual);
+    }
+    try std.testing.expect(c.GetMenuState(menu, @intFromEnum(Command.workspace_new), c.MF_BYCOMMAND) & c.MF_GRAYED == 0);
+    try std.testing.expect(c.GetMenuState(menu, @intFromEnum(Command.workspace_manage), c.MF_BYCOMMAND) & c.MF_GRAYED == 0);
+
+    const single = createWorkspaceFooterMenu(items[0..1]) orelse return error.CreateWorkspaceFooterMenuFailed;
+    defer _ = c.DestroyMenu(single);
+    try std.testing.expect(c.GetMenuState(single, @intFromEnum(Command.workspace_manage), c.MF_BYCOMMAND) & c.MF_GRAYED != 0);
 }
 
 // Regression test for the Update-command re-enable bug: a real background
