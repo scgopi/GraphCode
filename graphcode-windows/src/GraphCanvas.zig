@@ -1817,6 +1817,32 @@ pub fn hitTestOverview(
     return null;
 }
 
+pub fn hitTestOverviewAttentionAction(
+    model: *const GraphModel.Model,
+    x: i32,
+    y: i32,
+    state: *const CanvasState,
+    graph_bounds: c.RECT,
+) ?OverviewHit {
+    if (!insideGraph(x, y, graph_bounds)) return null;
+    var graph_index = model.graphs.items.len;
+    while (graph_index > 0) {
+        graph_index -= 1;
+        const graph = &model.graphs.items[graph_index];
+        const lane = cachedOverviewLane(state, graph_index) orelse continue;
+        var node_index = graph.nodes.items.len;
+        while (node_index > 0) {
+            node_index -= 1;
+            if (node_index >= lane.layout.roles.len or lane.layout.roles[node_index] == .unwired) continue;
+            if (!attentionActionVisible(graph.nodes.items[node_index], graph.nodes.items, graph.edges.items)) continue;
+            const bounds = overviewCardBounds(model, graph_index, node_index, graph_bounds, state);
+            if (insideGraph(x, y, attentionActionBounds(bounds, state)))
+                return .{ .graph_index = graph_index, .node_index = node_index };
+        }
+    }
+    return null;
+}
+
 pub fn hitTestOverviewUnwiredAction(
     model: *const GraphModel.Model,
     x: i32,
@@ -9694,6 +9720,57 @@ test "loop card parity existing action fills use hit bounds and never paint over
             try std.testing.expectEqual(@as(usize, 0), dib.count(meta, 0x000A9FFF));
             try std.testing.expectEqual(@as(usize, 0), dib.count(meta, 0x003A3535));
         }
+    }
+}
+
+test "loop card overview attention action and cycle role use overview geometry" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\overview","name":"Overview"},"nodes":[{"id":"seed","title":"Seed","loopType":"sketch","state":"idle"},{"id":"question","title":"Question","loopType":"goalBased","state":"running","presence":"awaitingInput"},{"id":"main","title":"Main","loopType":"sketch","state":"blocked"},{"id":"peer","title":"Peer","loopType":"sketch","state":"blocked"},{"id":"unwired","title":"Unwired","loopType":"goalBased","state":"running","presence":"awaitingInput"}],"edges":[{"id":"seed-question","from":"seed","to":"question","kind":"handoff"},{"id":"main-peer","from":"main","to":"peer","kind":"handoff"},{"id":"peer-main","from":"peer","to":"main","kind":"handoff"}]}}}
+    );
+    const graph = &model.graphs.items[0];
+    const bounds = rect(220, 34, 2600, 2000);
+    for ([_]f32{ 1, 1.25, 1.8 }) |zoom| {
+        var state = try modelTestState(&model, .{ .zoom = zoom }, bounds);
+        defer state.deinitLayout();
+        const question = overviewCardBounds(&model, 0, 1, bounds, &state);
+        const question_action = attentionActionBounds(question, &state);
+        try std.testing.expect(insideGraph(question_action.left + 1, question_action.top + 1, bounds));
+        const question_hit = hitTestOverviewAttentionAction(
+            &model,
+            question_action.left + 1,
+            question_action.top + 1,
+            &state,
+            bounds,
+        ) orelse return error.OverviewAttentionQuestionMissing;
+        try std.testing.expectEqual(@as(usize, 0), question_hit.graph_index);
+        try std.testing.expectEqual(@as(usize, 1), question_hit.node_index);
+        try std.testing.expectEqual(AttentionAction.reply, primaryCardAction(graph.nodes.items[1]).?);
+
+        const cycle = overviewCardBounds(&model, 0, 2, bounds, &state);
+        const cycle_action = attentionActionBounds(cycle, &state);
+        try std.testing.expect(insideGraph(cycle_action.left + 1, cycle_action.top + 1, bounds));
+        const cycle_hit = hitTestOverviewAttentionAction(
+            &model,
+            cycle_action.left + 1,
+            cycle_action.top + 1,
+            &state,
+            bounds,
+        ) orelse return error.OverviewAttentionCycleMissing;
+        try std.testing.expectEqual(@as(usize, 2), cycle_hit.node_index);
+        try std.testing.expectEqual(AttentionAction.inspect, primaryCardAction(graph.nodes.items[2]).?);
+        try std.testing.expectEqual(@as(?NodeRole, .cycle_only), overviewNodeRole(&state, 0, 2));
+
+        const unwired = overviewCardBounds(&model, 0, 4, bounds, &state);
+        const unwired_action = attentionActionBounds(unwired, &state);
+        try std.testing.expect(hitTestOverviewAttentionAction(
+            &model,
+            unwired_action.left + 1,
+            unwired_action.top + 1,
+            &state,
+            bounds,
+        ) == null);
     }
 }
 
