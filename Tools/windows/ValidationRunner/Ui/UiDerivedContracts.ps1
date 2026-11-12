@@ -399,6 +399,12 @@ Invoke-Derived 'ui.root.source.line-7027' {
       '\[GraphCodeUiaGateState\]::PostMouseDragMoveAt\(', '\$visibleTargetBounds = @\(')) {
     Assert-Derived ($source -match $pattern) 'Connector physical-screen/clipped target contract missing'
   }
+  foreach ($literal in @('function Wait-ConnectorVisibleSnapshot(', '[ValidateRange(0, 2)][int] $MaximumNormalizations = 2',
+      '$connectorConvergence = Wait-ConnectorVisibleSnapshot', '$fit = Find-FragmentByIdWithRetry $root "fit-canvas" $rawWalker',
+      'UIA_CONNECTOR_FINAL_FAILURE_EVIDENCE=', 'Save-UiaShellWindowCapture $shellWindow $png',
+      '[IO.FileMode]::CreateNew', 'cards-insufficient-visible-intersection')) {
+    Assert-Derived ($source.Contains($literal)) 'Connector bounded normalization/final evidence contract missing'
+  }
 }
 $null = [IO.Directory]::CreateDirectory($ArtifactRoot)
 [IO.File]::WriteAllText((Join-Path $ArtifactRoot 'ui-derived-results.json'), ($results | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))

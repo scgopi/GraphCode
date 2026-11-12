@@ -172,6 +172,15 @@ Overview, Quick Chats and other owners select neither of those rows. The
 `ownership.mixed-ui-policy` suite checks all 32 surface/owner/selection combinations
 without changing the independent roster, card, metadata, bounds or foreign-owner
 requirements.
+Connector drag snapshots retain the separate Actual Size action and require at
+least an 8-by-8 physical-pixel intersection of each exact owned card with both
+graph and client bounds. Geometry-only failures may invoke the existing owned
+Fit Canvas action at most twice during the existing 40-observation convergence
+budget. Each observation reconnects and recaptures the exact IDs; no zero-area
+or foreign snapshot is accepted. Final refusal saves the attempt index, fit
+count, graph/client bounds, both card captures, decision and a uniquely named
+owned-window PNG with byte count/hash before throwing. Capture failures remain
+explicit and do not replace the original connector refusal.
 
 With both process flags `GRAPHCODE_UIA_GATE=1` and
 `GRAPHCODE_UIA_EDGE_ACTION_TRACE=1`, popup input emits

@@ -2495,6 +2495,13 @@ function Get-ConnectorDragSnapshotDecision(
       $clientBounds[3] -le $clientBounds[1]) {
     return & $reject "client-bounds"
   }
+  foreach ($card in $cardDecision.cards) {
+    $width = [Math]::Min($card.bounds[2], [Math]::Min($graphBounds[2], $clientBounds[2])) -
+      [Math]::Max($card.bounds[0], [Math]::Max($graphBounds[0], $clientBounds[0]))
+    $height = [Math]::Min($card.bounds[3], [Math]::Min($graphBounds[3], $clientBounds[3])) -
+      [Math]::Max($card.bounds[1], [Math]::Max($graphBounds[1], $clientBounds[1]))
+    if ($width -lt 8 -or $height -lt 8) { return & $reject "cards-insufficient-visible-intersection" }
+  }
   $source = $cardDecision.cards[0]
   $target = $cardDecision.cards[1]
   $sourcePoint = @(
@@ -2540,6 +2547,37 @@ function Get-ConnectorDragSnapshotDecision(
     sourceCardId = [string]$source.automationId
     targetCardId = [string]$target.automationId
   }
+}
+
+function Wait-ConnectorVisibleSnapshot(
+  [scriptblock] $Observe,
+  [scriptblock] $Normalize,
+  [scriptblock] $PersistFailure,
+  [scriptblock] $Pause,
+  [ValidateRange(1, 40)][int] $MaximumAttempts = 40,
+  [ValidateRange(0, 2)][int] $MaximumNormalizations = 2
+) {
+  $normalizations = 0
+  for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+    $snapshot = & $Observe
+    if ($snapshot.decision.ready) {
+      return [ordered]@{ snapshot = $snapshot; decision = $snapshot.decision
+        attempt = $attempt; normalizations = $normalizations }
+    }
+    if ($attempt -lt $MaximumAttempts -and $normalizations -lt $MaximumNormalizations -and
+        $snapshot.decision.failure -cin @("cards-outside-viewport", "source-point-outside", "target-not-visible",
+          "cards-insufficient-visible-intersection")) {
+      & $Normalize
+      $normalizations++
+    }
+    if ($attempt -lt $MaximumAttempts) { & $Pause }
+  }
+  $record = [ordered]@{ attempt = $attempt - 1; normalizations = $normalizations; snapshot = $snapshot }
+  $failure = [InvalidOperationException]::new(
+    "connector drag did not converge on exact visible endpoints: $($snapshot.decision.failure)")
+  try { & $PersistFailure $record }
+  catch { $failure.Data["ConnectorFailureEvidenceError"] = $_.Exception }
+  throw $failure
 }
 
 # A modal teardown (e.g. dismissing the update-offer dialog via SendCommand)
@@ -7547,10 +7585,9 @@ try {
   }
   Write-Host ("UIA_COMPOSITE_NAVIGATION_EVIDENCE=" + ($compositeNavigationEvidence | ConvertTo-Json -Compress))
 
-  # Keep the established Actual Size hover-paint proof, but do not use the full
-  # target rectangle's centre: at DPI192 the second card extends past the live
-  # client/graph right edge. Reconnect after normalization, freeze exact card
-  # bounds, and choose the centre of the target's visible card intersection.
+  # Exercise Actual Size independently of connector normalization. If its viewport
+  # excludes the exact cards, use the existing Fit Canvas action before freezing
+  # endpoints; a full target rectangle's centre can still be outside at high DPI.
   $connectorActual = Find-FragmentByIdWithRetry $root "actual-size" $rawWalker
   Require (($null -ne $connectorActual) -and
            ($connectorActual.Current.ProcessId -eq $process.Id) -and
@@ -7566,7 +7603,8 @@ try {
   $connectorDecision = $null
   $connectorProjectCards = @()
   $connectorCaptures = @()
-  for ($attempt = 0; $attempt -lt 40; $attempt++) {
+  $connectorConvergence = Wait-ConnectorVisibleSnapshot {
+    $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
     $connectorProbe = Wait-ForGraphChildren $root $rawWalker `
       { $_.Current.AutomationId -cin @($dynamicProjectExpected | ForEach-Object { $_.automationId }) } `
       { param($items) $items.Count -eq 2 } 1 0
@@ -7582,7 +7620,13 @@ try {
       $connectorCaptures = @($connectorProjectCards | ForEach-Object {
         Get-DynamicProjectCardCapture $_
       })
+      for ($index = 0; $index -lt 2; $index++) {
+        Require ($connectorCaptures[$index].automationId -ceq $dynamicProjectExpected[$index].automationId -and
+          $connectorCaptures[$index].name -ceq $dynamicProjectExpected[$index].name -and
+          $connectorCaptures[$index].processId -eq $process.Id) "connector normalization refused foreign or changed card identity"
+      }
       $connectorGraphBounds = $graph.Current.BoundingRectangle
+      $connectorClientBounds = @([GraphCodeUiaGateState]::ClientScreenBounds($shellWindow))
       $preexistingEdgeDialog = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
         [uint32]$process.Id, $shellWindow, "GraphCodeNativeForm"
       ) -ne [IntPtr]::Zero
@@ -7593,16 +7637,60 @@ try {
           [double]$connectorGraphBounds.Right,
           [double]$connectorGraphBounds.Bottom
         ) $connectorClientBounds $preexistingEdgeDialog
-      if ($connectorDecision.ready) { break }
+      return [ordered]@{
+        graph = $graph; cards = $connectorProjectCards; captures = $connectorCaptures
+        graphBounds = @([double]$connectorGraphBounds.Left, [double]$connectorGraphBounds.Top,
+          [double]$connectorGraphBounds.Right, [double]$connectorGraphBounds.Bottom)
+        clientBounds = $connectorClientBounds; decision = $connectorDecision
+      }
     }
-    Start-Sleep -Milliseconds 100
+    return [ordered]@{ captures = @(); graphBounds = @(); clientBounds = $connectorClientBounds
+      decision = [ordered]@{ ready = $false; failure = "missing-exact-cards" } }
+  } {
     $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+    $fit = Find-FragmentByIdWithRetry $root "fit-canvas" $rawWalker
+    Require ($null -ne $fit -and $fit.Current.ProcessId -eq $process.Id -and
+      $fit.Current.IsEnabled -and -not $fit.Current.IsOffscreen) "connector normalization lost its owned Fit Canvas action"
+    $fit.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  } {
+    param($record)
+    $stem = Join-Path $script:uiaAttributionDirectory ("connector-final-" + [guid]::NewGuid().ToString("N"))
+    $png = $stem + ".png"
+    $captureError = $null
+    try { $capture = Save-UiaShellWindowCapture $shellWindow $png }
+    catch { $capture = "capture-error"; $captureError = $_.Exception.ToString() }
+    $evidence = [ordered]@{
+      attempt = $record.attempt; normalizations = $record.normalizations; processId = $process.Id
+      window = $shellWindow.ToInt64(); expected = $dynamicProjectExpected
+      graphBounds = $record.snapshot.graphBounds; clientBounds = $record.snapshot.clientBounds
+      cards = $record.snapshot.captures; decision = $record.snapshot.decision
+      screenshot = [ordered]@{ path = $png; state = $capture; error = $captureError }
+    }
+    if ($capture -ceq "saved") {
+      $evidence.screenshot.bytes = (Get-Item -LiteralPath $png).Length
+      $evidence.screenshot.sha256 = (Get-FileHash -LiteralPath $png -Algorithm SHA256).Hash
+    }
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($evidence | ConvertTo-Json -Depth 10))
+    $file = [IO.File]::Open($stem + ".json", [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try { $file.Write($bytes, 0, $bytes.Length) } finally { $file.Dispose() }
+    Write-Host ("UIA_CONNECTOR_FINAL_FAILURE_EVIDENCE=" + ($evidence | ConvertTo-Json -Depth 10 -Compress))
+    Require ($capture -ceq "saved" -and $evidence.screenshot.bytes -gt 0) "connector failure screenshot bytes unavailable: $capture"
+  } { Start-Sleep -Milliseconds 100 }
+  $connectorDecision = $connectorConvergence.decision
+  $connectorCaptures = $connectorConvergence.snapshot.captures
+  $connectorProjectCards = $connectorConvergence.snapshot.cards
+  $graph = $connectorConvergence.snapshot.graph
+  $connectorClientBounds = $connectorConvergence.snapshot.clientBounds
+  $connectorGraphBounds = [pscustomobject]@{
+    Left = $connectorConvergence.snapshot.graphBounds[0]; Top = $connectorConvergence.snapshot.graphBounds[1]
+    Right = $connectorConvergence.snapshot.graphBounds[2]; Bottom = $connectorConvergence.snapshot.graphBounds[3]
   }
   Require (($null -ne $connectorDecision) -and $connectorDecision.ready) `
     "connector drag did not converge on exact visible DPI192 endpoints: $($connectorDecision.failure)"
   Write-Host ("UIA_CONNECTOR_DRAG_EVIDENCE=" + ([ordered]@{
-    normalizedBy = "actual-size"
-    attempts = $attempt + 1
+    normalizedBy = $(if ($connectorConvergence.normalizations) { "actual-size-then-fit-canvas" } else { "actual-size" })
+    normalizations = $connectorConvergence.normalizations
+    attempts = $connectorConvergence.attempt
     processId = $process.Id
     sourceCardId = $connectorDecision.sourceCardId
     targetCardId = $connectorDecision.targetCardId

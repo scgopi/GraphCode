@@ -29,6 +29,7 @@ foreach ($productionPath in @('Stub-Daemon.ps1', 'uia-live-gate.ps1')) {
       ($node.Name -like '*-MultiProject*' -or $node.Name -cin @(
         'ConvertTo-SketchCanonicalJson', 'Test-RetryableUiaError', 'Test-UpdateBannerClickTarget',
         'Get-DynamicProjectCardSnapshotDecision', 'Get-ConnectorDragSnapshotDecision',
+        'Wait-ConnectorVisibleSnapshot',
         'Get-WorkspaceTabMountDecision', 'Get-UiaSelectionEventDecision'))
   }, $true)) {
     # Keep the actual helper's file-backed loader rooted at its production directory.
@@ -403,6 +404,42 @@ Invoke-Mixed 3635 'selected-project-roster-and-physical-connector-snapshots' {
   $d=Get-ConnectorDragSnapshotDecision $cutoff $expected 4242 $connectorGraph $client $false
   Assert-Mixed ($d.ready -and ($d.targetCenter -join ',') -ceq '1514,461' -and -not $d.targetCenterVisible -and
     ($d.targetPoint -join ',') -ceq '1339,461') 'Actual Size cutoff did not use visible card intersection'
+  foreach ($scenario in @('already-visible', 'visible-after-fit', 'never-visible')) {
+    $state = @{ reads = 0; fits = 0; saved = $null; pauses = 0 }
+    $failure = $null
+    try {
+      $snapshot = Wait-ConnectorVisibleSnapshot {
+        $state.reads++
+        $cards = Copy-MultiProjectValue $fitted
+        if ($scenario -ceq 'never-visible' -or ($scenario -ceq 'visible-after-fit' -and $state.fits -eq 0)) {
+          $cards[0].bounds = @(1600,552,1790,630)
+          $cards[1].bounds = @(1908,552,2114,630)
+        }
+        $sliver = Copy-MultiProjectValue $fitted
+        $sliver[1].bounds = @(1412,552,1618,630)
+        $sliverDecision = Get-ConnectorDragSnapshotDecision $sliver $expected 4242 $connectorGraph $client $false
+        Assert-Mixed (-not $sliverDecision.ready -and $sliverDecision.failure -ceq 'cards-insufficient-visible-intersection') `
+          'A two-pixel target sliver must not qualify as a material connector intersection'
+        return [ordered]@{
+          captures = $cards; graphBounds = $connectorGraph; clientBounds = $client
+          decision = Get-ConnectorDragSnapshotDecision $cards $expected 4242 $connectorGraph $client $false
+        }
+      } { $state.fits++ } { param($record) $state.saved = $record } `
+        { $state.pauses++ } -MaximumAttempts 4 -MaximumNormalizations 2
+    } catch { $failure = $_ }
+    if ($scenario -ceq 'never-visible') {
+      Assert-Mixed ($null -ne $failure -and $state.reads -eq 4 -and $state.fits -eq 2 -and
+        $state.saved.attempt -eq 4 -and $state.saved.normalizations -eq 2 -and
+        $state.saved.snapshot.captures.Count -eq 2 -and
+        $state.saved.snapshot.decision.failure -ceq 'cards-outside-viewport' -and
+        $state.saved.snapshot.graphBounds.Count -eq 4 -and $state.saved.snapshot.clientBounds.Count -eq 4) `
+        'Never-visible connector must persist the final exact snapshot and refuse after bounded normalization'
+    } else {
+      $fits = if ($scenario -ceq 'visible-after-fit') { 1 } else { 0 }
+      Assert-Mixed ($null -eq $failure -and $snapshot.decision.ready -and $state.fits -eq $fits -and
+        $null -eq $state.saved) 'Connector must reacquire and prove visibility after bounded fit'
+    }
+  }
   foreach($mutation in @('wrong-connector','wrong-target','wrong-process','logical-card-space','logical-client-space','preexisting-dialog')) {
     $candidate=Copy-MultiProjectValue $fitted;$candidateClient=@($client);$dialog=$false
     switch($mutation){wrong-connector{$candidate[0].automationId='canvas-card-wrong-source'} wrong-target{$candidate[1].name='Wrong target'}
