@@ -9717,10 +9717,17 @@ pub const App = struct {
                     const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ graph.project.path, node.id }) catch return;
                     defer self.allocator.free(key);
                     self.appendAccessibilityElement(&elements, &owned_identities, "overview-card", key, node.title, 4, .{ .logical = bounds }, false, false) catch return;
-                    if (GraphCanvas.overviewNodeRole(&self.canvas, graph_index, node_index) == .unwired) {
+                    const role = GraphCanvas.overviewNodeRole(&self.canvas, graph_index, node_index);
+                    if (role == .unwired) {
                         const actions = GraphCanvas.unwiredActionBounds(bounds, &self.canvas);
                         self.appendAccessibilityElement(&elements, &owned_identities, "overview-wire-node", key, "Wire it up", 4, .{ .logical = actions.wire }, false, true) catch return;
                         self.appendAccessibilityElement(&elements, &owned_identities, "overview-mark-entry", key, "Mark as entry", 4, .{ .logical = actions.mark_entry }, false, true) catch return;
+                    } else if (GraphCanvas.attentionActionVisible(node, graph.nodes.items, graph.edges.items)) {
+                        self.appendAccessibilityElement(&elements, &owned_identities, "attention-action", key, GraphCanvas.attentionActionLabel(node), 4, .{ .logical = GraphCanvas.attentionActionBounds(bounds, &self.canvas) }, false, true) catch return;
+                    }
+                    if (role == .cycle_only) {
+                        self.appendAccessibilityElement(&elements, &owned_identities, "cycle-reason", key, "cycle · no entry point", 4, .{ .logical = GraphCanvas.cycleReasonBounds(bounds, &self.canvas) }, false, false) catch return;
+                        elements.items[elements.items.len - 1].invokable = false;
                     }
                 }
             },
@@ -11685,6 +11692,9 @@ fn onWindowMessage(
                     .overview => {
                         if (app.applyOverviewLaneAction(x, y, bounds)) {
                             _ = c.InvalidateRect(hwnd, null, 0);
+                        } else if (GraphCanvas.hitTestOverviewAttentionAction(&app.model, x, y, &app.canvas, bounds)) |hit| {
+                            const graph = app.model.graphs.items[hit.graph_index];
+                            _ = app.activateLoop(graph.project.path, graph.nodes.items[hit.node_index].id);
                         } else if (GraphCanvas.hitTestOverviewUnwiredAction(&app.model, x, y, &app.canvas, bounds)) |hit| {
                             const graph = app.model.graphs.items[hit.graph_index];
                             if (app.selectProject(graph.project.path)) {
@@ -24109,6 +24119,71 @@ test "closed cycle UIA separates the footer reason from Inspect and preserves se
             }
         }
     }
+}
+
+test "loop card overview attention UIA publication exposes action and cycle roles" {
+    const Sink = struct {
+        checked: bool = false,
+        action_seen: usize = 0,
+        reason_seen: usize = 0,
+        unwired_action_seen: usize = 0,
+        failure: ?anyerror = null,
+
+        fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+
+        fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+            self.checked = true;
+            self.check(elements) catch |err| {
+                self.failure = err;
+            };
+        }
+
+        fn check(self: *@This(), elements: []const Accessibility.DynamicElement) !void {
+            var inspect_bottom: i32 = 0;
+            var reason_top: i32 = 0;
+            for (elements) |element| {
+                if (std.mem.eql(u8, element.identity, "attention-action:C:\\overview:question")) {
+                    self.action_seen += 1;
+                    try std.testing.expectEqualStrings("Reply", element.name);
+                    try std.testing.expect(element.invokable);
+                } else if (std.mem.eql(u8, element.identity, "attention-action:C:\\overview:main")) {
+                    self.action_seen += 1;
+                    try std.testing.expectEqualStrings("Inspect", element.name);
+                    try std.testing.expect(element.invokable);
+                    inspect_bottom = element.bottom;
+                } else if (std.mem.eql(u8, element.identity, "cycle-reason:C:\\overview:main")) {
+                    self.reason_seen += 1;
+                    try std.testing.expectEqualStrings("cycle · no entry point", element.name);
+                    try std.testing.expect(!element.invokable);
+                    reason_top = element.top;
+                } else if (std.mem.eql(u8, element.identity, "attention-action:C:\\overview:unwired")) {
+                    self.unwired_action_seen += 1;
+                }
+            }
+            try std.testing.expectEqual(@as(usize, 2), self.action_seen);
+            try std.testing.expectEqual(@as(usize, 1), self.reason_seen);
+            try std.testing.expectEqual(@as(usize, 0), self.unwired_action_seen);
+            try std.testing.expect(inspect_bottom > 0 and inspect_bottom <= reason_top);
+        }
+    };
+
+    var app = try overviewTestApp(96);
+    defer deinitOverviewTestApp(&app);
+    app.surface = .overview;
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\overview","name":"Overview"},"nodes":[{"id":"seed","title":"Seed","loopType":"sketch","state":"idle"},{"id":"question","title":"Question","loopType":"goalBased","state":"running","presence":"awaitingInput"},{"id":"main","title":"Main","loopType":"sketch","state":"blocked"},{"id":"peer","title":"Peer","loopType":"sketch","state":"blocked"},{"id":"unwired","title":"Unwired","loopType":"goalBased","state":"running","presence":"awaitingInput"}],"edges":[{"id":"seed-question","from":"seed","to":"question","kind":"handoff"},{"id":"main-peer","from":"main","to":"peer","kind":"handoff"},{"id":"peer-main","from":"peer","to":"main","kind":"handoff"}]}}}
+    );
+    try std.testing.expect(app.model.selectProject("C:\\overview"));
+    try std.testing.expect(app.refreshCanvasLayout(.{ .left = 0, .top = 0, .right = 1200, .bottom = 900 }));
+    var sink = Sink{};
+    app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    try std.testing.expect(sink.checked);
+    if (sink.failure) |err| return err;
+    try std.testing.expect(app.applyUiaDynamicInvoke(
+        Accessibility.worktreeIdentityPayload("attention-action:C:\\overview:question"),
+    ));
+    try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+    try std.testing.expectEqualStrings("question", app.model.selected().?.id);
 }
 
 const WireRouteSheet = struct {
