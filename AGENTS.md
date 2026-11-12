@@ -347,7 +347,7 @@ These are the single source of truth. Never silently upgrade one.
 | Swift | 6.3.3 | `.github/workflows/windows-*.yml` (`swift-version: swift-6.3.3-release`), `Tools/windows/bootstrap.ps1` |
 | Zig (shell) | 0.15.2 | `mise.toml`, `graphcode-windows/build.zig.zon` (`minimum_zig_version`) |
 | Zig (zmx only) | 0.16.0 | `graphcode-windows/provider-pins.json` |
-| Winghostty | `cac8f5f148fd5015d49e81e169ce9006ac7156ea` | `graphcode-windows/provider-pins.json` |
+| Winghostty | `4b48d90fd1c6658dfdaa588f2b2d685e52336030` | `graphcode-windows/provider-pins.json` |
 | zmx | `785b3fd15dcafd1882b495c831a10f98c201b908` | `graphcode-windows/provider-pins.json` |
 
 If a build fails because a tool is missing or the wrong version, rerun

@@ -399,7 +399,7 @@ try {
     providers = @{
       zmx = @{ sha256 = ('4' * 64); pin = '785b3fd15dcafd1882b495c831a10f98c201b908'
         artifact = '.graphcode-tools\providers\zmx\zig-out\bin\zmx.exe' }
-      winghostty = @{ sha256 = ('5' * 64); pin = 'cac8f5f148fd5015d49e81e169ce9006ac7156ea'
+      winghostty = @{ sha256 = ('5' * 64); pin = '4b48d90fd1c6658dfdaa588f2b2d685e52336030'
         artifact = '.graphcode-tools\providers\winghostty\zig-out\lib\winghostty-win32-host.lib' }
     }
     renderer = @{ uiaGate = $false; daemonSupervisorHook = $false }
@@ -480,7 +480,26 @@ try {
     try {
       $record = @{ pid = $sleeper.Id; executable = $sleeper.Path; commandLine = "$($sleeper.Path) attach fixture"
         createdAt = $sleeper.StartTime.ToUniversalTime().ToString('o') }
-      if (-not (Test-CaptureProcessIdentity $sleeper $record)) { throw 'String process timestamp identity failed' }
+      if (-not (Test-CaptureProcessIdentity $sleeper $record)) {
+        try {
+          $postFailureUtc = $sleeper.StartTime.ToUniversalTime()
+          $diagnostics = [ordered]@{
+            scope = 'Original expected record and POST-FAILURE same-held-Process observations; not exact operands inside the earlier failed comparison'
+            expectedPid = $record.pid
+            expectedExecutable = $record.executable
+            expectedUtcTimestamp = $record.createdAt
+            parsedExpectedUtcTicks = Get-CaptureUtcTicks $record.createdAt
+            postFailureActualPid = $sleeper.Id
+            postFailureActualExecutable = $sleeper.Path
+            postFailureActualUtcTimestamp = $postFailureUtc.ToString('o')
+            postFailureActualUtcTicks = $postFailureUtc.Ticks
+          }
+          Write-Output ("VISUAL_IDENTITY_FAILURE_DIAGNOSTICS " + ($diagnostics | ConvertTo-Json -Compress))
+        } catch {
+          Write-Output ("VISUAL_IDENTITY_FAILURE_DIAGNOSTICS unavailable: " + $_.Exception.Message)
+        }
+        throw 'String process timestamp identity failed'
+      }
       $parsedRecord = $record | ConvertTo-Json | ConvertFrom-Json
       if (-not (Test-CaptureProcessIdentity $sleeper $parsedRecord)) { throw 'JSON process timestamp identity failed' }
       $registry = [Collections.Generic.Dictionary[int,object]]::new()

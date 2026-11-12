@@ -420,7 +420,7 @@ The current accepted public provider commits are:
 
 | Provider | Pinned commit | Retained branch |
 |---|---|---|
-| [coneilen/winghostty](https://github.com/coneilen/winghostty/commit/cac8f5f148fd5015d49e81e169ce9006ac7156ea) | `cac8f5f148fd5015d49e81e169ce9006ac7156ea` | `graphcode-host` |
+| [coneilen/winghostty](https://github.com/coneilen/winghostty/commit/4b48d90fd1c6658dfdaa588f2b2d685e52336030) | `4b48d90fd1c6658dfdaa588f2b2d685e52336030` | `coneilen-terminal-cursor-rendering` |
 | [coneilen/zmx](https://github.com/coneilen/zmx/commit/785b3fd15dcafd1882b495c831a10f98c201b908) | `785b3fd15dcafd1882b495c831a10f98c201b908` | `graphcode-quickchat-hang` |
 
 The annotated `graphcode-windows-baseline-2026-09-17` tags remain historical
@@ -434,9 +434,15 @@ The current zmx commit adopts the named-pipe accept-deadline race fix merged in
 
 As verified on 2026-09-17, each fork has an active ruleset forbidding updates or
 deletion of `refs/tags/graphcode-windows-*`, without bypass actors. Separate
-active rulesets prevent deletion and non-fast-forward changes of the branches
-above; normal forward development is allowed. The Winghostty tag/branch ruleset
+active rulesets prevent deletion and non-fast-forward changes of Winghostty's
+`graphcode-host` and zmx's `graphcode-quickchat-hang`; normal forward development
+is allowed. The Winghostty tag/branch ruleset
 IDs are `23625509`/`23625510`; zmx's are `23625508`/`23625511`.
+Read-only verification on 2026-11-12 confirmed that Winghostty ruleset `23625510`
+matches only `refs/heads/graphcode-host`, while `23625509` matches
+`refs/tags/graphcode-windows-*`. The current Winghostty commit is publicly
+retained at the exact fork commit and `coneilen-terminal-cursor-rendering` branch
+listed above; ruleset `23625510` does not protect that branch.
 Administrators can still change rulesets or repository availability; these
 settings are retention controls, not an irrevocable archival guarantee.
 

@@ -163,7 +163,7 @@ coverage, antialiasing appearance, or visual parity.
 ### Terminal VT parser and glyph snapshots
 
 The public `libghostty-vt` C API from the existing Winghostty pin
-`cac8f5f148fd5015d49e81e169ce9006ac7156ea` is the production default. Set
+`4b48d90fd1c6658dfdaa588f2b2d685e52336030` is the production default. Set
 `GRAPHCODE_EXPERIMENTAL_TERMINAL_VT=0` before startup only as a rollback to the
 limited legacy parser; an absent variable or exactly `1` enables Ghostty VT.
 Other values, including an empty value, fail workspace initialization with
