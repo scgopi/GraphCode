@@ -1,5 +1,6 @@
 const std = @import("std");
 const GraphModel = @import("GraphModel.zig");
+const GraphContextMenu = @import("GraphContextMenu.zig");
 const Tokens = @import("DesignTokens.zig");
 const Sidebar = @import("Sidebar.zig");
 const WorktreeStatus = @import("WorktreeStatus.zig");
@@ -2637,57 +2638,11 @@ fn edgeLabel(allocator: std.mem.Allocator, edge: GraphModel.Edge) ![]u8 {
         try writer.print(" · {s}", .{edge.condition});
     if (edge.cycle_guard) |guard| {
         try writer.print(" · loop {d}/", .{edge.fire_count});
-        try writeCycleGuard(writer, guard);
+        try GraphContextMenu.writeCycleGuard(writer, guard);
     } else if (edge.fire_count > 0) {
         try writer.print(" · fired {d}", .{edge.fire_count});
     }
     return output.toOwnedSlice();
-}
-
-fn writeCycleGuard(writer: anytype, guard: GraphModel.CycleGuard) !void {
-    var has_part = false;
-    if (guard.max_iterations) |maximum| {
-        try writer.print("≤{d}×", .{maximum});
-        has_part = true;
-    }
-    if (guard.until) |raw| {
-        const until = try effectiveEdgeUntil(raw);
-        if (until.len != 0) {
-            if (has_part) try writer.writeAll(" or ");
-            try writer.print("until `{s}`", .{until});
-            has_part = true;
-        }
-    }
-    if (guard.stop_after_passes_without_improvement) |passes| {
-        if (passes > 0) {
-            if (has_part) try writer.writeAll(" or ");
-            try writer.print("{d} flat passes", .{passes});
-            has_part = true;
-        }
-    }
-    if (!has_part) try writer.writeAll("unbounded");
-}
-
-fn effectiveEdgeUntil(text: []const u8) error{InvalidUtf8}![]const u8 {
-    const view = std.unicode.Utf8View.init(text) catch return error.InvalidUtf8;
-    var iterator = view.iterator();
-    var start = text.len;
-    var end: usize = 0;
-    var offset: usize = 0;
-    while (iterator.nextCodepointSlice()) |bytes| {
-        const codepoint = std.unicode.utf8Decode(bytes) catch return error.InvalidUtf8;
-        // Foundation .whitespaces: Unicode space separators plus horizontal tab, not newlines.
-        const whitespace = switch (codepoint) {
-            0x09, 0x20, 0xa0, 0x1680, 0x2000...0x200a, 0x202f, 0x205f, 0x3000 => true,
-            else => false,
-        };
-        if (!whitespace) {
-            start = @min(start, offset);
-            end = offset + bytes.len;
-        }
-        offset += bytes.len;
-    }
-    return text[@min(start, end)..end];
 }
 
 fn drawBezier(hdc: c.HDC, from: Connector, to: Connector, color: u32, zoom: f32) void {

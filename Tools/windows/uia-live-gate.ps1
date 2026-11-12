@@ -10452,13 +10452,15 @@ try {
   $edgeCanvasMenuOrder = @($edgeCanvasMenu.Items | ForEach-Object {
     if ($_.Separator) { "<separator>" } else { [string]$_.Text }
   })
-  Require (($edgeCanvasMenuOrder -join "|") -ceq "Edit Edge...|Delete Edge") `
+  Require ($edgeCanvasMenuOrder.Count -eq 3 -and
+           $edgeCanvasMenuOrder[0] -cmatch '^(Handoff|Message|Spawn) · (Always|On success|On failure)( · .+)?$' -and
+           ($edgeCanvasMenuOrder[1..2] -join "|") -ceq "Delete Edge|Edit Edge...") `
     "canvas edge context menu had unexpected ordered items: $($edgeCanvasMenu.Description)"
-  Require (@($edgeCanvasMenu.Items | Where-Object {
-    -not $_.Separator -and (-not $_.Enabled -or $_.Checked)
-  }).Count -eq 0) `
-    "canvas edge context menu had an unexpected disabled or checked item: $($edgeCanvasMenu.Description)"
-  Require ((@($edgeCanvasMenu.Items | ForEach-Object { $_.Id }) -join "|") -ceq "5110|5111") `
+  Require (-not $edgeCanvasMenu.Items[0].Enabled -and
+           @($edgeCanvasMenu.Items | Where-Object { $_.Separator -or $_.Checked }).Count -eq 0 -and
+           @($edgeCanvasMenu.Items | Where-Object { $_.Id -in @(5110, 5111) -and -not $_.Enabled }).Count -eq 0) `
+    "canvas edge context menu did not retain a disabled summary and enabled actions: $($edgeCanvasMenu.Description)"
+  Require ((@($edgeCanvasMenu.Items | ForEach-Object { $_.Id }) -join "|") -ceq "0|5111|5110") `
     "canvas edge context menu did not expose the edge-specific Edit/Delete commands: $($edgeCanvasMenu.Description)"
 
   # Exercise Edit Edge only after all three menus were dismissed with Escape.
@@ -11927,7 +11929,7 @@ try {
     Start-Sleep -Milliseconds 100
   }
   $edgeEditMenu = Open-EdgeMenu $true 5110
-  Require (($edgeEditMenu.menuIds -join "|") -ceq "5110|5111") `
+  Require (($edgeEditMenu.menuIds -join "|") -ceq "0|5111|5110") `
     "republished edge was not hit-tested as a single editable connection"
   $edgeWorkflowTitle = "Edit edge"
   Wait-EdgeWindow $edgeWorkflowTitle

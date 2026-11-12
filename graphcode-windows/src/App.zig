@@ -5741,13 +5741,15 @@ pub const App = struct {
     fn showEdgeContextMenu(self: *App, index: usize, x: i32, y: i32) void {
         const graph = self.model.graph orelse return;
         if (index >= graph.edges.items.len) return;
-        const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
-        defer self.allocator.free(project_path);
-        const edge_id = self.allocator.dupe(u8, graph.edges.items[index].id) catch return;
-        defer self.allocator.free(edge_id);
+        var snapshot = GraphContextMenu.EdgeSnapshot.capture(self.allocator, graph.project.path, graph.edges.items[index]) catch |err| {
+            std.log.warn("Canvas edge menu capture failed: {s}", .{@errorName(err)});
+            self.setStatus("Unable to open the edge menu");
+            return;
+        };
+        defer snapshot.deinit();
         GraphContextMenu.show(
             self.window.hwnd,
-            .{ .edge = .{ .project_path = project_path, .id = edge_id } },
+            .{ .edge = snapshot.target },
             x,
             y,
             self,
@@ -10806,7 +10808,7 @@ test "edge action diagnostic records callback and stable target refusals without
             \\{"event":{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[],"edges":[]}}}
         );
         Probe.count = 0;
-        onContextAction(&app, .edit_edge, .{ .edge = .{ .project_path = case.project, .id = case.id } });
+        onContextAction(&app, .edit_edge, .{ .edge = .{ .project_path = case.project, .id = case.id, .summary = "Handoff · Always" } });
         try std.testing.expectEqual(@as(usize, 3), Probe.count);
         try std.testing.expectEqual(Diagnostics.EdgeActionTrace.Stage.callback_entry, Probe.events[0].stage);
         try std.testing.expectEqual(Diagnostics.EdgeActionTrace.Stage.target_entry, Probe.events[1].stage);
