@@ -145,6 +145,13 @@ changes, and continues to provide logical 96-DPI 8x16 cell metrics for grid
 geometry and hit testing. Applying the monitor ratio through both mechanisms
 would scale the terminal twice.
 
+Every created surface also applies the macOS terminal appearance contract
+through the same pinned provider: `#0A0C0B` at 0.80 background opacity and 2
+logical points of background-colored padding on every edge. Winghostty owns
+point-to-device-pixel conversion for that padding at the monitor DPI. Split
+pane geometry reserves one logical point between adjacent child HWNDs and the
+terminal chrome paints that seam once; child surfaces never overlap it.
+
 The provider verifies exact installed face selection before using a configured
 family and retains Consolas as its final legacy fallback. GraphCode does not
 currently install these fonts. Unit and provider integration tests therefore
@@ -156,7 +163,7 @@ coverage, antialiasing appearance, or visual parity.
 ### Terminal VT parser and glyph snapshots
 
 The public `libghostty-vt` C API from the existing Winghostty pin
-`e0a5579f3b470bede72294d661282a391c502ace` is the production default. Set
+`cac8f5f148fd5015d49e81e169ce9006ac7156ea` is the production default. Set
 `GRAPHCODE_EXPERIMENTAL_TERMINAL_VT=0` before startup only as a rollback to the
 limited legacy parser; an absent variable or exactly `1` enables Ghostty VT.
 Other values, including an empty value, fail workspace initialization with
