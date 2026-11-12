@@ -155,7 +155,7 @@ function Assert-PreviewCoreArtifact($artifact, [string] $source, [string] $hash)
   foreach ($name in @("metadata", "manifest", "providerProvenance", "shell", "daemon", "cli", "zmx")) {
     Assert-PreviewCoreHash $artifact.hashes.$name 64 "$name digest"
   }
-  Assert-PreviewCore ($artifact.winghosttyCommit -ceq "cac8f5f148fd5015d49e81e169ce9006ac7156ea" -and
+  Assert-PreviewCore ($artifact.winghosttyCommit -ceq "4b48d90fd1c6658dfdaa588f2b2d685e52336030" -and
     $artifact.zmxCommit -ceq "785b3fd15dcafd1882b495c831a10f98c201b908") "accepted provider pins changed"
 }
 

@@ -10,7 +10,7 @@ session/ConPTY lifetime.
 
 `provider-pins.json` records the accepted provider commits:
 
-- Winghostty `cac8f5f148fd5015d49e81e169ce9006ac7156ea`
+- Winghostty `4b48d90fd1c6658dfdaa588f2b2d685e52336030`
 - zmx `785b3fd15dcafd1882b495c831a10f98c201b908`
 
 Both commits are publicly reachable in the `coneilen` provider repositories.
@@ -20,7 +20,10 @@ provider source into GraphCode.
 The annotated `graphcode-windows-baseline-2026-09-17` tags preserve the original
 baseline sources, including zmx `029e11d2b19162fb3bdf90c8270237d303b8bfb4`,
 not the current zmx pin. The provider forks protect these tags against
-updates/deletion and the dedicated branches against deletion/history rewrites; see
+updates/deletion and the `graphcode-host` (Winghostty) and
+`graphcode-quickchat-hang` (zmx) branches against deletion/history rewrites. The
+current Winghostty commit is publicly retained on `coneilen-terminal-cursor-rendering`;
+the recorded Winghostty branch ruleset does not cover that branch. See
 `Tools\windows\PACKAGING.md` for the recorded ruleset IDs and retention limits.
 These are source-retention tags, not signed Windows releases.
 

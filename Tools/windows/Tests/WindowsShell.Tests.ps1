@@ -785,7 +785,7 @@ $pins = Get-Content -LiteralPath (Join-Path $shellRoot "provider-pins.json") -Ra
   ConvertFrom-Json
 Assert-Contract ($pins.schemaVersion -eq 1) "provider pin schema is not 1"
 Assert-Contract ($pins.winghostty.sha -eq
-  "cac8f5f148fd5015d49e81e169ce9006ac7156ea") "Winghostty pin changed"
+  "4b48d90fd1c6658dfdaa588f2b2d685e52336030") "Winghostty pin changed"
 Assert-Contract ($pins.zmx.sha -eq
   "785b3fd15dcafd1882b495c831a10f98c201b908") "zmx pin changed"
 Assert-Contract ($pins.winghostty.remoteUrl -eq

@@ -3,7 +3,7 @@
   "winghostty": {
     "repository": "coneilen/winghostty",
     "remoteUrl": "https://github.com/coneilen/winghostty.git",
-    "sha": "cac8f5f148fd5015d49e81e169ce9006ac7156ea",
+    "sha": "4b48d90fd1c6658dfdaa588f2b2d685e52336030",
     "artifact": "zig-out/lib/winghostty-win32-host.lib",
     "minimumZig": "0.15.2"
   },
