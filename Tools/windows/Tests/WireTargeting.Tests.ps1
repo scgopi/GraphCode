@@ -296,9 +296,13 @@ public static class WireFixture {
 '@
 $root=[IntPtr]::Zero;$hostWindow=[IntPtr]::Zero;$content=[IntPtr]::Zero
 try {
-    $root=[WireFixture]::Create([IntPtr]::Zero,$false,'wire fixture owner')
-    $hostWindow=[WireFixture]::Create($root,$false,'wire fixture sheet')
-    $content=[WireFixture]::Create($hostWindow,$true,'wire fixture content')
+    $fixtureDpiContext=[WireFixture]::SetThreadDpiAwarenessContext([IntPtr](-4))
+    Assert-WireCase ($fixtureDpiContext -ne [IntPtr]::Zero) 'Fixture PMv2 setup failed.'
+    try {
+        $root=[WireFixture]::Create([IntPtr]::Zero,$false,'wire fixture owner')
+        $hostWindow=[WireFixture]::Create($root,$false,'wire fixture sheet')
+        $content=[WireFixture]::Create($hostWindow,$true,'wire fixture content')
+    } finally {$null=[WireFixture]::SetThreadDpiAwarenessContext($fixtureDpiContext)}
     if ($LegacyBehavior) {
         Test-WireCase 'owned child form is observable, not just a top-level class' {
             $actual=[CapUiaGateState]::FindTopLevel('WireTargetFixtureContent',[uint32]$PID)
@@ -560,15 +564,29 @@ try {
             $previous=[WireFixture]::SetThreadDpiAwarenessContext([IntPtr](-1))
             try {
                 $before=[WireFixture]::GetThreadDpiAwarenessContext()
+                $activePrevious=[WireFixture]::SetThreadDpiAwarenessContext([IntPtr](-4))
+                Assert-WireCase ($activePrevious -ne [IntPtr]::Zero) 'Drag PMv2 observation setup failed.'
+                try {$retainedDpiContext=[WireFixture]::GetThreadDpiAwarenessContext()}
+                finally {
+                    $restored=[WireFixture]::SetThreadDpiAwarenessContext($activePrevious)
+                    Assert-WireCase ($restored -ne [IntPtr]::Zero) 'Drag PMv2 observation restore failed.'
+                }
                 $receipt=[CapNative]::PostPointerDragScreen($hostWindow,($b[0]+10),($b[1]+10),($b[0]+15),($b[1]+15))
                 Assert-WireCase ($receipt.Start.ClientX -eq 10 -and $receipt.Start.ClientY -eq 10 -and
                     $receipt.End.ClientX -eq 15 -and $receipt.End.ClientY -eq 15 -and
+                    $receipt.End.ClientX-$receipt.Start.ClientX -eq 5 -and
+                    $receipt.End.ClientY-$receipt.Start.ClientY -eq 5 -and
+                    $receipt.End.ScreenX-$receipt.Start.ScreenX -eq 5 -and
+                    $receipt.End.ScreenY-$receipt.Start.ScreenY -eq 5 -and
                     $receipt.Start.MovePosted -and $receipt.Start.DownPosted -and
                     $receipt.HeldMovePosted -and $receipt.End.UpPosted -and
                     $receipt.Start.Recipient -eq $hostWindow.ToInt64() -and
                     $receipt.End.Recipient -eq $hostWindow.ToInt64() -and
+                    $receipt.Start.DpiContext -eq $retainedDpiContext -and
+                    $receipt.End.DpiContext -eq $retainedDpiContext -and
+                    $receipt.Delivery -ceq 'POSTED_WINDOW_MESSAGES_NOT_PHYSICAL_POINTER' -and
                     [WireFixture]::GetThreadDpiAwarenessContext() -eq $before) `
-                    "Drag receipt/DPI restore failed: $($receipt|ConvertTo-Json -Depth 10 -Compress); before=$before; after=$([WireFixture]::GetThreadDpiAwarenessContext())"
+                    "Drag receipt/DPI restore failed: $($receipt|ConvertTo-Json -Depth 10 -Compress); retained=$retainedDpiContext; before=$before; after=$([WireFixture]::GetThreadDpiAwarenessContext())"
             } finally {$null=[WireFixture]::SetThreadDpiAwarenessContext($previous)}
         }
         foreach ($failureIndex in 0..3) {

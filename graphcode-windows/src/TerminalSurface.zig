@@ -32,6 +32,9 @@ const terminal_font_fallbacks = [_][*c]const u8{
 const terminal_font_point_size: f32 = 13.0 * 0.9;
 const terminal_font_cell_width_ratio: f32 = 0.6;
 const terminal_font_weight: u32 = 400;
+const terminal_background_rgb: u32 = 0x000A0C0B;
+const terminal_background_opacity: f32 = 0.80;
+const terminal_padding_points: f32 = 2.0;
 
 fn terminalFontConfig() c.winghostty_font_config {
     var config: c.winghostty_font_config = undefined;
@@ -62,6 +65,31 @@ fn applyTerminalFontConfig(surface: *c.winghostty_surface) !void {
     try applyTerminalFontConfigWith(surface, c.winghostty_surface_set_font_config);
 }
 
+fn terminalAppearanceConfig() c.winghostty_appearance_config {
+    var config: c.winghostty_appearance_config = undefined;
+    c.winghostty_appearance_config_init(&config);
+    config.background_rgb = terminal_background_rgb;
+    config.background_opacity = terminal_background_opacity;
+    config.padding_top = terminal_padding_points;
+    config.padding_right = terminal_padding_points;
+    config.padding_bottom = terminal_padding_points;
+    config.padding_left = terminal_padding_points;
+    return config;
+}
+
+fn applyTerminalAppearanceConfigWith(
+    surface: *c.winghostty_surface,
+    comptime set_appearance_config: anytype,
+) !void {
+    var config = terminalAppearanceConfig();
+    if (set_appearance_config(surface, &config) != c.WINGHOSTTY_OK)
+        return error.WinghosttyAppearanceConfigFailed;
+}
+
+fn applyTerminalAppearanceConfig(surface: *c.winghostty_surface) !void {
+    try applyTerminalAppearanceConfigWith(surface, c.winghostty_surface_set_appearance_config);
+}
+
 const GridSize = struct {
     cols: u16,
     rows: u16,
@@ -87,6 +115,26 @@ fn gridSizeForBounds(
         .cols = @intCast(cols),
         .rows = @intCast(row_count),
     };
+}
+
+fn gridSizeForTerminalBounds(
+    width: u32,
+    height: u32,
+    metrics: c.winghostty_cell_metrics,
+    dpi: u32,
+) error{GridTooLarge}!GridSize {
+    if (width == 0 or height == 0) return gridSizeForBounds(width, height, metrics);
+    const padding: u32 = @intCast(Dpi.scale(
+        @intFromFloat(terminal_padding_points),
+        dpi,
+    ));
+    const horizontal_padding = @min(@as(u64, padding) * 2, @as(u64, width - 1));
+    const vertical_padding = @min(@as(u64, padding) * 2, @as(u64, height - 1));
+    return gridSizeForBounds(
+        width - @as(u32, @intCast(horizontal_padding)),
+        height - @as(u32, @intCast(vertical_padding)),
+        metrics,
+    );
 }
 
 fn resizedCellBuffer(
@@ -178,8 +226,17 @@ fn paneBounds(
     const horizontal = direction == .horizontal;
     const available_height = height - tab_bar_height;
     const span = if (horizontal) width else available_height;
-    const first = @divTrunc(@as(i64, span) * @as(i64, @intCast(position)), @as(i64, @intCast(pane_count)));
-    const next = @divTrunc(@as(i64, span) * @as(i64, @intCast(position + 1)), @as(i64, @intCast(pane_count)));
+    const divider_pixels: i64 = Dpi.scale(1, dpi);
+    const divider_total = divider_pixels * @as(i64, @intCast(pane_count - 1));
+    const available_span: i64 = span;
+    if (available_span <= divider_total) {
+        return .{ .x = origin_x, .y = origin_y, .width = 0, .height = 0 };
+    }
+    const content_span = available_span - divider_total;
+    const first = @divTrunc(content_span * @as(i64, @intCast(position)), @as(i64, @intCast(pane_count))) +
+        divider_pixels * @as(i64, @intCast(position));
+    const next = @divTrunc(content_span * @as(i64, @intCast(position + 1)), @as(i64, @intCast(pane_count))) +
+        divider_pixels * @as(i64, @intCast(position));
     const pane_width = if (horizontal) next - first else width;
     // LoopWorkspaceView.swift:318-331 puts a header inside each split-tree leaf,
     // including vertically stacked panes, rather than reserving one per tab.
@@ -191,6 +248,38 @@ fn paneBounds(
         .y = origin_y + tab_bar_height + pane_header_height + if (horizontal) @as(i32, 0) else @as(i32, @intCast(first)),
         .width = @intCast(pane_width),
         .height = @intCast(pane_height),
+    };
+}
+
+fn paneDividerBounds(
+    origin_x: i32,
+    origin_y: i32,
+    width: i32,
+    height: i32,
+    dpi: u32,
+    direction: WorkspaceLayout.Direction,
+    position: usize,
+    pane_count: usize,
+) ?c.RECT {
+    if (position + 1 >= pane_count) return null;
+    const pane = paneBounds(origin_x, origin_y, width, height, dpi, direction, position, pane_count);
+    if (pane.width == 0 or pane.height == 0) return null;
+    const divider = Dpi.scale(1, dpi);
+    if (direction == .horizontal) {
+        const left = pane.x + @as(i32, @intCast(pane.width));
+        return .{
+            .left = left,
+            .top = origin_y + Dpi.scale(Tokens.tab_bar_height, dpi),
+            .right = left + divider,
+            .bottom = origin_y + height,
+        };
+    }
+    const top = pane.y + @as(i32, @intCast(pane.height));
+    return .{
+        .left = origin_x,
+        .top = top,
+        .right = origin_x + width,
+        .bottom = top + divider,
     };
 }
 
@@ -1626,6 +1715,10 @@ pub const Workspace = struct {
             self.destroySurface(index);
             return err;
         };
+        applyTerminalAppearanceConfig(self.surfaces[index].surface.?) catch |err| {
+            self.destroySurface(index);
+            return err;
+        };
 
         self.surfaces[index].destroyed = false;
         self.surfaces[index].destroying = false;
@@ -1788,6 +1881,10 @@ pub const Workspace = struct {
             return error.WinghosttySurfaceCreateFailed;
         }
         applyTerminalFontConfig(self.surfaces[index].surface.?) catch |err| {
+            self.destroySurface(index);
+            return err;
+        };
+        applyTerminalAppearanceConfig(self.surfaces[index].surface.?) catch |err| {
             self.destroySurface(index);
             return err;
         };
@@ -2406,8 +2503,19 @@ pub const Workspace = struct {
             paintChromeGlyph(hdc, bounds, chromeGlyph(index), self.dpi);
         }
         const selected = self.layout.selectedConst() orelse return;
-        for (selected.panes.items, 0..) |_, position|
+        for (selected.panes.items, 0..) |_, position| {
             if (self.paneHeaderChrome(position)) |header| paintPaneHeader(hdc, header, self.dpi);
+            if (paneDividerBounds(
+                self.layout_origin_x,
+                self.layout_origin_y,
+                self.layout_width,
+                self.layout_height,
+                self.dpi,
+                selected.split_direction,
+                position,
+                selected.panes.items.len,
+            )) |divider| fillRect(hdc, divider, Tokens.canvas_grid_line);
+        }
     }
 
     pub fn paintLoopBar(
@@ -2709,7 +2817,7 @@ pub const Workspace = struct {
                 position,
                 tab.panes.items.len,
             );
-            return gridSizeForBounds(bounds.width, bounds.height, metrics);
+            return gridSizeForTerminalBounds(bounds.width, bounds.height, metrics, self.dpi);
         }
         return self.workspaceGridSize();
     }
@@ -2725,7 +2833,7 @@ pub const Workspace = struct {
             0,
             1,
         );
-        return gridSizeForBounds(bounds.width, bounds.height, self.fallbackCellMetrics());
+        return gridSizeForTerminalBounds(bounds.width, bounds.height, self.fallbackCellMetrics(), self.dpi);
     }
 
     fn splitGridSize(self: *const Workspace, direction: WorkspaceLayout.Direction) !GridSize {
@@ -2742,7 +2850,7 @@ pub const Workspace = struct {
             position,
             count,
         );
-        return gridSizeForBounds(bounds.width, bounds.height, self.fallbackCellMetrics());
+        return gridSizeForTerminalBounds(bounds.width, bounds.height, self.fallbackCellMetrics(), self.dpi);
     }
 
     fn resizeSurfaceGrid(self: *Workspace, index: usize, size: GridSize) !void {
@@ -2767,7 +2875,12 @@ pub const Workspace = struct {
     fn syncPaneGrid(self: *Workspace, index: usize, bounds: c.winghostty_rect, comptime resize_grid: anytype) void {
         if (bounds.width == 0 or bounds.height == 0) return;
         const slot = &self.surfaces[index];
-        const requested_size = gridSizeForBounds(bounds.width, bounds.height, slot.cell_metrics) catch |err| {
+        const requested_size = gridSizeForTerminalBounds(
+            bounds.width,
+            bounds.height,
+            slot.cell_metrics,
+            self.dpi,
+        ) catch |err| {
             std.debug.print("Terminal grid bounds rejected pane={d} error={s}\n", .{
                 index,
                 @errorName(err),
@@ -7550,6 +7663,45 @@ test "terminal font config application reports provider refusal" {
     try std.testing.expectEqual(@as(usize, 2), Probe.calls);
 }
 
+test "terminal appearance config matches macOS background and padding" {
+    const config = terminalAppearanceConfig();
+
+    try std.testing.expectEqual(@as(u32, 0x000A0C0B), config.background_rgb);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.80), config.background_opacity, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), config.padding_top, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), config.padding_right, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), config.padding_bottom, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), config.padding_left, 0.0001);
+}
+
+test "terminal appearance config application reports provider refusal" {
+    const Probe = struct {
+        var calls: usize = 0;
+        var result: c.winghostty_result = c.WINGHOSTTY_OK;
+
+        fn set(
+            _: *c.winghostty_surface,
+            _: *const c.winghostty_appearance_config,
+        ) callconv(.c) c.winghostty_result {
+            calls += 1;
+            return result;
+        }
+    };
+    const surface: *c.winghostty_surface = @ptrFromInt(0x1000);
+
+    Probe.calls = 0;
+    Probe.result = c.WINGHOSTTY_OK;
+    try applyTerminalAppearanceConfigWith(surface, Probe.set);
+    try std.testing.expectEqual(@as(usize, 1), Probe.calls);
+
+    Probe.result = c.WINGHOSTTY_INVALID_ARGUMENT;
+    try std.testing.expectError(
+        error.WinghosttyAppearanceConfigFailed,
+        applyTerminalAppearanceConfigWith(surface, Probe.set),
+    );
+    try std.testing.expectEqual(@as(usize, 2), Probe.calls);
+}
+
 fn fillRect(hdc: c.HDC, bounds: c.RECT, color: u32) void {
     const brush = c.CreateSolidBrush(color);
     if (brush == null) return;
@@ -8188,7 +8340,8 @@ test "workspace chrome vertical splits reserve a header above every terminal" {
         for (0..count) |position| {
             const bounds = paneBounds(10, 20, 801, 401, Dpi.base_dpi, .vertical, position, count);
             try std.testing.expect(bounds.width > 0 and bounds.height > 0);
-            try std.testing.expectEqual(previous_bottom, bounds.y - Tokens.pane_header_height);
+            const divider = if (position == 0) 0 else Dpi.scale(1, Dpi.base_dpi);
+            try std.testing.expectEqual(previous_bottom + divider, bounds.y - Tokens.pane_header_height);
             previous_bottom = bounds.y + @as(i32, @intCast(bounds.height));
         }
         try std.testing.expectEqual(@as(i32, 421), previous_bottom);
@@ -8771,7 +8924,10 @@ test "workspace chrome pane headers follow selected layout and focus instead of 
     try std.testing.expect(!left.focused and right.focused);
     try std.testing.expectEqual(@as(i32, 220), left.bounds.left);
     try std.testing.expectEqual(@as(i32, 620), left.bounds.right);
-    try std.testing.expectEqual(left.bounds.right, right.bounds.left);
+    try std.testing.expectEqual(left.bounds.right + Dpi.scale(1, Dpi.base_dpi), right.bounds.left);
+    const divider = paneDividerBounds(220, 80, 801, 401, Dpi.base_dpi, .horizontal, 0, 2).?;
+    try std.testing.expectEqual(left.bounds.right, divider.left);
+    try std.testing.expectEqual(right.bounds.left, divider.right);
     try std.testing.expectEqual(@as(i32, 1021), right.bounds.right);
     try std.testing.expectEqual(@as(i32, 117), left.bounds.top);
     try std.testing.expectEqual(@as(i32, Tokens.pane_header_height), left.bounds.bottom - left.bounds.top);
@@ -8860,6 +9016,24 @@ test "pane geometry derives a terminal grid from actual cell metrics" {
     try std.testing.expectEqual(GridSize{ .cols = 60, .rows = 12 }, size);
 }
 
+test "terminal grid reserves the provider's macOS padding at monitor DPI" {
+    const metrics = c.winghostty_cell_metrics{
+        .font_width = 8,
+        .font_height = 16,
+        .cell_width = 8,
+        .cell_height = 16,
+        .baseline = 13,
+    };
+    try std.testing.expectEqual(
+        GridSize{ .cols = 100, .rows = 20 },
+        try gridSizeForTerminalBounds(804, 324, metrics, 96),
+    );
+    try std.testing.expectEqual(
+        GridSize{ .cols = 99, .rows = 19 },
+        try gridSizeForTerminalBounds(804, 324, metrics, 192),
+    );
+}
+
 test "pane geometry clamps sub-cell bounds to one cell and ignores unset metrics" {
     try std.testing.expectEqual(
         GridSize{ .cols = 1, .rows = 1 },
@@ -8937,15 +9111,46 @@ test "pane attach and resize commands carry geometry outside terminal input" {
     try std.testing.expectEqualStrings("graphcode-session-a", canonical[2]);
 }
 
-test "pane bounds partition available area without losing remainder pixels" {
+test "pane bounds reserve one macOS divider point and preserve remainder pixels" {
     const left = paneBounds(10, 20, 801, 400, Dpi.base_dpi, .horizontal, 0, 2);
     const right = paneBounds(10, 20, 801, 400, Dpi.base_dpi, .horizontal, 1, 2);
     try std.testing.expectEqual(@as(i32, 10), left.x);
     try std.testing.expectEqual(@as(u32, 400), left.width);
-    try std.testing.expectEqual(@as(i32, 410), right.x);
-    try std.testing.expectEqual(@as(u32, 401), right.width);
+    try std.testing.expectEqual(@as(i32, 411), right.x);
+    try std.testing.expectEqual(@as(u32, 400), right.width);
     try std.testing.expectEqual(@as(u32, 341), left.height);
     try std.testing.expectEqual(@as(u32, 341), right.height);
+}
+
+test "vertical pane bounds reserve one macOS divider point" {
+    const top = paneBounds(10, 20, 801, 400, Dpi.base_dpi, .vertical, 0, 2);
+    const bottom = paneBounds(10, 20, 801, 400, Dpi.base_dpi, .vertical, 1, 2);
+    const available_height = 400 - Tokens.tab_bar_height;
+
+    try std.testing.expectEqual(@as(i32, 20 + Tokens.tab_bar_height + Tokens.pane_header_height), top.y);
+    try std.testing.expectEqual(@as(u32, 159), top.height);
+    try std.testing.expectEqual(top.y + @as(i32, @intCast(top.height + Tokens.pane_header_height + 1)), bottom.y);
+    try std.testing.expectEqual(@as(u32, 159), bottom.height);
+    try std.testing.expectEqual(
+        @as(u32, @intCast(available_height - 1)),
+        top.height + bottom.height + 2 * Tokens.pane_header_height,
+    );
+}
+
+test "pane divider bounds scale with DPI and remain outside child surfaces" {
+    const horizontal = paneDividerBounds(10, 20, 801, 400, Dpi.base_dpi, .horizontal, 0, 2).?;
+    const left = paneBounds(10, 20, 801, 400, Dpi.base_dpi, .horizontal, 0, 2);
+    const right = paneBounds(10, 20, 801, 400, Dpi.base_dpi, .horizontal, 1, 2);
+    try std.testing.expectEqual(left.x + @as(i32, @intCast(left.width)), horizontal.left);
+    try std.testing.expectEqual(right.x, horizontal.right);
+    try std.testing.expectEqual(@as(i32, 1), horizontal.right - horizontal.left);
+
+    const vertical = paneDividerBounds(10, 20, 801, 400, 192, .vertical, 0, 2).?;
+    const top = paneBounds(10, 20, 801, 400, 192, .vertical, 0, 2);
+    const bottom = paneBounds(10, 20, 801, 400, 192, .vertical, 1, 2);
+    try std.testing.expectEqual(top.y + @as(i32, @intCast(top.height)), vertical.top);
+    try std.testing.expectEqual(bottom.y - Dpi.scale(Tokens.pane_header_height, 192), vertical.bottom);
+    try std.testing.expectEqual(Dpi.scale(1, 192), vertical.bottom - vertical.top);
 }
 
 test "pane bounds ignore zero or unavailable client geometry" {
@@ -8997,8 +9202,8 @@ test "minimize and restore to the same pane size does not queue a resize" {
     const original = paneBounds(
         0,
         0,
-        960,
-        Tokens.tab_bar_height + Tokens.pane_header_height + 640,
+        964,
+        Tokens.tab_bar_height + Tokens.pane_header_height + 648,
         Dpi.base_dpi,
         .horizontal,
         0,
@@ -9031,11 +9236,11 @@ test "minimize and restore to a new pane size queues one resize for the new grid
         1,
     );
     workspace.syncPaneGrid(0, restored, Workspace.resizeSurfaceGridState);
-    try std.testing.expectEqual(GridSize{ .cols = 100, .rows = 20 }, workspace.surfaces[0].grid);
-    try std.testing.expectEqual(GridSize{ .cols = 100, .rows = 20 }, workspace.surfaces[0].pending_resize_size.?);
+    try std.testing.expectEqual(GridSize{ .cols = 99, .rows = 19 }, workspace.surfaces[0].grid);
+    try std.testing.expectEqual(GridSize{ .cols = 99, .rows = 19 }, workspace.surfaces[0].pending_resize_size.?);
 
     workspace.syncPaneGrid(0, restored, Workspace.resizeSurfaceGridState);
-    try std.testing.expectEqual(GridSize{ .cols = 100, .rows = 20 }, workspace.surfaces[0].pending_resize_size.?);
+    try std.testing.expectEqual(GridSize{ .cols = 99, .rows = 19 }, workspace.surfaces[0].pending_resize_size.?);
 }
 
 test "terminal grid resizing reallocates pane cells and keeps legacy output in bounds" {

@@ -6192,9 +6192,9 @@ $wireTargetingSummaries=@($wireTargetingOutput|Where-Object {
 })
 if ($wireTargetingSummaries.Count -ne 1) {throw 'RED: wire targeting count missing or duplicated'}
 $wireTargetingSummary=ConvertFrom-Json $wireTargetingSummaries[0]
-if ($wireTargetingSummary.executed -ne 56 -or $wireTargetingSummary.passed -ne 56 -or
+if ($wireTargetingSummary.executed -ne 75 -or $wireTargetingSummary.passed -ne 75 -or
     $wireTargetingSummary.failed -ne 0 -or $wireTargetingSummary.skipped -ne 0) {
-    throw 'RED: wire targeting requires all 56 contracts without skips'
+    throw 'RED: wire targeting requires all 75 contracts without skips'
 }
 $agentCommandOutput = @(& $pwsh -NoProfile -File (
     Join-Path $PSScriptRoot "Invoke-AgentCommand.Tests.ps1"))
