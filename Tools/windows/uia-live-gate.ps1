@@ -973,6 +973,244 @@ function Assert-UiaOwnedSheet(
   return $identity
 }
 
+function Test-UiaDialogSheet768Geometry($observation) {
+  $reject = {
+    param([string] $reason)
+    return [pscustomobject]@{ accepted = $false; reason = $reason }
+  }
+  if ($null -eq $observation) { return & $reject "observation-missing" }
+  if (-not ($observation.dpi -is [int] -or $observation.dpi -is [uint32] -or
+      $observation.dpi -is [long]) -or [long]$observation.dpi -le 0) {
+    return & $reject "dpi-invalid"
+  }
+  if ([long]$observation.expectedDpi -gt 0 -and
+      [long]$observation.dpi -ne [long]$observation.expectedDpi) {
+    return & $reject "dpi-mismatch"
+  }
+  foreach ($name in @("ownerBounds", "hostBounds", "hostClient", "viewportBounds", "contentBounds")) {
+    $value = $observation.$name
+    if ($null -eq $value -or @($value).Count -ne 4) { return & $reject "$name-missing" }
+    foreach ($coordinate in @($value)) {
+      $number = [double]$coordinate
+      if ([double]::IsNaN($number) -or [double]::IsInfinity($number)) {
+        return & $reject "$name-nonfinite"
+      }
+    }
+    if ([double]$value[2] -le [double]$value[0] -or
+        [double]$value[3] -le [double]$value[1]) {
+      return & $reject "$name-empty"
+    }
+  }
+  $owner = @($observation.ownerBounds)
+  $hostRect = @($observation.hostBounds)
+  $client = @($observation.hostClient)
+  $viewport = @($observation.viewportBounds)
+  $content = @($observation.contentBounds)
+  if ([Math]::Abs(([double]$client[2] - [double]$client[0]) -
+      ([double]$hostRect[2] - [double]$hostRect[0])) -gt 1 -or
+      [Math]::Abs(([double]$client[3] - [double]$client[1]) -
+      ([double]$hostRect[3] - [double]$hostRect[1])) -gt 1) {
+    return & $reject "host-client-frame-mismatch"
+  }
+  if ($hostRect[0] -lt $owner[0] -or $hostRect[1] -lt $owner[1] -or
+      $hostRect[2] -gt $owner[2] -or $hostRect[3] -gt $owner[3]) {
+    return & $reject "host-outside-owner"
+  }
+  if ($viewport[0] -lt $hostRect[0] - 1 -or $viewport[1] -lt $hostRect[1] - 1 -or
+      $viewport[2] -gt $hostRect[2] + 1 -or $viewport[3] -gt $hostRect[3] + 1) {
+    return & $reject "viewport-outside-host"
+  }
+  if ($content[0] -lt $viewport[0] - 1 -or $content[2] -gt $viewport[2] + 1 -or
+      $content[1] -gt $viewport[1] + 1 -or $content[3] -lt $viewport[3] - 1) {
+    return & $reject "content-displaced"
+  }
+  $actions = @($observation.actions)
+  if ($actions.Count -lt 2) { return & $reject "footer-actions-missing" }
+  $expectedActionIds = @($observation.expectedActionIds)
+  if ($expectedActionIds.Count -ne $actions.Count) {
+    return & $reject "footer-action-count-mismatch"
+  }
+  for ($index = 0; $index -lt $expectedActionIds.Count; $index++) {
+    if ([int]$actions[$index].id -ne [int]$expectedActionIds[$index]) {
+      return & $reject "footer-action-order-mismatch"
+    }
+  }
+  $footerTop = [int]::MaxValue
+  foreach ($action in $actions) {
+    if ($null -eq $action -or @($action.bounds).Count -ne 4) {
+      return & $reject "footer-bounds-missing"
+    }
+    if ($action.offscreen -isnot [bool] -or $action.offscreen) {
+      return & $reject "footer-offscreen"
+    }
+    $bounds = @($action.bounds)
+    if ($bounds[2] -le $bounds[0] -or $bounds[3] -le $bounds[1] -or
+        $bounds[0] -lt $hostRect[0] - 1 -or $bounds[1] -lt $hostRect[1] - 1 -or
+        $bounds[2] -gt $hostRect[2] + 1 -or $bounds[3] -gt $hostRect[3] + 1) {
+      return & $reject "footer-outside-host"
+    }
+    $footerTop = [Math]::Min($footerTop, [int]$bounds[1])
+  }
+  if ($viewport[3] -gt $footerTop + 1) { return & $reject "footer-overlaps-viewport" }
+  if ($null -ne $observation.expectedOverflow) {
+    $actualOverflow = ([double]$content[3] - [double]$content[1]) -gt
+      ([double]$viewport[3] - [double]$viewport[1]) + 1
+    if ($actualOverflow -ne [bool]$observation.expectedOverflow) {
+      return & $reject $(if ([bool]$observation.expectedOverflow) {
+          "expected-overflow-missing"
+        } else {
+          "unexpected-overflow"
+        })
+    }
+  }
+  return [pscustomobject]@{
+    accepted = $true
+    reason = "owned-geometry"
+    overflow = ([double]$content[3] - [double]$content[1]) -gt
+      ([double]$viewport[3] - [double]$viewport[1]) + 1
+  }
+}
+
+function Write-UiaDialogSheet768Observation(
+  $element,
+  [int] $processId,
+  [IntPtr] $owner,
+  [string] $title,
+  [string] $contentClass,
+  [int[]] $actionIds,
+  [string] $surface,
+  [string] $state,
+  [Nullable[bool]] $expectedOverflow = $null,
+  [long] $expectedDpi = 0
+) {
+  $identity = Assert-UiaOwnedSheet $element $processId $owner $title $contentClass `
+    "$surface $state"
+  $sheetHandle = [IntPtr]$element.Current.NativeWindowHandle
+  $directChildren = @($element.FindAll(
+    [System.Windows.Automation.TreeScope]::Children,
+    [System.Windows.Automation.Condition]::TrueCondition
+  ))
+  $viewportElements = @($directChildren | Where-Object {
+    $handle = [IntPtr]$_.Current.NativeWindowHandle
+    $handle -ne [IntPtr]::Zero -and
+      [GraphCodeUiaGateState]::WindowClass($handle) -ceq "GraphCodeSheetViewport"
+  })
+  Require ($viewportElements.Count -eq 1) `
+    "$surface $state did not expose exactly one direct GraphCodeSheetViewport child"
+  $viewport = [IntPtr]$viewportElements[0].Current.NativeWindowHandle
+  Require ([GraphCodeUiaGateState]::WindowProcessId($viewport) -eq $processId -and
+    [GraphCodeUiaGateState]::IsDirectChild($sheetHandle, $viewport)) `
+    "$surface $state viewport lost exact native host ownership"
+  $contentElements = @($viewportElements[0].FindAll(
+    [System.Windows.Automation.TreeScope]::Children,
+    [System.Windows.Automation.Condition]::TrueCondition
+  ) | Where-Object {
+    $handle = [IntPtr]$_.Current.NativeWindowHandle
+    $handle -ne [IntPtr]::Zero -and
+      [GraphCodeUiaGateState]::WindowClass($handle) -ceq $contentClass
+  })
+  Require ($contentElements.Count -eq 1) `
+    "$surface $state did not expose exactly one direct $contentClass content child"
+  $content = [IntPtr]$contentElements[0].Current.NativeWindowHandle
+  Require ([GraphCodeUiaGateState]::WindowProcessId($content) -eq $processId -and
+    [GraphCodeUiaGateState]::IsDirectChild($viewport, $content)) `
+    "$surface $state content lost exact native viewport ownership"
+  $actions = [Collections.Generic.List[object]]::new()
+  foreach ($id in $actionIds) {
+    $matches = @($directChildren | Where-Object {
+      $handle = [IntPtr]$_.Current.NativeWindowHandle
+      $handle -ne [IntPtr]::Zero -and
+        [GraphCodeUiaGateState]::ControlIdOf($handle) -eq $id
+    })
+    Require ($matches.Count -eq 1) `
+      "$surface $state did not expose footer action $id exactly once as a direct host child"
+    $actionHandle = [IntPtr]$matches[0].Current.NativeWindowHandle
+    Require ([GraphCodeUiaGateState]::WindowProcessId($actionHandle) -eq $processId) `
+      "$surface $state footer action $id changed process ownership"
+    $actions.Add([ordered]@{
+      id = $id
+      handle = $actionHandle.ToInt64()
+      name = [string]$matches[0].Current.Name
+      enabled = [bool]$matches[0].Current.IsEnabled
+      offscreen = [bool]$matches[0].Current.IsOffscreen
+      bounds = @([GraphCodeUiaGateState]::WindowBounds($actionHandle))
+    })
+  }
+  $hostSnapshot = [CapNative]::WindowSnapshot($sheetHandle, $processId)
+  $ownerSnapshot = [CapNative]::WindowSnapshot($owner, $processId)
+  $observation = [ordered]@{
+    expectedActionIds = @($actionIds)
+    expectedDpi = $expectedDpi
+    expectedOverflow = $expectedOverflow
+    dpi = [long]$hostSnapshot.Dpi
+    ownerBounds = @([GraphCodeUiaGateState]::WindowBounds($owner))
+    hostBounds = @($hostSnapshot.OuterBounds)
+    hostClient = @($hostSnapshot.ClientBounds)
+    viewportBounds = @([GraphCodeUiaGateState]::WindowBounds($viewport))
+    contentBounds = @([GraphCodeUiaGateState]::WindowBounds($content))
+    actions = $actions.ToArray()
+  }
+  $geometry = Test-UiaDialogSheet768Geometry $observation
+  Require $geometry.accepted `
+    "$surface $state geometry rejected: $($geometry.reason); observation=$($observation | ConvertTo-Json -Depth 6 -Compress)"
+  Require ($ownerSnapshot.Dpi -eq $hostSnapshot.Dpi) `
+    "$surface $state crossed owner/sheet DPI values $($ownerSnapshot.Dpi)/$($hostSnapshot.Dpi)"
+  Require ($null -ne $script:uiaAttributionDirectory -and
+    (Test-Path -LiteralPath $script:uiaAttributionDirectory -PathType Container)) `
+    "$surface $state has no owned capture directory"
+  $stem = ("768-{0}-{1}" -f $surface, $state) -replace '[^A-Za-z0-9]+', '-'
+  $sheetPath = Assert-UiaSandboxPath $script:uiaAttributionDirectory `
+    (Join-Path $script:uiaAttributionDirectory "$stem-sheet.png")
+  $ownerPath = Assert-UiaSandboxPath $script:uiaAttributionDirectory `
+    (Join-Path $script:uiaAttributionDirectory "$stem-owner.png")
+  $sheetCapture = Save-UiaShellWindowCapture $sheetHandle $sheetPath
+  $ownerCapture = Save-UiaShellWindowCapture $owner $ownerPath
+  Require ($sheetCapture -ceq "saved" -and $ownerCapture -ceq "saved") `
+    "$surface $state PrintWindow capture failed: sheet=$sheetCapture owner=$ownerCapture"
+  $sheetFile = Get-Item -LiteralPath $sheetPath -ErrorAction Stop
+  $ownerFile = Get-Item -LiteralPath $ownerPath -ErrorAction Stop
+  Require ($sheetFile.Length -gt 0 -and $ownerFile.Length -gt 0) `
+    "$surface $state produced an empty PrintWindow capture"
+  $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
+  $record = [ordered]@{
+    schemaVersion = 1
+    surface = $surface
+    state = $state
+    identity = $identity
+    hierarchy = [ordered]@{
+      host = $sheetHandle.ToInt64()
+      viewport = $viewport.ToInt64()
+      content = $content.ToInt64()
+      contentClass = $contentClass
+    }
+    geometry = $observation
+    geometryDecision = $geometry
+    captures = [ordered]@{
+      owner = [ordered]@{
+        path = $ownerFile.FullName
+        bytes = $ownerFile.Length
+        sha256 = (Get-FileHash -LiteralPath $ownerPath -Algorithm SHA256).Hash
+      }
+      sheet = [ordered]@{
+        path = $sheetFile.FullName
+        bytes = $sheetFile.Length
+        sha256 = (Get-FileHash -LiteralPath $sheetPath -Algorithm SHA256).Hash
+      }
+    }
+    sources = [ordered]@{
+      framework = (Get-FileHash (Join-Path $repoRoot `
+        "graphcode-windows\src\SheetFramework.zig") -Algorithm SHA256).Hash
+      nativeDialogs = (Get-FileHash (Join-Path $repoRoot `
+        "graphcode-windows\src\WindowsNativeDialogs.zig") -Algorithm SHA256).Hash
+      nativeForms = (Get-FileHash (Join-Path $repoRoot `
+        "graphcode-windows\src\NativeForms.zig") -Algorithm SHA256).Hash
+    }
+  }
+  $json = $record | ConvertTo-Json -Depth 10 -Compress
+  Write-Host ("UIA_DIALOG_SHEET_768_EVIDENCE=" + $json)
+  return $record
+}
+
 function Wait-UiaOwnedSheetByContentClass(
   [int] $processId,
   [IntPtr] $owner,
@@ -6784,6 +7022,20 @@ try {
   $sidebarNodeForm = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
     "GraphCodeNativeForm" "Create or edit node" "project-row New Loop node form"
   Require ($null -ne $sidebarNodeForm) "project-row New Loop did not open the node form"
+  Require ([GraphCodeUiaGateState]::PostCommand(
+    [IntPtr]$sidebarNodeForm.Current.NativeWindowHandle, 9604
+  )) "New Loop sheet rejected the Main type command"
+  Start-Sleep -Milliseconds 150
+  $null = Write-UiaDialogSheet768Observation $sidebarNodeForm $process.Id $shellWindow `
+    "Create or edit node" "GraphCodeNativeForm" @(2, 1) `
+    "new-loop" "main-no-overflow" $false
+  Require ([GraphCodeUiaGateState]::PostCommand(
+    [IntPtr]$sidebarNodeForm.Current.NativeWindowHandle, 9602
+  )) "New Loop sheet rejected the Goal type command"
+  Start-Sleep -Milliseconds 150
+  $null = Write-UiaDialogSheet768Observation $sidebarNodeForm $process.Id $shellWindow `
+    "Create or edit node" "GraphCodeNativeForm" @(2, 1) `
+    "new-loop" "goal-overflow" $true
   $templatesButton = $sidebarNodeForm.FindFirst(
     [System.Windows.Automation.TreeScope]::Descendants,
     (New-Object System.Windows.Automation.PropertyCondition(
@@ -8973,6 +9225,9 @@ try {
   Require ($null -ne $renameDialog) "Rename command did not open its native sheet"
   $renameSheetIdentity = Assert-UiaOwnedSheet $renameDialog $process.Id $shellWindow `
     $fixtureRenameTitle "GraphCodeWindowsDialogContent" "Rename fixture sheet"
+  $null = Write-UiaDialogSheet768Observation $renameDialog $process.Id $shellWindow `
+    $fixtureRenameTitle "GraphCodeWindowsDialogContent" @(9808, 9800) `
+    "rename-loop" "initial" $false
   $renameGraphBefore = @(Get-DirectChildren $graph $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -eq "UIA loop A"
   })
@@ -9122,6 +9377,9 @@ try {
   Require ($null -ne $deleteLoopDialog) "Delete Loop did not open its custom sheet"
   $deleteLoopIdentity = Assert-UiaOwnedSheet $deleteLoopDialog $process.Id $shellWindow `
     $deleteLoopTitle "GraphCodeWindowsDialogContent" "Delete Loop custom sheet"
+  $null = Write-UiaDialogSheet768Observation $deleteLoopDialog $process.Id $shellWindow `
+    $deleteLoopTitle "GraphCodeWindowsDialogContent" @(9808, 9800) `
+    "delete-loop" "confirmation" $false
   $deleteLoopElements = @($deleteLoopDialog.FindAll(
     [System.Windows.Automation.TreeScope]::Descendants,
     [System.Windows.Automation.Condition]::TrueCondition

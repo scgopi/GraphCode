@@ -534,6 +534,9 @@ public static class GraphCodeUiaGateState {
     return parent != IntPtr.Zero && control != IntPtr.Zero &&
       GetDlgCtrlID(control) == controlId && GetAncestor(control, 2) == parent;
   }
+  public static bool IsDirectChild(IntPtr parent, IntPtr child) {
+    return parent != IntPtr.Zero && child != IntPtr.Zero && GetAncestor(child, 1) == parent;
+  }
   public static int ControlIdOf(IntPtr control) {
     return control == IntPtr.Zero ? 0 : GetDlgCtrlID(control);
   }
