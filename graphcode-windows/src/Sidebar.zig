@@ -430,9 +430,12 @@ const footer_status_extent: i32 = 58;
 const footer_error_extent: i32 = 50;
 const footer_update_extent: i32 = 58;
 const status_line_height: i32 = 20;
+pub const workspace_footer_height: i32 = 36;
 
-/// Height the sidebar footer (status line, optional update banner, optional error footer)
-/// takes from the bottom of the sidebar. Scrolling content never extends into it.
+/// Height the sidebar footer (status line plus the workspace row, optional update banner,
+/// optional error footer) takes from the bottom of the sidebar. The existing 58 px status
+/// extent already contains the 36 px workspace row and leaves a small gap above it.
+/// Scrolling content never extends into it.
 pub fn footerReserve(has_update: bool, has_error: bool) i32 {
     return footer_status_extent +
         (if (has_error) footer_error_extent else 0) +
@@ -450,8 +453,8 @@ pub const Footer = struct {
 };
 
 /// The footer parts that fit while still leaving `min_content_region` of scrolling content. On a
-/// short viewport the error footer collapses first, then the update banner; the status line is
-/// the footer's floor. The same result drives drawing, hit testing, and UIA, so a collapsed
+/// short viewport the error footer collapses first, then the update banner; the status/workspace
+/// floor remains. The same result drives drawing, hit testing, and UIA, so a collapsed
 /// part is neither painted nor published nor clickable.
 pub fn effectiveFooter(viewport_bottom: i32, has_update: bool, has_error: bool) Footer {
     var footer = Footer{ .update = has_update, .ingress = has_error };
@@ -475,6 +478,49 @@ pub fn contentViewportBottom(viewport_bottom: i32, has_update: bool, has_error: 
 pub fn statusTextRect(viewport_bottom: i32, has_update: bool, has_error: bool) c.RECT {
     const top = viewport_bottom - footerReserve(has_update, has_error);
     return rect(18, top, Tokens.sidebar_width - 10, top + status_line_height);
+}
+
+pub fn workspaceFooterRect(viewport_bottom: i32) c.RECT {
+    return rect(0, viewport_bottom - workspace_footer_height, Tokens.sidebar_width, viewport_bottom);
+}
+
+pub fn workspaceFooterAt(x: i32, y: i32, viewport_bottom: i32) bool {
+    const bounds = workspaceFooterRect(viewport_bottom);
+    return x >= bounds.left and x < bounds.right and y >= bounds.top and y < bounds.bottom;
+}
+
+pub fn drawWorkspaceFooter(
+    hdc: c.HDC,
+    viewport_bottom: i32,
+    workspace_name: []const u8,
+    allocator: std.mem.Allocator,
+) void {
+    const bounds = workspaceFooterRect(viewport_bottom);
+    fill(hdc, bounds, Tokens.workspace_rail);
+
+    const divider = c.CreatePen(c.PS_SOLID, 1, 0x00343333) orelse return;
+    defer _ = c.DeleteObject(divider);
+    const previous_pen = c.SelectObject(hdc, divider);
+    _ = c.MoveToEx(hdc, bounds.left, bounds.top, null);
+    _ = c.LineTo(hdc, bounds.right, bounds.top);
+    _ = c.SelectObject(hdc, previous_pen);
+
+    drawOutlineIcon(
+        hdc,
+        .workspace,
+        rect(12, bounds.top + 10, 28, bounds.top + 26),
+        0x008E8E93,
+    );
+    drawTextRect(
+        hdc,
+        allocator,
+        workspace_name,
+        rect(34, bounds.top + 6, bounds.right - 30, bounds.bottom - 6),
+        13,
+        0x00CCCCCC,
+        c.DT_LEFT | c.DT_SINGLELINE | c.DT_VCENTER | c.DT_END_ELLIPSIS | c.DT_NOPREFIX,
+    );
+    drawWorkspaceChevrons(hdc, rect(bounds.right - 24, bounds.top + 10, bounds.right - 12, bounds.top + 26), 0x006A6A70);
 }
 
 pub fn chatsLabelRect(row_top: i32) c.RECT {
@@ -2850,6 +2896,43 @@ test "sidebar footer reserve keeps content, status text, banner, and error foote
     try std.testing.expectEqual(@as(i32, Tokens.header_height), contentViewportBottom(100, true, true));
 }
 
+test "sidebar workspace footer paints named control inside the reserved rail bottom" {
+    var bitmap = try TestSidebarBitmap.init();
+    defer bitmap.deinit();
+    fill(bitmap.hdc, rect(0, 0, Tokens.sidebar_width, 800), Tokens.workspace_rail);
+
+    const viewport_bottom: i32 = 800;
+    const bounds = workspaceFooterRect(viewport_bottom);
+    try std.testing.expectEqual(@as(i32, viewport_bottom - workspace_footer_height), bounds.top);
+    try std.testing.expectEqual(@as(i32, Tokens.sidebar_width), bounds.right);
+    try std.testing.expect(workspaceFooterAt(bounds.left, bounds.top, viewport_bottom));
+    try std.testing.expect(!workspaceFooterAt(bounds.right, bounds.top, viewport_bottom));
+    try std.testing.expect(statusTextRect(viewport_bottom, false, false).bottom <= bounds.top);
+    for ([_]bool{ false, true }) |has_update| for ([_]bool{ false, true }) |has_error| {
+        const footer = effectiveFooter(viewport_bottom, has_update, has_error);
+        const status = statusTextRect(viewport_bottom, footer.update, footer.ingress);
+        try std.testing.expect(status.bottom <= bounds.top);
+        if (footer.update) {
+            try std.testing.expect(updateBannerRect(viewport_bottom, footer.ingress).bottom <= bounds.top);
+        }
+        if (footer.ingress) {
+            try std.testing.expect(errorFooterRect(viewport_bottom).bottom <= bounds.top);
+        }
+    };
+
+    drawWorkspaceFooter(bitmap.hdc, viewport_bottom, "Fixture Workspace", std.testing.allocator);
+
+    var changed: usize = 0;
+    var y = bounds.top;
+    while (y < bounds.bottom) : (y += 1) {
+        var x = bounds.left;
+        while (x < bounds.right) : (x += 1) {
+            if (c.GetPixel(bitmap.hdc, x, y) != Tokens.workspace_rail) changed += 1;
+        }
+    }
+    try std.testing.expect(changed >= 24);
+}
+
 test "sidebar rows beneath the update banner are neither hit nor counted as visible" {
     var model = GraphModel.Model.init(std.testing.allocator);
     defer model.deinit();
@@ -3134,7 +3217,7 @@ fn measuredWidth(hdc: c.HDC, label: []const u8) !i32 {
     return size.cx;
 }
 
-const SidebarIcon = enum { graph, local_folder, remote_folder, chat };
+const SidebarIcon = enum { graph, local_folder, remote_folder, chat, workspace };
 
 fn drawOutlineIcon(hdc: c.HDC, icon: SidebarIcon, bounds: c.RECT, color: u32) void {
     const pen = c.CreatePen(c.PS_SOLID, 1, color) orelse return;
@@ -3179,10 +3262,37 @@ fn drawOutlineIcon(hdc: c.HDC, icon: SidebarIcon, bounds: c.RECT, color: u32) vo
             _ = c.MoveToEx(hdc, bounds.left + 12, bounds.top + 13, null);
             _ = c.LineTo(hdc, bounds.left + 14, bounds.bottom);
         },
+        .workspace => {
+            _ = c.Rectangle(hdc, bounds.left + 2, bounds.top + 7, bounds.right - 1, bounds.bottom - 1);
+            _ = c.MoveToEx(hdc, bounds.left + 4, bounds.top + 7, null);
+            _ = c.LineTo(hdc, bounds.left + 4, bounds.top + 4);
+            _ = c.LineTo(hdc, bounds.right - 3, bounds.top + 4);
+            _ = c.LineTo(hdc, bounds.right - 3, bounds.top + 7);
+            _ = c.MoveToEx(hdc, bounds.left + 6, bounds.top + 4, null);
+            _ = c.LineTo(hdc, bounds.left + 6, bounds.top + 1);
+            _ = c.LineTo(hdc, bounds.right - 5, bounds.top + 1);
+            _ = c.LineTo(hdc, bounds.right - 5, bounds.top + 4);
+        },
     }
     _ = c.SelectObject(hdc, previous_brush);
     _ = c.SelectObject(hdc, previous_pen);
     _ = c.DeleteObject(pen);
+}
+
+fn drawWorkspaceChevrons(hdc: c.HDC, bounds: c.RECT, color: u32) void {
+    const pen = c.CreatePen(c.PS_SOLID, 1, color) orelse return;
+    defer _ = c.DeleteObject(pen);
+    const previous = c.SelectObject(hdc, pen);
+    const x = @divTrunc(bounds.left + bounds.right, 2);
+    const upper_y = bounds.top + 5;
+    const lower_y = bounds.bottom - 5;
+    _ = c.MoveToEx(hdc, x - 3, upper_y + 2, null);
+    _ = c.LineTo(hdc, x, upper_y - 1);
+    _ = c.LineTo(hdc, x + 3, upper_y + 2);
+    _ = c.MoveToEx(hdc, x - 3, lower_y - 2, null);
+    _ = c.LineTo(hdc, x, lower_y + 1);
+    _ = c.LineTo(hdc, x + 3, lower_y - 2);
+    _ = c.SelectObject(hdc, previous);
 }
 
 fn drawPlusIcon(hdc: c.HDC, bounds: c.RECT, color: u32) void {
