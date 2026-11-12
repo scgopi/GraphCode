@@ -331,7 +331,11 @@ public sealed class NativeUiSuite : IValidationSuite
             IntPtr viewport = Create("GraphCodeSheetViewport", prompt);
             IntPtr content = Create("GraphCodeWindowsDialogContent", viewport);
             IntPtr edit = Create("EDIT", content, 9904);
-            Lookup("ui.native.lookup.named-direct-viewport", prompt, 9904, edit);
+            Check("ui.native.lookup.named-direct-viewport", () => ActivationCases.Require(
+                GraphCodeUiaGateState.ControlById(prompt, 9904) == edit &&
+                    GraphCodeUiaGateState.IsDirectChild(prompt, viewport) &&
+                    GraphCodeUiaGateState.IsDirectChild(viewport, content),
+                "RED: prompt lookup or native direct-child ownership differs"));
             Check("ui.native.lookup.hidden-write-read", () => ActivationCases.Require(
                 !PromptLookupFixture.IsWindowVisible(prompt) &&
                 GraphCodeUiaGateState.SetEditTextById(prompt, 9904, "owned fixture") &&
@@ -366,7 +370,10 @@ public sealed class NativeUiSuite : IValidationSuite
             IntPtr deepViewport = Create("GraphCodeSheetViewport", wrapper);
             IntPtr deepContent = Create("GraphCodeWindowsDialogContent", deepViewport);
             Create("EDIT", deepContent, 9904);
-            Lookup("ui.native.lookup.direct-viewport-required", deepRoot, 9904, IntPtr.Zero);
+            Check("ui.native.lookup.direct-viewport-required", () => ActivationCases.Require(
+                GraphCodeUiaGateState.ControlById(deepRoot, 9904) == IntPtr.Zero &&
+                    !GraphCodeUiaGateState.IsDirectChild(deepRoot, deepViewport),
+                "RED: prompt lookup accepted a viewport below the required direct child"));
             IntPtr nativeRoot = NewRoot("GraphCodeSheetHost");
             IntPtr nativeViewport = Create("GraphCodeSheetViewport", nativeRoot);
             IntPtr nativeContent = Create("GraphCodeNativeForm", nativeViewport);
