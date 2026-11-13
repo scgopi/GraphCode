@@ -9464,15 +9464,22 @@ try {
   }) | Select-Object -First 1
   Require ($null -ne $deleteLoopItem) `
     "Delete Loop context menu omitted its enabled Delete action: $(Format-PopupMenuItems $deleteLoopItems)"
-  $deleteLoopClick = [GraphCodeUiaGateState]::ClickPopupMenuItem(
-    $deleteLoopPopup, $shellWindow, [int]$deleteLoopItem.Position, [int]$deleteLoopItem.Id, [uint32]$process.Id
+  $deleteLoopClick = [GraphCodeUiaGateState]::ClickPopupMenuItemForModal(
+    $deleteLoopPopup, $shellWindow, [int]$deleteLoopItem.Position, [int]$deleteLoopItem.Id,
+    [uint32]$process.Id, $deleteLoopTitle
   )
-  Require ($null -ne $deleteLoopClick) "Delete Loop context-menu action could not be clicked"
+  Require ($null -ne $deleteLoopClick -and
+    $deleteLoopClick.Completion.ToString() -ceq "ExpectedOwnedModal" -and
+    $deleteLoopClick.ModalWindow -ne [IntPtr]::Zero) `
+    "Delete Loop context-menu action did not produce an exact owned modal"
   Write-Host ("UIA_DELETE_LOOP_MENU command=$($deleteLoopItem.Id) " +
-    "hilite=$($deleteLoopClick.Hilite) keyboardFallback=$($deleteLoopClick.UsedKeyboardFallback)")
+    "hilite=$($deleteLoopClick.Hilite) keyboardFallback=$($deleteLoopClick.UsedKeyboardFallback) " +
+    "completion=$($deleteLoopClick.Completion) modal=$($deleteLoopClick.ModalWindow)")
   $deleteLoopDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
     "GraphCodeWindowsDialogContent" $deleteLoopTitle "Delete Loop custom sheet"
   Require ($null -ne $deleteLoopDialog) "Delete Loop did not open its custom sheet"
+  Require ([IntPtr]$deleteLoopDialog.Current.NativeWindowHandle -eq $deleteLoopClick.ModalWindow) `
+    "Delete Loop custom sheet identity differs from the popup modal completion"
   $deleteLoopIdentity = Assert-UiaOwnedSheet $deleteLoopDialog $process.Id $shellWindow `
     $deleteLoopTitle "GraphCodeWindowsDialogContent" "Delete Loop custom sheet"
   $null = Write-UiaDialogSheet768Observation $deleteLoopDialog $process.Id $shellWindow `

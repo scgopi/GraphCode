@@ -141,4 +141,16 @@ Describe "Stable canvas card context menu (managed mocks only)" {
     $source | Should -Match '\$deleteLoopPopup = Open-CanvasCardContextMenu \$process \$root \$shellWindow'
     $source | Should -Not -Match 'PostContextMenu\(\$shellWindow, 3\)\)\s*`\s*"Delete Loop'
   }
+  It "requires an exact owned modal completion for the Delete Loop command" {
+    $source | Should -Match '\[GraphCodeUiaGateState\]::ClickPopupMenuItemForModal\('
+    $source | Should -Match '(?s)ClickPopupMenuItemForModal\(\s*\$deleteLoopPopup, \$shellWindow, \[int\]\$deleteLoopItem\.Position, \[int\]\$deleteLoopItem\.Id,\s*\[uint32\]\$process\.Id, \$deleteLoopTitle'
+    $source | Should -Match '\$deleteLoopClick\.Completion\.ToString\(\) -ceq "ExpectedOwnedModal"'
+    $source | Should -Match '\$deleteLoopClick\.ModalWindow -ne \[IntPtr\]::Zero'
+    $identityRequirement = '\[IntPtr\]\$deleteLoopDialog\.Current\.NativeWindowHandle -eq \$deleteLoopClick\.ModalWindow'
+    $source | Should -Match $identityRequirement
+    $source.Replace(
+      '[IntPtr]$deleteLoopDialog.Current.NativeWindowHandle -eq $deleteLoopClick.ModalWindow',
+      '[IntPtr]$deleteLoopDialog.Current.NativeWindowHandle -ne $deleteLoopClick.ModalWindow'
+    ) | Should -Not -Match $identityRequirement
+  }
 }
