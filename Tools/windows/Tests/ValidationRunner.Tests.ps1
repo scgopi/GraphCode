@@ -3795,6 +3795,7 @@ try {
     return $value.StartsWith($prefix, [StringComparison]::Ordinal)
   }
   foreach ($identity in @(
+      'header-attention:needs-you',
       'wire-node-1000000000000000001',
       'mark-entry-1000000000000000002',
       'overview-wire-node-1000000000000000003',

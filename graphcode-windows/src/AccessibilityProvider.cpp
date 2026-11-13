@@ -1354,6 +1354,8 @@ class Node final : public IRawElementProviderSimple,
   std::wstring automationIdLocked() const {
     if (isRowKey(id_)) {
       const Row &row = state_->rows.at(id_);
+      if (row.identity == "header-attention:needs-you")
+        return L"header-attention:needs-you";
       const int parent = row.parent;
       const wchar_t *prefix =
           row.identity.rfind("sidebar-section:", 0) == 0 ? L"sidebar-section-" :

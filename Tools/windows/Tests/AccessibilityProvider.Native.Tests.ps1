@@ -92,7 +92,7 @@ function Get-AccessibilityProviderNativeTestPlan([bool] $HeadlessSelection) {
     definitions = ""
     providerSource = '"%GRAPHCODE_NATIVE_PROVIDER%"'
     libraries = "oleaut32.lib uiautomationcore.lib user32.lib"
-    summary = "Native accessibility provider: 280 checks, 0 failures"
+    summary = "Native accessibility provider: 281 checks, 0 failures"
   }
 }
 $plan = Get-AccessibilityProviderNativeTestPlan ([bool]$HeadlessSelection)

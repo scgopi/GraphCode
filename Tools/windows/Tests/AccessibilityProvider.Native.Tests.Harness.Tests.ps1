@@ -27,7 +27,7 @@ foreach ($headless in @($false, $true)) {
       "Headless navigation selection: 179 checks, 0 failures")
   } else {
     @("", '"%GRAPHCODE_NATIVE_PROVIDER%"', "oleaut32.lib uiautomationcore.lib user32.lib",
-      "Native accessibility provider: 280 checks, 0 failures")
+      "Native accessibility provider: 281 checks, 0 failures")
   }
   $actual = @($plan.definitions, $plan.providerSource, $plan.libraries, $plan.summary)
   for ($index = 0; $index -lt $expected.Count; $index++) {
@@ -47,6 +47,25 @@ foreach ($literal in @(
   if (-not $nativeSource.Contains($literal)) { throw "Native compile plan is not enforced: $literal" }
   $planChecks++
 }
+function Test-NativeHeaderIdentityContract([string] $Source) {
+  $attention = 'check\(stringProperty\(attention,\s*UIA_AutomationIdPropertyId\)\s*==\s*L"header-attention:needs-you",\s*"Needs-you header exposes its exact public automation id"\);'
+  $overflow = 'check\(stringProperty\(overflow,\s*UIA_AutomationIdPropertyId\)\.rfind\(\s*L"header-overflow-",\s*0\)\s*==\s*0,\s*"header overflow exposes its stable automation id prefix"\);'
+  return $Source -match "(?s)$attention" -and $Source -match "(?s)$overflow"
+}
+$nativeCppSource = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "AccessibilityProvider.Native.Tests.cpp"))
+if (-not (Test-NativeHeaderIdentityContract $nativeCppSource)) {
+  throw "Native header checks do not independently assert Needs-you and overflow identities"
+}
+$planChecks++
+$mutatedNativeCppSource = $nativeCppSource.Replace(
+  'L"header-attention:needs-you"',
+  'L"header-attention:mutated"',
+  [StringComparison]::Ordinal)
+if ($mutatedNativeCppSource -ceq $nativeCppSource -or
+    (Test-NativeHeaderIdentityContract $mutatedNativeCppSource)) {
+  throw "Native header mutation retained the exact Needs-you identity contract"
+}
+$planChecks++
 Write-Host "Native accessibility compile plan: $planChecks checks, 0 failures (source/data only)"
 if ($PlanOnly) {
   if ($ArtifactRoot) {

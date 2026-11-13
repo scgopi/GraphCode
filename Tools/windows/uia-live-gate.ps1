@@ -4443,7 +4443,7 @@ function Read-MultiProjectMetadataProperty($element, [string] $property) {
 function Test-MultiProjectSourceSupportedChromeId([string] $identity, [string] $ownership) {
   if ($ownership -cne "owned") { return $false }
   $staticIds = @("canvas-primary-action", "zoom-out", "actual-size", "zoom-in", "fit-canvas",
-    "overview-destination", "quick-chats-destination")
+    "overview-destination", "quick-chats-destination", "header-attention:needs-you")
   $chromePrefixes = @("sidebar-section-", "project-row-", "project-new-loop-", "project-disclosure-",
     "quick-chats-header-", "quick-chat-new-", "quick-chats-disclosure-", "quick-chat-row-", "sidebar-update-banner-",
     "workspace-footer-",
