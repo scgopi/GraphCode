@@ -4518,15 +4518,19 @@ Start-Sleep -Seconds 60
       '$deleteTargetSelection.Select()',
       'Require $deleteTargetSelection.Current.IsSelected',
       'UIA_DELETE_LOOP_TARGET',
-      '[GraphCodeUiaGateState]::PostContextMenu($shellWindow, 3)',
-      '$deleteLoopPopup = Wait-ForPopupMenu $process $shellWindow "Delete Loop"',
+      '$deleteLoopPopup = Open-CanvasCardContextMenu $process $root $shellWindow',
       '$deleteLoopItems = @(Get-PopupMenuItems $deleteLoopPopup)',
       '$_.Id -eq 5103 -and $_.Enabled',
       'Require ($null -ne $deleteLoopItem)',
+      '[GraphCodeUiaGateState]::ClickPopupMenuItemForModal(',
       '$deleteLoopPopup, $shellWindow, [int]$deleteLoopItem.Position, [int]$deleteLoopItem.Id',
-      'Require ($null -ne $deleteLoopClick)',
+      '$process.Id, $deleteLoopTitle',
+      'Require ($null -ne $deleteLoopClick',
+      '$deleteLoopClick.Completion.ToString() -ceq "ExpectedOwnedModal"',
+      '$deleteLoopClick.ModalWindow -ne [IntPtr]::Zero',
       'UIA_DELETE_LOOP_MENU',
       '"GraphCodeWindowsDialogContent" $deleteLoopTitle "Delete Loop custom sheet"',
+      '[IntPtr]$deleteLoopDialog.Current.NativeWindowHandle -eq $deleteLoopClick.ModalWindow',
       '[IntPtr]$deleteLoopDialog.Current.NativeWindowHandle, 9808',
       'Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow ` "GraphCodeWindowsDialogContent") "Delete Loop custom sheet remained open after Cancel"'
     )
@@ -4539,7 +4543,7 @@ Start-Sleep -Seconds 60
     return $true
   }
   $directDeleteMutant = $uiaLiveGateSource.Replace(
-    '[GraphCodeUiaGateState]::PostContextMenu($shellWindow, 3)',
+    'Open-CanvasCardContextMenu $process $root $shellWindow',
     '[GraphCodeUiaGateState]::SendCommand($shellWindow, 5103)'
   )
   $missingItemAssertionMutant = $uiaLiveGateSource.Replace(
@@ -4547,8 +4551,16 @@ Start-Sleep -Seconds 60
     '$null = ($null -ne $deleteLoopItem)'
   )
   $wrongClickMutant = $uiaLiveGateSource.Replace(
-    '$deleteLoopPopup, $shellWindow, [int]$deleteLoopItem.Position, [int]$deleteLoopItem.Id',
-    '$deleteLoopPopup, $shellWindow, 0, 5103'
+    '$process.Id, $deleteLoopTitle',
+    '$process.Id, "Wrong Delete Loop title"'
+  )
+  $missingModalReceiptMutant = $uiaLiveGateSource.Replace(
+    '$deleteLoopClick.Completion.ToString() -ceq "ExpectedOwnedModal"',
+    '$deleteLoopClick.Completion.ToString() -ceq "PopupClosed"'
+  )
+  $replacedModalMutant = $uiaLiveGateSource.Replace(
+    '[IntPtr]$deleteLoopDialog.Current.NativeWindowHandle -eq $deleteLoopClick.ModalWindow',
+    '[IntPtr]$deleteLoopDialog.Current.NativeWindowHandle -ne $deleteLoopClick.ModalWindow'
   )
   $wrongCancelMutant = $uiaLiveGateSource.Replace(
     '[IntPtr]$deleteLoopDialog.Current.NativeWindowHandle, 9808',
@@ -4562,6 +4574,8 @@ Start-Sleep -Seconds 60
       (Test-DeleteLoopContextSource $directDeleteMutant) -or
       (Test-DeleteLoopContextSource $missingItemAssertionMutant) -or
       (Test-DeleteLoopContextSource $wrongClickMutant) -or
+      (Test-DeleteLoopContextSource $missingModalReceiptMutant) -or
+      (Test-DeleteLoopContextSource $replacedModalMutant) -or
       (Test-DeleteLoopContextSource $wrongCancelMutant) -or
       (Test-DeleteLoopContextSource $missingTeardownMutant)) {
     throw "RED: UIA Delete Loop invocation does not re-establish the stable fixture selection after Rename"

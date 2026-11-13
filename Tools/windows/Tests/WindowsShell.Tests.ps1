@@ -717,10 +717,10 @@ Invoke-Native "Shell process ownership mock contracts" {
 Invoke-Native "Stable canvas card context menu mock contracts" {
   . (Join-Path $PSScriptRoot "..\Import-PinnedPester.ps1")
   $cardMenuResults = Invoke-Pester -Path (Join-Path $PSScriptRoot "CanvasCardContextMenu.Tests.ps1") -PassThru
-  if ($cardMenuResults.TotalCount -ne 16 -or $cardMenuResults.PassedCount -ne 16 -or
+  if ($cardMenuResults.TotalCount -ne 17 -or $cardMenuResults.PassedCount -ne 17 -or
       $cardMenuResults.FailedCount -ne 0 -or $cardMenuResults.SkippedCount -ne 0 -or
       $cardMenuResults.NotRunCount -ne 0) {
-    throw "Stable canvas card context menu mock contracts did not pass all 16 unskipped cases"
+    throw "Stable canvas card context menu mock contracts did not pass all 17 unskipped cases"
   }
   Write-Host "CANVAS_CARD_CONTEXT_MENU_MOCK_CASES=$($cardMenuResults.TotalCount)"
   $global:LASTEXITCODE = 0

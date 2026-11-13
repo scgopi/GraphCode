@@ -137,8 +137,13 @@ function Confirm-DeleteContext([string] $Gate) {
     '$deleteLoopPopup = Open-CanvasCardContextMenu $process $root $shellWindow ` $renameGraphIdentity $rawWalker "Delete Loop"',
     '$deleteLoopItems = @(Get-PopupMenuItems $deleteLoopPopup)',
     '$_.Id -eq 5103 -and $_.Enabled', 'Require ($null -ne $deleteLoopItem)',
-    '$deleteLoopPopup, $shellWindow, [int]$deleteLoopItem.Position, [int]$deleteLoopItem.Id', 'Require ($null -ne $deleteLoopClick)',
+    '[GraphCodeUiaGateState]::ClickPopupMenuItemForModal(',
+    '$deleteLoopPopup, $shellWindow, [int]$deleteLoopItem.Position, [int]$deleteLoopItem.Id', '$process.Id, $deleteLoopTitle',
+    'Require ($null -ne $deleteLoopClick',
+    '$deleteLoopClick.Completion.ToString() -ceq "ExpectedOwnedModal"',
+    '$deleteLoopClick.ModalWindow -ne [IntPtr]::Zero',
     'UIA_DELETE_LOOP_MENU', '"GraphCodeWindowsDialogContent" $deleteLoopTitle "Delete Loop custom sheet"',
+    '[IntPtr]$deleteLoopDialog.Current.NativeWindowHandle -eq $deleteLoopClick.ModalWindow',
     '[IntPtr]$deleteLoopDialog.Current.NativeWindowHandle, 9808',
     'Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow ` "GraphCodeWindowsDialogContent") "Delete Loop custom sheet remained open after Cancel"')
 }
@@ -157,7 +162,9 @@ Invoke-Derived 'ui.root.source.line-6157' {
   $mutants = @(
     @('Open-CanvasCardContextMenu $process $root $shellWindow', '[GraphCodeUiaGateState]::SendCommand($shellWindow, 5103)'),
     @('Require ($null -ne $deleteLoopItem)', '$null = ($null -ne $deleteLoopItem)'),
-    @('$deleteLoopPopup, $shellWindow, [int]$deleteLoopItem.Position, [int]$deleteLoopItem.Id', '$deleteLoopPopup, $shellWindow, 0, 5103'),
+    @('$process.Id, $deleteLoopTitle', '$process.Id, "Wrong Delete Loop title"'),
+    @('$deleteLoopClick.Completion.ToString() -ceq "ExpectedOwnedModal"', '$deleteLoopClick.Completion.ToString() -ceq "PopupClosed"'),
+    @('[IntPtr]$deleteLoopDialog.Current.NativeWindowHandle -eq $deleteLoopClick.ModalWindow', '[IntPtr]$deleteLoopDialog.Current.NativeWindowHandle -ne $deleteLoopClick.ModalWindow'),
     @('[IntPtr]$deleteLoopDialog.Current.NativeWindowHandle, 9808', '[IntPtr]$deleteLoopDialog.Current.NativeWindowHandle, 7'),
     @('Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow', 'Wait-UiaOwnedSheetGoneDisabled $process.Id $shellWindow')
   )
@@ -167,7 +174,7 @@ Invoke-Derived 'ui.root.source.line-6157' {
     Assert-Derived (-not (Confirm-DeleteContext ($source.Replace($mutant[0], $mutant[1])))) 'Delete context mutant accepted'
     $checked++
   }
-  Assert-Derived ($checked -eq 5) 'Delete context mutation count changed'
+  Assert-Derived ($checked -eq 7) 'Delete context mutation count changed'
 }
 Invoke-Derived 'ui.root.source.line-6182' {
   foreach ($pattern in @('UIA_RENAME_DISPATCH', 'UIA_RENAME_INPUT', 'UIA_RENAME_OUTCOME', 'SetEditTextById',
