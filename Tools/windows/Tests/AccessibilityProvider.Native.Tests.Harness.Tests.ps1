@@ -27,7 +27,7 @@ foreach ($headless in @($false, $true)) {
       "Headless navigation selection: 179 checks, 0 failures")
   } else {
     @("", '"%GRAPHCODE_NATIVE_PROVIDER%"', "oleaut32.lib uiautomationcore.lib user32.lib",
-      "Native accessibility provider: 280 checks, 0 failures")
+      "Native accessibility provider: 281 checks, 0 failures")
   }
   $actual = @($plan.definitions, $plan.providerSource, $plan.libraries, $plan.summary)
   for ($index = 0; $index -lt $expected.Count; $index++) {

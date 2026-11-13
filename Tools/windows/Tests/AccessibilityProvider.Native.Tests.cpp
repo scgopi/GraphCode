@@ -868,23 +868,27 @@ static void nativeHeaderOverflowChecks(IRawElementProviderSimple *provider, HWND
         "header overflow provider supports fragment hit-testing");
   if (!root) return;
   const char *identity = "header-overflow:actions";
-  const char *identities[] = {identity};
-  const char *names[] = {"More actions"};
-  const int parents[] = {1};
-  const int none[] = {0};
-  const int eligible[] = {1};
-  const int invokable_flags[] = {1};
-  const int bounds[] = {444, 5, 480, 29};
+  const char *identities[] = {"header-attention:needs-you", identity};
+  const char *names[] = {"1 need you", "More actions"};
+  const int parents[] = {1, 1};
+  const int none[] = {0, 0};
+  const int eligible[] = {1, 1};
+  const int invokable_flags[] = {1, 1};
+  const int bounds[] = {300, 5, 412, 29, 444, 5, 480, 29};
   auto update = &gc_uia_update;
   check(update(provider, "Header overflow", identities, names, parents, none, eligible,
-               invokable_flags, bounds, 1, 0, 1, 0, 0, 0, 0) == S_OK,
+               invokable_flags, bounds, 2, 0, 1, 0, 0, 0, 0) == S_OK,
         "header overflow publishes");
 
   auto *projects = child(root_fragment, NavigateDirection_FirstChild);
-  auto *overflow = child(projects, NavigateDirection_FirstChild);
+  auto *attention = child(projects, NavigateDirection_FirstChild);
+  auto *overflow = child(attention, NavigateDirection_NextSibling);
   checkName(overflow, L"More actions");
-  check(stringProperty(overflow, UIA_AutomationIdPropertyId).rfind(L"header-overflow-", 0) == 0,
-        "header overflow exposes its stable automation id prefix");
+  check(stringProperty(attention, UIA_AutomationIdPropertyId) ==
+                L"header-attention:needs-you" &&
+            stringProperty(overflow, UIA_AutomationIdPropertyId).rfind(
+                L"header-overflow-", 0) == 0,
+        "Needs-you header exposes its exact public automation id while overflow stays stable");
 
   IRawElementProviderSimple *simple = nullptr;
   check(overflow && overflow->QueryInterface(IID_PPV_ARGS(&simple)) == S_OK && simple,
