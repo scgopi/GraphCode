@@ -882,13 +882,15 @@ static void nativeHeaderOverflowChecks(IRawElementProviderSimple *provider, HWND
 
   auto *projects = child(root_fragment, NavigateDirection_FirstChild);
   auto *attention = child(projects, NavigateDirection_FirstChild);
-  auto *overflow = child(attention, NavigateDirection_NextSibling);
+  IRawElementProviderFragment *overflow = nullptr;
+  if (attention) attention->Navigate(NavigateDirection_NextSibling, &overflow);
   checkName(overflow, L"More actions");
   check(stringProperty(attention, UIA_AutomationIdPropertyId) ==
-                L"header-attention:needs-you" &&
-            stringProperty(overflow, UIA_AutomationIdPropertyId).rfind(
-                L"header-overflow-", 0) == 0,
-        "Needs-you header exposes its exact public automation id while overflow stays stable");
+            L"header-attention:needs-you",
+        "Needs-you header exposes its exact public automation id");
+  check(stringProperty(overflow, UIA_AutomationIdPropertyId).rfind(
+            L"header-overflow-", 0) == 0,
+        "header overflow exposes its stable automation id prefix");
 
   IRawElementProviderSimple *simple = nullptr;
   check(overflow && overflow->QueryInterface(IID_PPV_ARGS(&simple)) == S_OK && simple,
@@ -941,6 +943,7 @@ static void nativeHeaderOverflowChecks(IRawElementProviderSimple *provider, HWND
             "header overflow wins native UIA coordinate hit-testing");
 
   if (overflow) overflow->Release();
+  if (attention) attention->Release();
   if (projects) projects->Release();
   root->Release();
 }
