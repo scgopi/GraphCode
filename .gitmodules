@@ -1,6 +1,10 @@
 [submodule "ThirdParty/ghostty"]
 	path = ThirdParty/ghostty
-	url = https://github.com/ghostty-org/ghostty.git
+	# A fork of ghostty-org/ghostty because graphcode pins a commit that only exists
+	# on the fork's `graphcode-patches` branch: upstream's 3b8141f (opener stderr
+	# drain spins a core forever) backported onto the pinned revision. Drop the fork
+	# once the pin moves past 3b8141f.
+	url = https://github.com/scgopi/ghostty.git
 	shallow = true
 [submodule "ThirdParty/zmx"]
 	path = ThirdParty/zmx
