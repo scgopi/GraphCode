@@ -3961,15 +3961,15 @@ public actor GraphStore {
     // simply vanished. The message now lands in the target's log, its next wake reads
     // it, and the sender is told the truth about what happened rather than either
     // "delivered" or a dead end.
-    // A follow-up question to a finished loop whose session is still up reaches it. The
-    // graph calls a resolved loop "not live" so edges and wakes leave it alone, but a
-    // human asking what it did is the point of keeping the session; the answer changes
-    // nothing about how it resolved (#346). Liveness is asked before the acknowledgement
-    // so a sender reporting to a finished parent still hears "staged" — one `zmx ls`,
-    // not a typing of the message.
-    if target.state == .succeeded || target.state == .failed,
+    // A direct send reaches any loop whose session is still up, whatever its state.
+    // The graph calls a finished, stopped or blocked loop "not live" so edges and wakes
+    // leave it alone, but a sender addressing one loop by id is asking for exactly that
+    // session; the message changes nothing about the loop's state (#346). Liveness is
+    // asked before the acknowledgement so a sender reporting to a parent whose session
+    // has gone still hears "staged" — one `zmx ls`, not a typing of the message.
+    if MessageBus.deliverability(to: target) != nil,
       target.backend.capabilities.supportsMidSessionInput,
-      await onSessionAlive?(target, graph.project.path) == true
+      await hasSessionToTypeInto(target)
     {
       await typeAfterAcknowledging(message, to: target, resolved: true)
       return
@@ -3982,6 +3982,16 @@ public actor GraphStore {
       return
     }
     await typeAfterAcknowledging(message, to: target, resolved: false)
+  }
+
+  /// A remote project's sessions are invisible to the local `zmx ls`, which answers absent
+  /// for every one of them; presence over ssh is what can see them.
+  private func hasSessionToTypeInto(_ node: LoopNode) async -> Bool {
+    if RemoteProjectLocation.parse(projectPath: graph.project.path) != nil {
+      guard let reading = await presenceReading(of: node) else { return false }
+      return reading.presence != .absent
+    }
+    return await onSessionAlive?(node, graph.project.path) == true
   }
 
   /// Types a `node send` message into its target's session after the command that carried
