@@ -56,6 +56,54 @@ struct GoalResolutionFollowUpTests {
     #expect(memory.value.contains { $0.hasPrefix("while you were away") })
   }
 
+  private func stoppedTarget(
+    alive: Bool, delivered: LockIsolated<[String]>, memory: LockIsolated<[String]>
+  ) async -> (GraphStore, UUID) {
+    let store = GraphStore(
+      onDeliverMessage: { _, text, _ in
+        delivered.withValue { $0.append(text) }
+        return true
+      },
+      onSessionAlive: { _, _ in alive },
+      onAppendMemory: { _, entry in memory.withValue { $0.append(entry) } })
+    await store.handle(
+      .createNode(
+        NodeDraft(title: "Docs", loopType: .goalBased, goal: GoalSpec(summary: "Write it"))))
+    let id = await store.graph.nodes[0].id
+    await store.handle(.stopNode(id))
+    return (store, id)
+  }
+
+  @Test
+  func aMessageToAStoppedLoopWithALiveSessionIsTypedInAndLeavesItStopped() async {
+    let delivered = LockIsolated<[String]>([])
+    let memory = LockIsolated<[String]>([])
+    let (store, id) = await stoppedTarget(alive: true, delivered: delivered, memory: memory)
+    let stopped = await store.graph.nodes[id: id]
+    let state = stopped?.state
+    #expect(stopped.map { MessageBus.deliverability(to: $0) != nil } == true)
+
+    await store.handle(.messageNode(id, text: "status?", from: nil, followUp: false))
+    await store.finishSessionTyping()
+
+    #expect(delivered.value.contains { $0.contains("status?") })
+    #expect(!memory.value.contains { $0.hasPrefix("while you were away") })
+    #expect(await store.graph.nodes[id: id]?.state == state)
+  }
+
+  @Test
+  func aMessageToAStoppedLoopWhoseSessionEndedIsStaged() async {
+    let delivered = LockIsolated<[String]>([])
+    let memory = LockIsolated<[String]>([])
+    let (store, id) = await stoppedTarget(alive: false, delivered: delivered, memory: memory)
+
+    await store.handle(.messageNode(id, text: "status?", from: nil, followUp: false))
+    await store.finishSessionTyping()
+
+    #expect(!delivered.value.contains { $0.contains("status?") })
+    #expect(memory.value.contains { $0.hasPrefix("while you were away") })
+  }
+
   // MARK: - /goal stays the command when the prompt moves to a file
 
   @Test
